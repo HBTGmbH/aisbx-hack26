@@ -15,7 +15,7 @@ ctrlc = "3.5.2"
 ratatui = "0.30.2"
 
 [target.'cfg(unix)'.dependencies]
-signal-hook = "0.3.18"
+signal-hook = "0.4.5"
 
 [dev-dependencies]
 # test-support (host guards, test fixtures) for this crate's tests only; never in [dependencies].
