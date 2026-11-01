@@ -1,0 +1,27 @@
+# syntax=docker/sandbox-kit:3
+# Web access for the agent's fetch tools: a v3 mixin with an allow rule and its marker (the inline
+# `build:` is its whole content).
+schemaVersion: "3"
+kind: mixin
+displayName: Web access (WebSearch + WebFetch)
+description: >-
+  Open full outbound egress so Claude Code's WebFetch and OpenCode's webfetch and
+  websearch can reach arbitrary hosts. Deliberately
+  broad: "**" re-opens the general egress that the deny-all posture otherwise
+  closes, so stack it only on sessions that need to browse the open web. See README.md
+  ("Web access") for what each tool needs and the trade-off.
+
+build: |
+  FROM scratch
+  # Marker: tells a process INSIDE the sandbox that this kit is on it (sbx exposes the kit list
+  # to the host only). See kits/statusline/statusline.dockerfile for why, and who reads it.
+  ENV SBX_KIT_WEB=1
+
+capabilities:
+  - type: com.docker.sandbox/network-policy@1
+    config:
+      runtime:
+        allow:
+          # "**", any host, for this sandbox only: the fetch tools are client-side, so the target is
+          # whatever the model picks at run time. Credential injection does not widen.
+          - "**"

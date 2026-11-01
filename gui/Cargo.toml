@@ -1,0 +1,20 @@
+[package]
+name = "aisbx-ui"
+version.workspace = true
+edition.workspace = true
+description = "aisbx-ui: a desktop window for AI coding agents in Docker Sandboxes (sbx)"
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+rust-version = "1.95"
+
+[dependencies]
+aisbx-core = { path = "../core" }
+anyhow = "1.0.104"
+eframe = { version = "0.37.0", default-features = false, features = ["accesskit", "clipboard", "default_fonts", "glow", "wayland", "x11"] }
+# Only to turn on egui's monochrome emoji fonts, which carry glyphs the window draws (theme::fonts).
+egui = { version = "0.37.0", default-features = false, features = ["monochrome_emoji_fonts"] }
+
+[dev-dependencies]
+# The core's host guards and fixtures, for this crate's tests only (see core/Cargo.toml).
+aisbx-core = { path = "../core", features = ["test-support"] }

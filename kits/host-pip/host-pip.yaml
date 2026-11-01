@@ -1,0 +1,35 @@
+# syntax=docker/sandbox-kit:3
+# The host's pip and uv caches, overlaid read-only: a v3 mixin, its image built from host-pip.dockerfile.
+# See docs/addons.md, *Host npm/pip/uv caches (read-only)*. The description is written for the agent:
+# sbx lists it in the context file's `## Kits` section.
+schemaVersion: "3"
+kind: mixin
+displayName: Host pip/uv caches (read-only)
+description: >-
+  The host's pip and uv caches, overlaid read-only at ~/.cache/pip and ~/.cache/uv: uv
+  installs what the host already downloaded without an index, pip reuses it where it reaches
+  one, and new downloads stay in the sandbox. Relevant before installing Python packages,
+  above all without network.
+
+capabilities:
+  - type: com.docker.sandbox/volume@1
+    description: The overlays' upper layers (the sandbox's own pip and uv downloads)
+    config: {path: /var/lib/host-pip, size: 4g}
+
+  - type: com.docker.sandbox/lifecycle@1
+    config:
+      startup:
+        - command: ["sh", "/usr/local/lib/aisbx/host-overlay/overlay.sh", "/var/lib/host-pip", "pip", "uv"]
+          user: "0"
+          description: "Overlay the read-only host pip and uv caches at ~/.cache/pip and ~/.cache/uv (idempotent; tolerates no mount; status in /run/host-caches/{pip,uv}.status)"
+
+  - type: com.docker.sandbox/agent-context@1
+    config:
+      content: |
+        The host's pip and uv caches are overlaid read-only at ~/.cache/pip and ~/.cache/uv; the status is
+        in /run/host-caches/pip.status and uv.status (if one is missing, wait a few seconds). New downloads
+        stay in the sandbox. Without network use `uv sync --offline` or `uv pip install --offline`. pip
+        cannot install without an index: it reuses its cache only where the sandbox has network. A package
+        the host never downloaded cannot be installed offline - say so instead of trying another way.
+        macOS-specific wheels and builds are not usable on Linux. Never write under the /Users/... or
+        /home/... mounts.

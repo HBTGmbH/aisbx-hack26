@@ -1,0 +1,2 @@
+The MCP gateway entry in opencode.json now uses OpenCode 2's own shape (mcp.servers).
+The host now fetches the model list and writes your model picks, so the sandbox no longer asks the gateway itself.

@@ -1,0 +1,31 @@
+# syntax=docker/sandbox-kit:3
+# The host's Gradle caches, read-only: a v3 mixin, its image built from host-gradle.dockerfile.
+# See docs/addons.md, *Host Maven/Gradle caches (read-only)*. The description is written for the agent:
+# sbx lists it in the context file's `## Kits` section.
+schemaVersion: "3"
+kind: mixin
+displayName: Host Gradle caches (read-only)
+description: >-
+  The host's Gradle dependency cache and wrapper distributions, read-only: Gradle builds
+  resolve what the host already downloaded without network, and new downloads stay
+  in the sandbox. Relevant before running Gradle or ./gradlew.
+
+capabilities:
+  - type: com.docker.sandbox/lifecycle@1
+    config:
+      startup:
+        - command: ["sh", "/usr/local/lib/aisbx/host-jvm-caches/startup.sh", "gradle"]
+          user: agent
+          description: "Symlink the mounted host Gradle caches under ~/.host-caches and seed Gradle wrapper dists (idempotent; tolerates missing mounts)"
+
+  # The agent's instructions. No filename: the workload owns the context file.
+  - type: com.docker.sandbox/agent-context@1
+    config:
+      content: |
+        The host's Gradle dependency cache is mounted read-only and wired via
+        GRADLE_RO_DEP_CACHE (Gradle >= 6.1). Resolution reads it transparently; new
+        downloads land in the sandbox-local ~/.gradle/caches. Gradle wrapper dists the
+        host already has are pre-seeded into ~/.gradle/wrapper/dists, so ./gradlew
+        starts without download egress for those versions (others still download as
+        usual). Never write under /home/agent/.host-caches or the /Users/... | /home/...
+        mounts - they are read-only.

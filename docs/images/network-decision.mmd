@@ -1,0 +1,8 @@
+flowchart LR
+    req["Agent opens<br/>a connection"] --> rule{"A rule<br/>allows the host?"}
+    rule -->|yes| fwd["Proxy forwards it,<br/>adds a bound key"]
+    rule -->|no| held["Request held<br/>agent gets 403"]
+    held --> you{"You press y"}
+    you -->|Allow| ok["Rule for this<br/>sandbox only"]
+    you -->|Dismiss| no["Stays blocked,<br/>asks again"]
+    ok -.->|next attempt| fwd

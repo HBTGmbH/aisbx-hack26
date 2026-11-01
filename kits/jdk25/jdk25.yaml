@@ -1,0 +1,7 @@
+# syntax=docker/sandbox-kit:3
+# Temurin JDK 25: a v3 mixin, its image built from jdk25.dockerfile. No hooks and no network on
+# purpose: `sbx kit add` applies the kit to a live sandbox.
+schemaVersion: "3"
+kind: mixin
+displayName: Temurin JDK 25
+description: Install Eclipse Temurin JDK 25 (LTS) and set JAVA_HOME, so JVM/Gradle builds work in the sandbox.

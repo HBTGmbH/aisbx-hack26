@@ -1,0 +1,6 @@
+{
+  "$schema": "https://pi.dev/schemas/settings.schema.json",
+  "defaultProvider": "litellm-acme",
+  "defaultModel": "minimax-m2.5",
+  "enableInstallTelemetry": false
+}

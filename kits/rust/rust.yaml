@@ -1,0 +1,27 @@
+# syntax=docker/sandbox-kit:3
+# The Rust toolchain: a v3 mixin, its image built from rust.dockerfile.
+schemaVersion: "3"
+kind: mixin
+displayName: Rust 1.99.1
+description: >-
+  Install the Rust 1.99.1 toolchain (rustc, cargo, the standard library, clippy, rustfmt) to
+  /opt/rust, so cargo builds and tests work in the sandbox. Builds go to a target folder inside
+  the sandbox, never into the workspace.
+
+capabilities:
+  # The apt sources at install only, for the linker on an image without one.
+  - type: com.docker.sandbox/network-policy@1
+    config:
+      install:
+        allow:
+          - ports.ubuntu.com
+          - archive.ubuntu.com
+          - security.ubuntu.com
+          - download.docker.com
+
+  - type: com.docker.sandbox/lifecycle@1
+    config:
+      install:
+        - command: ["sh", "/usr/local/lib/aisbx/rust/linker.sh"]
+          user: "0"
+          description: Install gcc where the image has no linker

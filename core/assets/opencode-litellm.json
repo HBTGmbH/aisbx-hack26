@@ -1,0 +1,65 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "share": "disabled",
+  "update": "disable",
+  "policies": [
+    {
+      "action": "provider.use",
+      "resource": "opencode",
+      "effect": "deny"
+    },
+    {
+      "action": "provider.use",
+      "resource": "openrouter",
+      "effect": "deny"
+    },
+    {
+      "action": "provider.use",
+      "resource": "gitlab",
+      "effect": "deny"
+    },
+    {
+      "action": "provider.use",
+      "resource": "openai",
+      "effect": "deny"
+    },
+    {
+      "action": "provider.use",
+      "resource": "anthropic",
+      "effect": "deny"
+    },
+    {
+      "action": "provider.use",
+      "resource": "google",
+      "effect": "deny"
+    },
+    {
+      "action": "provider.use",
+      "resource": "xai",
+      "effect": "deny"
+    },
+    {
+      "action": "provider.use",
+      "resource": "groq",
+      "effect": "deny"
+    },
+    {
+      "action": "provider.use",
+      "resource": "amazon-bedrock",
+      "effect": "deny"
+    },
+    {
+      "action": "provider.use",
+      "resource": "github-copilot",
+      "effect": "deny"
+    }
+  ],
+  "default_agent": "plan",
+  "permissions": [
+    {
+      "action": "*",
+      "resource": "*",
+      "effect": "allow"
+    }
+  ]
+}

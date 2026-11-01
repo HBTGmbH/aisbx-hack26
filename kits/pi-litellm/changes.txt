@@ -1,0 +1,2 @@
+Pi's file search now has fd, so Pi no longer warns that fd is missing.
+The host now fetches the model list and writes your model picks, so the sandbox no longer asks the gateway itself.

@@ -1,0 +1,50 @@
+name: Bug report
+description: Something in aisbx, aisbx-ui, the headless commands or a kit does not work.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Remove keys, tokens and gateway URLs before you paste output. Report security problems through SECURITY.md, not here.
+  - type: input
+    id: sbx
+    attributes:
+      label: sbx version
+      description: The output of `sbx version`.
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options: [macOS, Linux, Windows]
+    validations:
+      required: true
+  - type: dropdown
+    id: frontend
+    attributes:
+      label: Where
+      options: [aisbx (terminal), aisbx-ui (window), headless (aisbx up / run / ...), plain sbx with a kit]
+    validations:
+      required: true
+  - type: input
+    id: kits
+    attributes:
+      label: Backend and addons
+      placeholder: claude-anthropic + jdk25, rtk
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+    validations:
+      required: true
+  - type: textarea
+    id: result
+    attributes:
+      label: What you expected and what happened
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Output or job log
+      render: text

@@ -1,0 +1,37 @@
+# syntax=docker/sandbox-kit:3
+# The host's npm cache, overlaid read-only: a v3 mixin, its image built from host-npm.dockerfile.
+# See docs/addons.md, *Host npm/pip/uv caches (read-only)*. The description is written for the agent:
+# sbx lists it in the context file's `## Kits` section. No cache path on purpose: a stacked
+# pkg-cache keeps its own.
+schemaVersion: "3"
+kind: mixin
+displayName: Host npm cache (read-only)
+description: >-
+  The host's npm cache, overlaid read-only at ~/.npm/_cacache: npm installs what the host
+  already downloaded without the registry, and new downloads stay in the sandbox. Relevant
+  before installing npm packages, above all without network.
+
+capabilities:
+  # A volume, since the kernel refuses an overlay upper on the sandbox's own root filesystem. The
+  # size caps what the sandbox downloads on top of the host's cache.
+  - type: com.docker.sandbox/volume@1
+    description: The overlay's upper layer (the sandbox's own npm downloads)
+    config: {path: /var/lib/host-npm, size: 4g}
+
+  - type: com.docker.sandbox/lifecycle@1
+    config:
+      # As root, since it mounts; the overlay itself is mounted as uid 1000.
+      startup:
+        - command: ["sh", "/usr/local/lib/aisbx/host-overlay/overlay.sh", "/var/lib/host-npm", "npm"]
+          user: "0"
+          description: "Overlay the read-only host npm cache at ~/.npm/_cacache (idempotent; tolerates no mount; status in /run/host-caches/npm.status)"
+
+  - type: com.docker.sandbox/agent-context@1
+    config:
+      content: |
+        The host's npm cache is overlaid read-only at ~/.npm/_cacache; the status is in
+        /run/host-caches/npm.status (if it is missing, wait a few seconds). New downloads stay in the sandbox.
+        Without network, install from it with `npm ci --offline` or `npm install --offline`. A package the
+        host never downloaded cannot be installed offline - say so instead of trying another way.
+        macOS-specific builds (darwin binaries of esbuild, rollup and the like) are not usable on Linux.
+        Never write under the /Users/... or /home/... mounts.

@@ -1,0 +1,5 @@
+flowchart LR
+    backend["backend kit<br/>claude-litellm<br/>agent and account"] --> image
+    gen["generated kit<br/>litellm-acme-claude<br/>gateway host, key placeholder"] --> image
+    add["addon kits<br/>jdk25, rtk"] --> image
+    image["sbx create<br/>builds the kit images<br/>with Docker"] --> sb["sandbox<br/>claude-litellm-my-project"]

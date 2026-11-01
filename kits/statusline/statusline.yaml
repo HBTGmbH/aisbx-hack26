@@ -1,0 +1,27 @@
+# syntax=docker/sandbox-kit:3
+# A status line for Claude Code inside the sandbox: a v3 mixin, its image built from
+# statusline.dockerfile (the scripts and the marker).
+schemaVersion: "3"
+kind: mixin
+displayName: Status line (sandbox, model, context, usage)
+description: >-
+  Give Claude Code inside the sandbox a two-line status line: which sandbox it is
+  (⬢ name), which stackable kits are on it, the folder, the model and the live context
+  fill, and under that the session total (Σ, subagents included), what it has cost and how
+  much of the 5h/7d limit is left. Plus a row body for each running subagent in the panel
+  under the prompt - its own context fill, runtime, pace and a sparkline. Ships
+  /usr/local/lib/aisbx/statusline/{statusline,subagent-statusline}.sh and points
+  ~/.claude/settings.json at them from an install hook. Adds no network egress and installs
+  nothing. Inert on an OpenCode sandbox - OpenCode does not read ~/.claude/settings.json. See
+  README.md ("Status line inside the sandbox").
+
+# No network, credential, volume or generated file on purpose: `sbx kit add` applies the kit to a
+# live sandbox.
+
+capabilities:
+  - type: com.docker.sandbox/lifecycle@1
+    config:
+      install:
+        - command: ["sh", "/usr/local/lib/aisbx/statusline/install.sh"]
+          user: agent
+          description: Point ~/.claude/settings.json at statusline.sh and subagent-statusline.sh (merged)

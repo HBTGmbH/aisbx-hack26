@@ -1,0 +1,25 @@
+[package]
+name = "aisbx-core"
+version.workspace = true
+edition.workspace = true
+description = "The shared core of aisbx: sbx commands, kits, connections, tokens and the screen logic"
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+name = "aisbx_core"
+
+[features]
+# Host guards and `testkit` for the frontends' tests: on only in their [dev-dependencies].
+test-support = []
+
+[dependencies]
+anyhow = "1.0.104"
+ctrlc = "3.5.2"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+sha2 = "0.11.0"
+# Only for the local UTC offset, which std cannot give; see `state::init_clock`.
+time = { version = "0.3.54", default-features = false, features = ["std", "local-offset"] }
+yaml-rust2 = { version = "0.13.0", default-features = false }

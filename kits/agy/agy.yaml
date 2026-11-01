@@ -1,0 +1,107 @@
+# syntax=docker/sandbox-kit:3
+# Google's Antigravity CLI (`agy`): a v3 workload, its image built from agy.dockerfile on
+# docker/sbx-kits-contrib's Antigravity image.
+schemaVersion: "3"
+kind: workload
+displayName: Antigravity CLI (Google)
+description: Run Google's Antigravity CLI (`agy`) from the image docker/sbx-kits-contrib builds daily. Sign in with your Google account once, inside any agy sandbox - sbx's host proxy keeps the real tokens in the host keychain as one global `antigravity` secret and every agy sandbox starts signed in holding only sentinels - or store a Gemini API key with `sbx secret set google`, which the proxy injects the same way. agy's log sink is denied, its changelog host left out.
+
+# The image of docker/sbx-kits-contrib's `antigravity` kit, not the kit: the allow-list is this
+# file's (docs/agents.md, *Antigravity (agy)*). aisbx writes both credentials' bindings
+# (core/src/bindings.rs).
+
+capabilities:
+  - type: com.docker.sandbox/sbx@1
+
+  - type: com.docker.sandbox/network-policy@1
+    config:
+      runtime:
+        allow:
+          # Sign-in and account.
+          - accounts.google.com
+          - oauth2.googleapis.com                 # the OAuth token endpoint (code exchange, refresh)
+          - www.googleapis.com                    # userinfo and other Google APIs agy calls
+          - antigravity.google
+          - antigravity.google.com
+          - lh3.googleusercontent.com             # the account picture; the eligibility check fails without it
+          - www.gstatic.com                       # agy's plugin marketplace catalog
+          # The model API: the Antigravity / Code Assist backends, and the Gemini API for API-key mode.
+          - cloudcode-pa.googleapis.com
+          - daily-cloudcode-pa.googleapis.com
+          - aicode.googleapis.com
+          - generativelanguage.googleapis.com
+          # Feature flags and the URL safety check agy's web tools run.
+          - antigravity-unleash.goog
+          - safebrowsing.googleapis.com
+          # agy's self-update (`agy update`): the release manifest, then the package. The second is a
+          # general-purpose host: docs/agents.md, *Antigravity (agy)*, says how to deny it per sandbox.
+          - antigravity-cli-auto-updater-974169037036.us-central1.run.app
+          - storage.googleapis.com
+          - plugins.gradle.org
+          - plugins-artifacts.gradle.org
+          - ports.ubuntu.com
+          - archive.ubuntu.com
+          - security.ubuntu.com
+          - download.docker.com
+          # Not allowed on purpose: raw.githubusercontent.com. Not allowed and not denied: github.com.
+        # Google's log sink, called at every start. An explicit deny, since an implicit one would hold
+        # a new approval at every start.
+        deny:
+          - play.googleapis.com
+
+  # optional: a missing key or sign-in is no setup error - the first interactive start signs in.
+  - type: com.docker.sandbox/credential@1
+    optional: true
+    description: Gemini API key for Antigravity's API-key mode (the Google sign-in needs none)
+    config:
+      service: google
+      phase: runtime
+      apiKey:
+        name: GEMINI_API_KEY
+        proxyManaged: true
+        inject:
+          - {domain: generativelanguage.googleapis.com, header: x-goog-api-key, format: "%s"}
+
+  # A separate service from `google`, so the OAuth bearer and the API key never compete for a host.
+  # Adapted from github.com/shelajev/agy-sbx-kit (commit 026a3a5, Apache-2.0).
+  - type: com.docker.sandbox/credential@1
+    optional: true
+    description: Google OAuth session used by Antigravity CLI (the proxy keeps the real tokens on the host)
+    config:
+      service: antigravity
+      phase: runtime
+      oauth:
+        tokenEndpoint: {host: oauth2.googleapis.com, path: /token}
+        resourceHosts:
+          - aicode.googleapis.com
+          - cloudcode-pa.googleapis.com
+          - daily-cloudcode-pa.googleapis.com
+          - www.googleapis.com
+        sentinels:
+          accessToken: agy-oauth-access-proxy-managed
+          refreshToken: agy-oauth-refresh-proxy-managed
+        credentialFile:
+          path: ~/.gemini/antigravity-cli/antigravity-oauth-token
+          structure:
+            token:
+              access_token: "{{.AccessToken}}"
+              token_type: Bearer
+              refresh_token: "{{.RefreshToken}}"
+              # In the past on purpose: agy then refreshes through the proxy at every start.
+              expiry: "2000-01-01T00:00:00Z"
+            auth_method: consumer
+
+  # No volumes: agy's state is container-local; its sign-in is the host-global credential above.
+  - type: com.docker.sandbox/lifecycle@1
+    config:
+      startup:
+        - command: ["sh", "/usr/local/lib/aisbx/agy/settings.sh", "mode"]
+          user: agent
+          description: Select Gemini API-key mode only when a Google API key is injected
+        - command: ["sh", "/usr/local/lib/aisbx/agy/settings.sh", "mcp"]
+          user: agent
+          description: Register the sandbox MCP gateway in Antigravity's user configuration
+
+  - type: com.docker.sandbox/agent-context@1
+    config:
+      filename: AGENTS.md

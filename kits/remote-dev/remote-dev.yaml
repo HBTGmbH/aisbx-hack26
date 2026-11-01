@@ -1,0 +1,40 @@
+# syntax=docker/sandbox-kit:3
+# Egress for an editor's remote server - a v3 mixin: allow rules and a marker.
+schemaVersion: "3"
+kind: mixin
+displayName: Remote dev (VS Code / JetBrains over SSH)
+description: >-
+  Open the egress an editor needs to install its own server INSIDE the sandbox, so
+  sbx's SSH endpoint (ssh <name>.sbx) is usable from VS Code Remote-SSH, Cursor
+  and JetBrains Gateway. The SSH connection itself needs nothing from this kit - it
+  terminates at the host daemon - but the first connect downloads a server into the
+  sandbox, and under a deny-all posture that download is blocked. See README.md
+  ("Editor and app integrations").
+
+build: |
+  FROM scratch
+  # Marker: tells a process INSIDE the sandbox that this kit is on it (sbx exposes the kit list
+  # to the host only). See kits/statusline/statusline.dockerfile for why, and who reads it.
+  ENV SBX_KIT_REMOTE_DEV=1
+
+capabilities:
+  - type: com.docker.sandbox/network-policy@1
+    config:
+      runtime:
+        # Not "**" on purpose: an editor's download hosts are a short, fixed list.
+        allow:
+          # VS Code (and any VS Code-derived remote server)
+          - update.code.visualstudio.com
+          - vscode.download.prss.microsoft.com
+          # Extensions installed into the remote server
+          - marketplace.visualstudio.com
+          - "*.vsassets.io"
+          - "*.gallerycdn.vsassets.io"
+          # Cursor's own server + extension endpoints
+          - "*.cursor.sh"
+          - cursor.blob.core.windows.net
+          # JetBrains Gateway's IDE backend (IntelliJ IDEA, ...)
+          - download.jetbrains.com
+          - download-cdn.jetbrains.com
+          - cache-redirector.jetbrains.com
+          - plugins.jetbrains.com

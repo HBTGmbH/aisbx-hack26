@@ -1,0 +1,86 @@
+# syntax=docker/sandbox-kit:3
+# Claude Code on a named Anthropic setup token: a v3 workload, its image built from
+# claude-token.dockerfile. The capabilities after the network policy are the same as in
+# kits/claude-litellm/claude-litellm.yaml.
+schemaVersion: "3"
+kind: workload
+displayName: Claude Code (setup token)
+description: Run Claude Code against an Anthropic subscription using a named setup token, so this sandbox has its own account alongside the host-global `/login` of kits/claude-anthropic. It declares no credentials of its own - that is the whole point. The token is stored in the host keychain and swapped in by the proxy; the sandbox only ever holds a placeholder.
+
+# No credential on purpose: with one, the proxy would overwrite the token with the host-global
+# /login. docs/accounts.md, *Setup tokens: a second account*, says how to store a token.
+
+capabilities:
+  - type: com.docker.sandbox/sbx@1
+
+  - type: com.docker.sandbox/network-policy@1
+    config:
+      install:
+        allow:
+          - downloads.claude.ai          # `claude update` (files/claude/update.sh)
+      runtime:
+        allow:
+          # Not allowed on purpose: bridge.claudeusercontent.com (/remote-control).
+          - api.anthropic.com            # Messages API - the one host the token is swapped in for
+          - downloads.claude.ai          # the dashboard's `claude update` before a session
+          - code.claude.com              # the Claude Code docs its bundled claude-code skill fetches
+          - plugins.gradle.org
+          - plugins-artifacts.gradle.org
+          - ports.ubuntu.com
+          - archive.ubuntu.com
+          - security.ubuntu.com
+          - download.docker.com
+
+  - type: com.docker.sandbox/volume@1
+    description: Conversation transcripts
+    config: {path: /home/agent/.claude/projects, size: 2g}
+  - type: com.docker.sandbox/volume@1
+    description: Per-session state (`claude -c`)
+    config: {path: /home/agent/.claude/sessions, size: 512m}
+  - type: com.docker.sandbox/volume@1
+    description: TodoWrite state
+    config: {path: /home/agent/.claude/todos, size: 512m}
+  - type: com.docker.sandbox/volume@1
+    description: Bash state across sessions
+    config: {path: /home/agent/.claude/shell-snapshots, size: 512m}
+  - type: com.docker.sandbox/volume@1
+    description: Local feature-flag cache
+    config: {path: /home/agent/.claude/statsig, size: 512m}
+
+  - type: com.docker.sandbox/agent-skills@1
+    optional: true
+    config: {path: /home/agent/.local/share/aisbx/skills-store, mode: readwrite}
+
+  - type: com.docker.sandbox/lifecycle@1
+    config:
+      install:
+        - command: ["sh", "/usr/local/lib/aisbx/claude/prepare.sh"]
+          user: "0"
+          description: Make ~/.claude and the session volumes the agent's
+        - command: ["sh", "/usr/local/lib/aisbx/claude/seed.sh"]
+          user: agent
+          env: [WORKSPACE_DIR, SBX_CRED_ANTHROPIC_MODE, MCP_GATEWAY_URL, MCP_SENTINEL_TOKEN_NAME,
+                CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC, DISABLE_TELEMETRY, DISABLE_ERROR_REPORTING,
+                DISABLE_FEEDBACK_COMMAND, DISABLE_BUG_COMMAND, CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY,
+                DISABLE_GROWTHBOOK, DO_NOT_TRACK, DISABLE_AUTOUPDATER]
+          description: Trust the workspace, bypass permissions, register the MCP gateway
+        - command: ["sh", "/usr/local/lib/aisbx/skills/skills-store.sh", "/home/agent/.claude/skills"]
+          user: agent
+          description: Link the shared skills store into ~/.claude/skills
+        - command: ["sh", "/usr/local/lib/aisbx/claude/update.sh"]
+          user: agent
+          env: [CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC, DISABLE_TELEMETRY, DISABLE_ERROR_REPORTING,
+                DISABLE_FEEDBACK_COMMAND, DISABLE_BUG_COMMAND, CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY,
+                DISABLE_GROWTHBOOK, DO_NOT_TRACK, DISABLE_AUTOUPDATER]
+          description: Update Claude Code to the current release
+      startup:
+        - command: ["sh", "/usr/local/lib/aisbx/claude/prepare.sh"]
+          user: "0"
+          description: Keep the session volumes the agent's
+        - command: ["sh", "/usr/local/lib/aisbx/skills/skills-store.sh", "/home/agent/.claude/skills"]
+          user: agent
+          description: Refresh the shared-skills links
+
+  - type: com.docker.sandbox/agent-context@1
+    config:
+      filename: CLAUDE.md

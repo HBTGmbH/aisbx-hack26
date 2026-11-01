@@ -1,0 +1,53 @@
+{
+  "$schema": "https://pi.dev/schemas/models.schema.json",
+  "providers": {
+    "litellm-acme": {
+      "name": "LiteLLM acme",
+      "baseUrl": "https://litellm.example.com/v1",
+      "api": "openai-completions",
+      "apiKey": "sbx-cs-aisbx-llm-acme",
+      "headers": {
+        "X-Kept": "yes"
+      },
+      "models": [
+        {
+          "id": "claude-opus-5",
+          "name": "Claude Opus 5",
+          "contextWindow": 1000000,
+          "maxTokens": 128000,
+          "reasoning": true,
+          "input": [
+            "text",
+            "image"
+          ]
+        },
+        {
+          "id": "glm-5",
+          "name": "GLM 5",
+          "contextWindow": 200000,
+          "cost": {
+            "input": 1,
+            "output": 2,
+            "cacheRead": 0,
+            "cacheWrite": 0
+          }
+        },
+        {
+          "id": "retired-model",
+          "name": "Retired"
+        }
+      ]
+    },
+    "ollama": {
+      "baseUrl": "http://localhost:11434/v1",
+      "api": "openai-completions",
+      "apiKey": "ollama",
+      "models": [
+        {
+          "id": "qwen2.5-coder:7b"
+        }
+      ]
+    }
+  },
+  "x-user-key": 1
+}

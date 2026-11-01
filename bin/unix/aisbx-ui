@@ -1,0 +1,159 @@
+#!/bin/sh
+# aisbx-ui - launcher for the aisbx desktop GUI (macOS / Linux): bin/unix/aisbx for gui/ and
+# -p aisbx-ui. bin/unix/aisbx explains each step and the environment (AISBX_REBUILD,
+# AISBX_SKIP_BUILD, AISBX_HOME); keep the two and bin/windows/aisbx-ui.ps1 in step.
+
+set -eu
+
+self=$0
+while [ -h "$self" ]; do
+    link=$(readlink "$self")
+    case $link in
+        /*) self=$link ;;
+        *) self=$(dirname -- "$self")/$link ;;
+    esac
+done
+# In a subshell: the GUI starts in the folder the user is in.
+here=$(cd -P -- "$(dirname -- "$self")" && pwd)     # <repo>/bin/unix
+root=$(dirname -- "$(dirname -- "$here")")
+crate=$root/gui
+core=$root/core
+build_dir=$here/build
+bin=$build_dir/aisbx-ui
+
+if [ ! -f "$root/Cargo.toml" ] || [ ! -f "$crate/Cargo.toml" ] || [ ! -f "$core/Cargo.toml" ] ||
+    [ ! -d "$root/kits" ]; then
+    cat >&2 <<EOF
+aisbx-ui: $root does not look like the aisbx checkout - expected
+       $root/Cargo.toml, $crate/Cargo.toml, $core/Cargo.toml and $root/kits to exist.
+       Keep this script in the repository's bin/unix/ directory and symlink it onto your
+       PATH rather than copying it somewhere else.
+EOF
+    exit 1
+fi
+
+truthy() {
+    case ${1:-} in
+        '' | 0 | [Nn][Oo] | [Oo][Ff][Ff] | [Ff][Aa][Ll][Ss][Ee]) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
+rebuild=0
+skip_build=0
+truthy "${AISBX_REBUILD:-}" && rebuild=1
+truthy "${AISBX_SKIP_BUILD:-}" && skip_build=1
+if [ "${1:-}" = "--rebuild" ]; then
+    rebuild=1
+    shift
+fi
+
+missing=0
+
+if ! command -v sbx >/dev/null 2>&1; then
+    missing=1
+    sbx_dir=
+    for cand in /opt/homebrew/bin /usr/local/bin "$HOME/.local/bin" "$HOME/bin"; do
+        if [ -x "$cand/sbx" ]; then
+            sbx_dir=$cand
+            break
+        fi
+    done
+    if [ -n "$sbx_dir" ]; then
+        cat >&2 <<EOF
+aisbx-ui: sbx is installed at $sbx_dir/sbx, but $sbx_dir is not on your PATH.
+       Add it to your shell profile (~/.zshrc or ~/.bashrc) and open a new shell:
+
+           export PATH="$sbx_dir:\$PATH"
+
+EOF
+    else
+        cat >&2 <<'EOF'
+aisbx-ui: the sbx CLI (Docker Sandboxes) is not on your PATH. The dashboard runs every
+       operation through it, so it cannot start without it. Install it with:
+
+           brew trust docker/tap
+           brew install docker/tap/sbx
+
+       or download a binary from https://github.com/docker/sbx-releases/releases and put
+       it on your PATH. Then sign in once with `sbx login`.
+
+EOF
+    fi
+fi
+
+if [ "$skip_build" -eq 1 ]; then
+    if [ ! -x "$bin" ]; then
+        cat >&2 <<EOF
+aisbx-ui: AISBX_SKIP_BUILD is set, but there is no binary at
+       $bin.
+       Unset it and run aisbx-ui again to build one.
+
+EOF
+        missing=1
+    fi
+elif ! command -v cargo >/dev/null 2>&1; then
+    missing=1
+    if [ -x "$HOME/.cargo/bin/cargo" ]; then
+        cat >&2 <<EOF
+aisbx-ui: cargo is installed, but its directory is not on your PATH:
+
+           $HOME/.cargo/bin/cargo
+
+       Add it to your shell profile (~/.zshrc or ~/.bashrc) and open a new shell:
+
+           export PATH="\$HOME/.cargo/bin:\$PATH"
+
+EOF
+    else
+        cat >&2 <<'EOF'
+aisbx-ui: cargo (the Rust toolchain) is not on your PATH. It builds the dashboard from
+       core/ and gui/. Install it with rustup:
+
+           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+
+       (or `brew install rust`), then make sure its bin directory is on your PATH -
+       rustup adds this line to your shell profile, but only new shells pick it up:
+
+           export PATH="$HOME/.cargo/bin:$PATH"
+
+       If you already have a built binary in bin/unix/build/, AISBX_SKIP_BUILD=1 aisbx-ui
+       runs it without cargo.
+
+EOF
+    fi
+fi
+
+[ "$missing" -eq 0 ] || exit 1
+
+# Pruned: target/ and dotfiles (see bin/unix/aisbx).
+stale=0
+if [ ! -x "$bin" ]; then
+    stale=1
+elif [ -n "$(find "$core" "$crate" "$root/Cargo.toml" "$root/Cargo.lock" \( -type d -name target -o -name '.?*' \) -prune -o -type f -newer "$bin" -print 2>/dev/null | head -n 1)" ]; then
+    stale=1
+fi
+
+if [ "$skip_build" -eq 0 ] && { [ "$stale" -eq 1 ] || [ "$rebuild" -eq 1 ]; }; then
+    printf 'aisbx-ui: building the dashboard (cargo build --release)...\n' >&2
+    mkdir -p "$build_dir"
+    if ! cargo build --release \
+        --manifest-path "$root/Cargo.toml" \
+        -p aisbx-ui \
+        --target-dir "$root/target"; then
+        printf '\naisbx-ui: the build failed - see the cargo output above.\n' >&2
+        exit 1
+    fi
+    # Rename over it: a copy over a running binary fails with "text file busy".
+    cp "$root/target/release/aisbx-ui" "$bin.new"
+    chmod +x "$bin.new"
+    mv -f "$bin.new" "$bin"
+    printf 'aisbx-ui: built %s\n' "$bin" >&2
+fi
+
+if [ -z "${AISBX_HOME:-}" ]; then
+    AISBX_HOME=$root
+    export AISBX_HOME
+fi
+
+exec "$bin" "$@"

@@ -1,0 +1,19 @@
+# syntax=docker/sandbox-kit:3
+# RTK, the token reducer, wired into Claude Code and OpenCode: a v3 mixin, its image built from
+# rtk.dockerfile.
+schemaVersion: "3"
+kind: mixin
+displayName: RTK (token reducer)
+description: Install the RTK CLI proxy and wire it into Claude Code / OpenCode so dev-command output is filtered (60-90% fewer tokens).
+
+# No network on purpose: `sbx kit add` applies the kit to a live sandbox.
+
+capabilities:
+  - type: com.docker.sandbox/lifecycle@1
+    config:
+      install:
+        - command: ["sh", "/usr/local/lib/aisbx/rtk/activate.sh"]
+          user: agent
+          # A hook sees only what it declares: rtk's switch (this kit's ENV) for `rtk init`.
+          env: [RTK_TELEMETRY_DISABLED]
+          description: "Activate rtk: Claude Code hook + OpenCode plugin (idempotent)"

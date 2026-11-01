@@ -1,0 +1,181 @@
+#!/bin/sh
+# aisbx - launcher for the aisbx dashboard (macOS / Linux).
+#
+# Put this directory on your PATH, or symlink this file into a directory on your PATH:
+#     export PATH="/path/to/aisbx/bin/unix:$PATH"
+#     ln -s /path/to/aisbx/bin/unix/aisbx ~/.local/bin/aisbx
+#
+# Each run checks for sbx, and for cargo when it must build. It rebuilds bin/unix/build/aisbx
+# when a file under core/ or tui/, Cargo.toml or Cargo.lock is newer than the binary, then runs
+# the binary with your arguments. bin/windows/aisbx.ps1 is the same launcher: keep the two in step.
+#
+# Environment:
+#   AISBX_REBUILD=1      build even when the binary looks current (same as: aisbx --rebuild)
+#   AISBX_SKIP_BUILD=1   never build: run the existing binary without cargo.
+#                        Wins over AISBX_REBUILD.
+#   AISBX_HOME      the checkout the dashboard reads kits/ from. Default: this checkout.
+
+set -eu
+
+# ---- locate this script's checkout, following symlinks --------------------------------------
+
+self=$0
+while [ -h "$self" ]; do
+    link=$(readlink "$self")
+    case $link in
+        /*) self=$link ;;
+        *) self=$(dirname -- "$self")/$link ;;
+    esac
+done
+# cd only in a subshell: the dashboard acts on the folder the user starts it in.
+here=$(cd -P -- "$(dirname -- "$self")" && pwd)     # <repo>/bin/unix
+root=$(dirname -- "$(dirname -- "$here")")
+crate=$root/tui
+core=$root/core
+build_dir=$here/build
+bin=$build_dir/aisbx
+
+if [ ! -f "$root/Cargo.toml" ] || [ ! -f "$crate/Cargo.toml" ] || [ ! -f "$core/Cargo.toml" ] ||
+    [ ! -d "$root/kits" ]; then
+    cat >&2 <<EOF
+aisbx: $root does not look like the aisbx checkout - expected
+       $root/Cargo.toml, $crate/Cargo.toml, $core/Cargo.toml and $root/kits to exist.
+       Keep this script in the repository's bin/unix/ directory and symlink it onto your
+       PATH rather than copying it somewhere else.
+EOF
+    exit 1
+fi
+
+# ---- arguments and switches -----------------------------------------------------------------
+
+truthy() {
+    case ${1:-} in
+        '' | 0 | [Nn][Oo] | [Oo][Ff][Ff] | [Ff][Aa][Ll][Ss][Ee]) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
+rebuild=0
+skip_build=0
+truthy "${AISBX_REBUILD:-}" && rebuild=1
+truthy "${AISBX_SKIP_BUILD:-}" && skip_build=1
+if [ "${1:-}" = "--rebuild" ]; then
+    rebuild=1
+    shift
+fi
+
+# ---- are the tools it needs installed? ------------------------------------------------------
+
+missing=0
+
+if ! command -v sbx >/dev/null 2>&1; then
+    missing=1
+    sbx_dir=
+    for cand in /opt/homebrew/bin /usr/local/bin "$HOME/.local/bin" "$HOME/bin"; do
+        if [ -x "$cand/sbx" ]; then
+            sbx_dir=$cand
+            break
+        fi
+    done
+    if [ -n "$sbx_dir" ]; then
+        cat >&2 <<EOF
+aisbx: sbx is installed at $sbx_dir/sbx, but $sbx_dir is not on your PATH.
+       Add it to your shell profile (~/.zshrc or ~/.bashrc) and open a new shell:
+
+           export PATH="$sbx_dir:\$PATH"
+
+EOF
+    else
+        cat >&2 <<'EOF'
+aisbx: the sbx CLI (Docker Sandboxes) is not on your PATH. The dashboard runs every
+       operation through it, so it cannot start without it. Install it with:
+
+           brew trust docker/tap
+           brew install docker/tap/sbx
+
+       or download a binary from https://github.com/docker/sbx-releases/releases and put
+       it on your PATH. Then sign in once with `sbx login`.
+
+EOF
+    fi
+fi
+
+if [ "$skip_build" -eq 1 ]; then
+    if [ ! -x "$bin" ]; then
+        cat >&2 <<EOF
+aisbx: AISBX_SKIP_BUILD is set, but there is no binary at
+       $bin.
+       Unset it and run aisbx again to build one.
+
+EOF
+        missing=1
+    fi
+elif ! command -v cargo >/dev/null 2>&1; then
+    missing=1
+    if [ -x "$HOME/.cargo/bin/cargo" ]; then
+        cat >&2 <<EOF
+aisbx: cargo is installed, but its directory is not on your PATH:
+
+           $HOME/.cargo/bin/cargo
+
+       Add it to your shell profile (~/.zshrc or ~/.bashrc) and open a new shell:
+
+           export PATH="\$HOME/.cargo/bin:\$PATH"
+
+EOF
+    else
+        cat >&2 <<'EOF'
+aisbx: cargo (the Rust toolchain) is not on your PATH. It builds the dashboard from
+       core/ and tui/. Install it with rustup:
+
+           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+
+       (or `brew install rust`), then make sure its bin directory is on your PATH -
+       rustup adds this line to your shell profile, but only new shells pick it up:
+
+           export PATH="$HOME/.cargo/bin:$PATH"
+
+       If you already have a built binary in bin/unix/build/, AISBX_SKIP_BUILD=1 aisbx
+       runs it without cargo.
+
+EOF
+    fi
+fi
+
+[ "$missing" -eq 0 ] || exit 1
+
+# ---- is the binary current? -----------------------------------------------------------------
+
+# Prune target/ and dotfiles: the Finder rewrites .DS_Store, which must not trigger a build.
+stale=0
+if [ ! -x "$bin" ]; then
+    stale=1
+elif [ -n "$(find "$core" "$crate" "$root/Cargo.toml" "$root/Cargo.lock" \( -type d -name target -o -name '.?*' \) -prune -o -type f -newer "$bin" -print 2>/dev/null | head -n 1)" ]; then
+    stale=1
+fi
+
+if [ "$skip_build" -eq 0 ] && { [ "$stale" -eq 1 ] || [ "$rebuild" -eq 1 ]; }; then
+    printf 'aisbx: building the dashboard (cargo build --release)...\n' >&2
+    mkdir -p "$build_dir"
+    if ! cargo build --release \
+        --manifest-path "$root/Cargo.toml" \
+        -p aisbx \
+        --target-dir "$root/target"; then
+        printf '\naisbx: the build failed - see the cargo output above.\n' >&2
+        exit 1
+    fi
+    # Rename over it: a copy over a running binary fails with "text file busy".
+    cp "$root/target/release/aisbx" "$bin.new"
+    chmod +x "$bin.new"
+    mv -f "$bin.new" "$bin"
+    printf 'aisbx: built %s\n' "$bin" >&2
+fi
+
+# ---- run it ---------------------------------------------------------------------------------
+
+if [ -z "${AISBX_HOME:-}" ]; then
+    AISBX_HOME=$root
+    export AISBX_HOME
+fi
+
+exec "$bin" "$@"

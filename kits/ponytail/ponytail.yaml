@@ -1,0 +1,27 @@
+# syntax=docker/sandbox-kit:3
+# Ponytail, the lazy-senior-dev prompt, for Claude Code and OpenCode: a v3 mixin, its image built from
+# ponytail.dockerfile. See docs/addons.md, *Ponytail (lazy senior dev)*.
+schemaVersion: "3"
+kind: mixin
+displayName: Ponytail (lazy senior dev)
+description: Load the Ponytail prompt into Claude Code / OpenCode - a lazy-senior-dev mode with the commands /ponytail [lite|full|ultra|off], /ponytail-review, /ponytail-audit, /ponytail-debt, /ponytail-gain and /ponytail-help.
+
+capabilities:
+  # GitHub at install only: `claude plugin marketplace add` clones the repository.
+  - type: com.docker.sandbox/network-policy@1
+    config:
+      install:
+        allow:
+          - github.com
+
+  - type: com.docker.sandbox/lifecycle@1
+    config:
+      install:
+        - command: ["sh", "/usr/local/lib/aisbx/ponytail/activate.sh"]
+          user: agent
+          # A hook sees only the variables it declares: every hook that runs `claude` declares
+          # the Claude Code workloads' telemetry switches.
+          env: [CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC, DISABLE_TELEMETRY, DISABLE_ERROR_REPORTING,
+                DISABLE_FEEDBACK_COMMAND, DISABLE_BUG_COMMAND, CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY,
+                DISABLE_GROWTHBOOK, DO_NOT_TRACK, DISABLE_AUTOUPDATER]
+          description: "Activate ponytail: OpenCode plugin shim + Claude Code marketplace/plugin (idempotent)"

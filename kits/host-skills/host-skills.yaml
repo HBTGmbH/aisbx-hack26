@@ -1,0 +1,31 @@
+# syntax=docker/sandbox-kit:3
+# The host's own skills, read-only: a v3 mixin, its image built from host-skills.dockerfile.
+# See docs/addons.md, *Host skills (read-only)*. The description is written for the agent: sbx lists it
+# in the context file's `## Kits` section.
+schemaVersion: "3"
+kind: mixin
+displayName: Host skills (read-only)
+description: >-
+  The host's own skills (~/.agents/skills and ~/.claude/skills), mounted read-only and
+  linked into the skill folders this agent reads. Relevant when a skill is missing, or
+  before changing one: they cannot be edited here.
+
+capabilities:
+  - type: com.docker.sandbox/lifecycle@1
+    config:
+      startup:
+        - command: ["sh", "/usr/local/lib/aisbx/host-skills/startup.sh"]
+          user: agent
+          description: "Link the read-only host skills into ~/.agents/skills and ~/.claude/skills (idempotent; tolerates no mount; status in ~/.cache/host-skills/status)"
+
+  - type: com.docker.sandbox/agent-context@1
+    config:
+      content: |
+        The host's skills are mounted read-only and linked into ~/.agents/skills and
+        ~/.claude/skills (on Antigravity also under ~/.gemini). Those linked skills are read-only:
+        to change one, ask the user to change it on the host. Which skills were linked, and which
+        were skipped and why (clash, dup, outside, unreachable), is in ~/.cache/host-skills/status.
+        A skill added or removed on the host shows up at the next session aisbx starts (a session
+        started any other way may begin before the links are made); during a session only if the
+        agent reloads its skill folders by itself. An edit to a linked skill's files shows at once.
+        Never write under the /Users/... or /home/... mounts.

@@ -1,0 +1,39 @@
+# syntax=docker/sandbox-kit:3
+# UNMEASURED: treat this kit as an experiment (docs/addons.md, *Headroom (context compression proxy, unmeasured)*).
+schemaVersion: "3"
+kind: mixin
+displayName: Headroom (context compression proxy, unmeasured)
+description: Install headroom-ai and run its compression proxy on 127.0.0.1:8787; Claude Code sends its model requests through it.
+
+capabilities:
+  # PyPI at install only. Not allowed on purpose: headroom-beacon.headroom-beacon.workers.dev,
+  # huggingface.co, app.headroomlabs.ai, `**`.
+  - type: com.docker.sandbox/network-policy@1
+    config:
+      install:
+        allow:
+          - pypi.org                 # package index for the install
+          - files.pythonhosted.org   # the wheels
+
+  - type: com.docker.sandbox/lifecycle@1
+    config:
+      install:
+        # No `|| echo`: Claude Code points at the proxy, so a failed install must fail the create.
+        # System python3 only: fetching an interpreter would need github.com.
+        - command: |
+            set -eu
+            UV_TOOL_DIR=/opt/headroom UV_TOOL_BIN_DIR=/usr/local/bin UV_PYTHON_PREFERENCE=only-system \
+              uv tool install --exclude-newer 2026-10-15T00:00:00Z "headroom-ai[sandbox]==0.41.0"
+            headroom --version
+          user: "0"
+          # A hook sees only what it declares: headroom's switches (this kit's ENV) for the check.
+          env: [HEADROOM_BEACON, HEADROOM_TELEMETRY, HEADROOM_UPDATE_CHECK, DO_NOT_TRACK]
+          description: "Install headroom-ai 0.41.0 (the torch-free 'sandbox' extra) to /usr/local/bin"
+        - command: ["sh", "/usr/local/lib/aisbx/headroom/settings.sh"]
+          user: agent
+          description: Point Claude Code at the proxy (env.ANTHROPIC_BASE_URL in settings.json, merged)
+      startup:
+        - command: ["sh", "/usr/local/lib/aisbx/headroom/start.sh"]
+          user: agent
+          env: [AISBX_LITELLM_URL]
+          description: Start the headroom proxy on 127.0.0.1:8787 under a supervisor (idempotent)

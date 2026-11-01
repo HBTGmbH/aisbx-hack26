@@ -1,0 +1,158 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "share": "disabled",
+  "update": "disable",
+  "policies": [
+    {
+      "action": "provider.use",
+      "resource": "opencode",
+      "effect": "deny"
+    },
+    {
+      "action": "provider.use",
+      "resource": "openrouter",
+      "effect": "deny"
+    },
+    {
+      "action": "provider.use",
+      "resource": "gitlab",
+      "effect": "deny"
+    },
+    {
+      "action": "provider.use",
+      "resource": "openai",
+      "effect": "deny"
+    },
+    {
+      "action": "provider.use",
+      "resource": "anthropic",
+      "effect": "deny"
+    },
+    {
+      "action": "provider.use",
+      "resource": "google",
+      "effect": "deny"
+    },
+    {
+      "action": "provider.use",
+      "resource": "xai",
+      "effect": "deny"
+    },
+    {
+      "action": "provider.use",
+      "resource": "groq",
+      "effect": "deny"
+    },
+    {
+      "action": "provider.use",
+      "resource": "amazon-bedrock",
+      "effect": "deny"
+    },
+    {
+      "action": "provider.use",
+      "resource": "github-copilot",
+      "effect": "deny"
+    }
+  ],
+  "default_agent": "plan",
+  "model": "litellm-acme/minimax-m2.5",
+  "provider": {
+    "litellm-acme": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "LiteLLM acme",
+      "options": {
+        "baseURL": "https://litellm.example.com",
+        "apiKey": "sbx-cs-aisbx-llm-acme"
+      },
+      "models": {
+        "claude-opus-5": {
+          "name": "Claude Opus 5",
+          "limit": {
+            "context": 1000000,
+            "output": 128000,
+            "input": 1000000
+          },
+          "reasoning": true,
+          "tool_call": true
+        },
+        "claude-sonnet-5": {
+          "name": "Claude Sonnet 5",
+          "limit": {
+            "context": 1000000,
+            "output": 128000,
+            "input": 1000000
+          },
+          "reasoning": true,
+          "tool_call": true
+        },
+        "glm-5": {
+          "name": "GLM 5",
+          "limit": {
+            "context": 200000,
+            "output": 128000,
+            "input": 200000
+          },
+          "reasoning": true,
+          "tool_call": true
+        },
+        "kimi-k2.5": {
+          "name": "Kimi K2.5",
+          "limit": {
+            "context": 256000,
+            "output": 16000,
+            "input": 256000
+          },
+          "reasoning": true,
+          "tool_call": true
+        },
+        "minimax-m2.5": {
+          "name": "MiniMax M2.5",
+          "limit": {
+            "context": 196608,
+            "output": 8192,
+            "input": 196608
+          },
+          "reasoning": false,
+          "tool_call": true
+        },
+        "claude-haiku-4.5": {
+          "name": "Claude Haiku 4.5",
+          "limit": {
+            "context": 200000,
+            "output": 64000,
+            "input": 200000
+          },
+          "reasoning": true,
+          "tool_call": true
+        },
+        "gemma-4-31b": {
+          "name": "Gemma 4 (31B)",
+          "limit": {
+            "context": 256000,
+            "output": 256000,
+            "input": 256000
+          },
+          "reasoning": true,
+          "tool_call": true
+        },
+        "glm-4.7-flash": {
+          "name": "GLM 4.7 Flash",
+          "limit": {
+            "context": 202752,
+            "output": 4000,
+            "input": 202752
+          },
+          "reasoning": true,
+          "tool_call": true
+        }
+      }
+    }
+  },
+  "permissions": [
+    {
+      "action": "*",
+      "resource": "*",
+      "effect": "allow"
+    }
+  ]
+}

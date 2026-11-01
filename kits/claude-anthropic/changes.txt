@@ -1,0 +1,1 @@
+Claude Code no longer asks at start whether to make auto mode the default permission mode.

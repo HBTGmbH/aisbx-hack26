@@ -1,0 +1,2 @@
+Claude Code no longer asks at start whether to make auto mode the default permission mode.
+The host now fetches the model list and writes your model picks, so the sandbox no longer asks the gateway itself.

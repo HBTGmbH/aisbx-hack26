@@ -1,0 +1,94 @@
+# syntax=docker/sandbox-kit:3
+# OpenAI's Codex CLI on your own OpenAI account: a v3 workload, its image built from codex-openai.dockerfile.
+schemaVersion: "3"
+kind: workload
+displayName: Codex (OpenAI account)
+description: Run OpenAI's Codex CLI against your own OpenAI account - the ChatGPT sign-in (`sbx secret set openai --oauth`) or an API key (`sbx secret set openai`), both kept in the host keychain and swapped in by the host proxy, so the sandbox only ever holds a sentinel. Updates Codex to the current release at creation and turns its usage analytics, its feedback upload and its startup update check off.
+
+# Sign in once, on the host, before the create (docs/agents.md, *Codex*).
+
+capabilities:
+  - type: com.docker.sandbox/sbx@1
+
+  - type: com.docker.sandbox/network-policy@1
+    config:
+      install:
+        allow:
+          - registry.npmjs.org       # `codex update` (files/codex/update.sh) is an npm install
+      runtime:
+        allow:
+          # Not allowed on purpose: releases.openai.com and GitHub's hosts.
+          - api.openai.com           # the API, for an API-key sign-in
+          - openai.com
+          - auth.openai.com          # the OAuth token endpoint (refresh)
+          - chatgpt.com              # the ChatGPT backend Codex talks to on a ChatGPT sign-in
+          - files.openai.com
+          - registry.npmjs.org       # the dashboard's `codex update` before a session
+          - plugins.gradle.org
+          - plugins-artifacts.gradle.org
+          - ports.ubuntu.com
+          - archive.ubuntu.com
+          - security.ubuntu.com
+          - download.docker.com
+
+  # The `openai` credential of sbx's built-in `codex` agent. optional: without a stored sign-in the
+  # sandbox starts logged-out.
+  - type: com.docker.sandbox/credential@1
+    optional: true
+    description: The host's OpenAI sign-in or API key (`sbx secret set openai [--oauth]`)
+    config:
+      service: openai
+      phase: runtime
+      apiKey:
+        name: OPENAI_API_KEY
+        proxyManaged: true
+        inject:
+          - {domain: api.openai.com, header: Authorization, format: "Bearer %s"}
+          - {domain: openai.com, header: Authorization, format: "Bearer %s"}
+      oauth:
+        tokenEndpoint: {host: auth.openai.com, path: /oauth/token}
+        resourceHosts: [chatgpt.com]
+        sentinels:
+          accessToken: oai-oat01-proxy-managed
+          refreshToken: oai-ort01-proxy-managed
+
+  # sbx's shared skills store, linked into ~/.agents/skills (where Codex reads skills) by
+  # files/skills/skills-store.sh.
+  - type: com.docker.sandbox/agent-skills@1
+    optional: true
+    config: {path: /home/agent/.local/share/aisbx/skills-store, mode: readwrite}
+
+  - type: com.docker.sandbox/lifecycle@1
+    config:
+      install:
+        - command: ["sh", "/usr/local/lib/aisbx/codex/seed.sh", "config"]
+          user: agent
+          env: [SBX_CRED_OPENAI_MODE, WORKSPACE_DIR]
+          description: Write ~/.codex/config.toml and auth.json for the sign-in mode
+        - command: ["sh", "/usr/local/lib/aisbx/codex/seed.sh", "mcp"]
+          user: agent
+          env: [MCP_GATEWAY_URL, MCP_SENTINEL_TOKEN_NAME]
+          description: Register the MCP gateway in ~/.codex/config.toml
+        - command: ["sh", "/usr/local/lib/aisbx/skills/skills-store.sh", "/home/agent/.agents/skills"]
+          user: agent
+          description: Link the shared skills store into ~/.agents/skills
+        - command: ["sh", "/usr/local/lib/aisbx/codex/update.sh"]
+          user: agent
+          # A hook sees only what it declares; without the template's npm prefix npm installs into
+          # /usr/local, which the agent cannot write.
+          env: [NPM_CONFIG_PREFIX]
+          description: Update Codex to the current release
+      startup:
+        - command: ["sh", "/usr/local/lib/aisbx/codex/seed.sh", "mcp"]
+          user: agent
+          env: [MCP_GATEWAY_URL, MCP_SENTINEL_TOKEN_NAME]
+          description: Register the MCP gateway in ~/.codex/config.toml
+        - command: ["sh", "/usr/local/lib/aisbx/skills/skills-store.sh", "/home/agent/.agents/skills"]
+          user: agent
+          description: Refresh the shared-skills links
+
+  # Codex reads its global AGENTS.md from CODEX_HOME (~/.codex).
+  - type: com.docker.sandbox/agent-context@1
+    config:
+      filename: AGENTS.md
+      directory: /home/agent/.codex

@@ -1,0 +1,14 @@
+sequenceDiagram
+    participant S as Your script
+    participant A as aisbx
+    participant X as sbx
+    S->>A: aisbx up --backend ... DIR
+    A->>X: sbx create with the backend and addon kits
+    A-->>S: sandbox name on stdout
+    S->>A: aisbx run NAME --prompt-file task.md
+    A->>X: sbx exec: agent update, prompt upload
+    A->>X: sbx exec: agent in print mode
+    X-->>S: agent output on stdout
+    A->>X: dismiss held network requests (default)
+    S->>A: aisbx rm NAME
+    A->>X: sbx rm --force
