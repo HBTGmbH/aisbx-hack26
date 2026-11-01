@@ -2056,6 +2056,8 @@ mod tests {
             repo.join("target/debug/aisbx-ui"),
             repo.join("bin/unix/build/aisbx"),
             repo.join("bin/windows/build/aisbx-ui.exe"),
+            repo.join("bin/aisbx"),
+            repo.join("bin/aisbx-ui.exe"),
         ] {
             assert_eq!(
                 finds(exe.clone()).as_deref(),

@@ -17,7 +17,8 @@ tui/src/                  # aisbx, the terminal dashboard (Ratatui)
 gui/src/                  # aisbx-ui, the desktop window (eframe)
 kits/<name>/              # <name>.yaml, <name>.dockerfile, scripts under files/<topic>/
 tests/                    # shell tests: kit-hooks/, repo-skills-test.sh, workspace/layout-test.sh
-.github/                  # CI workflow, Dependabot, issue templates
+scripts/package.py        # packs a release archive; its test is scripts/test_package.py
+.github/                  # CI and release workflows, Dependabot, issue templates
 ```
 
 The modules in `core/src/`:
@@ -51,7 +52,8 @@ $ sh tests/repo-skills-test.sh
 - Run `tests/kit-hooks/headroom-test.sh` and `tests/kit-hooks/host-skills-test.sh` on Linux. They fail on macOS.
 - `cargo test --workspace -- --ignored --nocapture preview` prints the TUI screens as text.
 - CI (`.github/workflows/ci.yml`) runs these checks on every push to `main` and every pull request: lint and the
-  kit hook tests on Linux, `cargo test` on Linux and macOS, a build on Windows. It skips
+  kit hook tests on Linux, `cargo test` on Linux and macOS, a build on Windows. Lint also runs
+  `python3 -m unittest scripts/test_package.py`. It skips
   `tests/kit-hooks/host-overlay-test.sh`, which needs uid 1000.
 
 ## sbx version
@@ -113,3 +115,34 @@ aisbx does not use these sbx features. Test the reason again before you add one.
 
 3. Set `sbx::REQUIRED_VERSION` to the new sbx version and the root `Cargo.toml` `version` to `<new>+0`
    ([aisbx version](#aisbx-version)).
+
+## Release
+
+A tag `v<aisbx version>` builds the release. `.github/workflows/release.yml` then publishes one archive per
+platform on the GitHub release page.
+
+1. Set the root `Cargo.toml` `version` ([aisbx version](#aisbx-version)) and merge it into `main`.
+2. Tag the merge commit and push the tag:
+
+   ```console
+   $ python3 scripts/package.py version
+   0.50.1.0
+   $ git tag v0.50.1.0
+   $ git push origin v0.50.1.0
+   ```
+
+3. The workflow stops when the tag is not `v` plus the `Cargo.toml` version. Otherwise it makes a draft
+   release, builds `aisbx` and `aisbx-ui` for each platform, uploads the archives and publishes the release.
+
+Each archive holds `bin/` with both binaries, `kits/`, `docs/`, `README.md` and `LICENSE`.
+`scripts/package.py build --target <triple>` writes it from `target/<triple>/release/` and the files git tracks.
+The platforms: `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`, `aarch64-apple-darwin`,
+`x86_64-apple-darwin` and `x86_64-pc-windows-msvc`.
+
+To build an archive locally:
+
+```console
+$ cargo build --release --locked --target aarch64-apple-darwin -p aisbx -p aisbx-ui
+$ python3 scripts/package.py build --target aarch64-apple-darwin
+$ python3 -m unittest scripts/test_package.py
+```

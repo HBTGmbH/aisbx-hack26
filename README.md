@@ -41,10 +41,54 @@ sandbox with your project folder in it.
 - [sbx](https://docs.docker.com/ai/sandboxes/) **0.50.1** or later. The dashboard refuses an older version
   ([why](docs/development.md#sbx-version)).
 - Docker with Buildx on the host. sbx uses it to build the image of each kit.
-- A Rust toolchain. The launcher builds aisbx with it. `aisbx-ui` needs Rust 1.95 or later
-  ([Requirements](docs/gui.md#requirements)).
+- To build from source only: a Rust toolchain. The launcher builds aisbx with it. `aisbx-ui` needs Rust 1.95 or
+  later ([Requirements](docs/gui.md#requirements)).
 
 ## Install
+
+Install with Homebrew, install a release, or build from source. Then set the network policy of the host.
+
+### With Homebrew
+
+On macOS and Linux, install both binaries from the tap:
+
+```console
+$ brew install ilja82/tap/aisbx
+```
+
+To update, run `brew upgrade aisbx`. Homebrew does not quarantine the binaries.
+
+### From a release
+
+1. Download the archive for your platform from the
+   [latest release](https://github.com/ilja82/aisbx/releases/latest):
+
+   | Platform             | Archive                                            |
+   |----------------------|----------------------------------------------------|
+   | macOS, Apple silicon | `aisbx-<version>-aarch64-apple-darwin.tar.gz`      |
+   | macOS, Intel         | `aisbx-<version>-x86_64-apple-darwin.tar.gz`       |
+   | Linux, x86-64        | `aisbx-<version>-x86_64-unknown-linux-gnu.tar.gz`  |
+   | Linux, ARM64         | `aisbx-<version>-aarch64-unknown-linux-gnu.tar.gz` |
+   | Windows, x86-64      | `aisbx-<version>-x86_64-pc-windows-msvc.zip`       |
+
+   Each archive has a `.sha256` file. On macOS or Linux, check it with `shasum -a 256 -c <archive>.sha256`.
+
+2. Unpack the archive to a folder of your choice. Keep `bin/` and `kits/` together: aisbx reads its kits from
+   the folder above `bin/`.
+
+3. Put the `bin/` folder of the unpacked archive on your `PATH`. Use the commands of step 2 in
+   [From source](#from-source), with that folder.
+
+4. On macOS, remove the download quarantine once. The binaries are not signed by Apple:
+
+   ```console
+   $ xattr -dr com.apple.quarantine /path/to/aisbx-<version>-aarch64-apple-darwin
+   ```
+
+The Linux binaries need the glibc of Ubuntu 24.04 or newer. `aisbx-ui` on Linux also needs X11 or Wayland.
+To update, unpack the new release and change the `PATH` entry.
+
+### From source
 
 1. Clone the repository:
 
@@ -72,18 +116,20 @@ sandbox with your project folder in it.
    [Environment]::SetEnvironmentVariable("Path", "$p;C:\path\to\aisbx\bin\windows", "User")
    ```
 
-3. Set the network policy of the host, once:
-
-   ```console
-   $ sbx policy init deny-all
-   ```
-
-   If sbx already has a policy, run `sbx policy reset --force && sbx policy init deny-all` instead.
-   **This command stops every sandbox.** [Network policy](docs/network.md#network-policy) tells why `deny-all`
-   is recommended.
-
 The launcher builds aisbx on the first run and after each `git pull`
 ([The `aisbx` launcher](docs/dashboard.md#the-aisbx-launcher)).
+
+### Network policy
+
+Set the network policy of the host, once:
+
+```console
+$ sbx policy init deny-all
+```
+
+If sbx already has a policy, run `sbx policy reset --force && sbx policy init deny-all` instead.
+**This command stops every sandbox.** [Network policy](docs/network.md#network-policy) tells why `deny-all`
+is recommended.
 
 ## Your first sandbox
 

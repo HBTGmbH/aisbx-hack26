@@ -1,0 +1,78 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+
+env:
+  CARGO_TERM_COLOR: always
+  TAG: ${{ github.ref_name }}
+
+jobs:
+  draft:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: python3 -m unittest scripts/test_package.py
+      - run: python3 scripts/package.py version "$TAG"
+      - run: |
+          gh release view "$TAG" > /dev/null 2>&1 ||
+            gh release create "$TAG" --draft --verify-tag --generate-notes --title "aisbx ${TAG#v}"
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+  build:
+    needs: draft
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-24.04
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-apple-darwin
+            os: macos-latest
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            python: python
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: -C target-feature=+crt-static
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+      - run: cargo build --release --locked --target ${{ matrix.target }} -p aisbx -p aisbx-ui
+      - run: ${{ matrix.python || 'python3' }} scripts/package.py build --target ${{ matrix.target }} --out dist
+      - run: gh release upload "$TAG" dist/* --clobber
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: gh release edit "$TAG" --draft=false --latest
+        env:
+          GH_TOKEN: ${{ github.token }}

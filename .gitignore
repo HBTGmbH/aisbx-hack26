@@ -2,3 +2,5 @@
 .idea/
 /target/
 /bin/*/build/
+/dist/
+__pycache__/
