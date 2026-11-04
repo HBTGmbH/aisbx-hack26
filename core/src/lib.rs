@@ -37,7 +37,7 @@ pub mod testkit;
 pub mod tmpfs;
 pub mod tokens;
 
-/// The aisbx version: the sbx version it needs, then a counter (`0.50.1.0`). See docs/development.md,
+/// The aisbx version: the sbx version it needs, then a counter (`0.51.0.0`). See docs/development.md,
 /// *aisbx version*.
 pub fn version() -> String {
     env!("CARGO_PKG_VERSION").replacen('+', ".", 1)

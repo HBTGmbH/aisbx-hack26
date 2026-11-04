@@ -4,7 +4,7 @@
 use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
 
-use crate::model::{Sandbox, Skills, MOUNTLESS_WORKDIR};
+use crate::model::{MountKind, Sandbox, Skills, MOUNTLESS_WORKDIR};
 use crate::sbx::{self, LogHost, PolicyLog, PolicyRule, Port, RuntimeMount, SkillsMode};
 use crate::stats::{self, Sample};
 
@@ -258,8 +258,16 @@ impl Insight {
             .flatten()
             .filter(|r| pred(r))
             .collect();
-        // Deny before allow, then the narrowest scope first: the order a reader reasons in.
-        rules.sort_by_key(|r| (r.allows(), r.scope == "global", r.name.clone()));
+        // Deny before allow, then the narrowest scope first, the fallback last: the order a reader
+        // reasons in.
+        rules.sort_by_key(|r| {
+            (
+                r.is_fallback(),
+                r.allows(),
+                r.scope == "global",
+                r.name.clone(),
+            )
+        });
         rules
     }
 }
@@ -402,7 +410,11 @@ pub fn mount_notes(sb: &Sandbox) -> MountNotes {
             "The workspace is bind-mounted: edits inside the sandbox change these files.",
         ));
     }
-    if sb.ro_mounts.is_empty() && sb.rw_mounts.is_empty() {
+    let no_extra = match &sb.host_mounts {
+        Some(mounts) => !mounts.iter().any(|m| m.kind == MountKind::Folder),
+        None => sb.ro_mounts.is_empty() && sb.rw_mounts.is_empty(),
+    };
+    if no_extra {
         about.push(Note::plain(
             "No extra mounts. The host-gradle and host-maven kits add read-only cache mounts.",
         ));
@@ -423,6 +435,91 @@ pub fn mount_notes(sb: &Sandbox) -> MountNotes {
         added,
         missing,
     }
+}
+
+/// One folder on the Mounts tab: what it is, the host folder, where the sandbox sees it when that
+/// is another path, what the sandbox may do in it, and whether it is gone from the host. A gone
+/// workspace has its own note ([`MountNotes::missing`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MountRow {
+    pub kind: MountKind,
+    /// The host folder, `~` for the home folder.
+    pub host: String,
+    pub target: Option<String>,
+    pub access: String,
+    pub missing: bool,
+}
+
+impl MountKind {
+    /// The row's label on the Mounts tab.
+    pub fn label(self) -> &'static str {
+        match self {
+            MountKind::Workspace => "workspace",
+            MountKind::Skills => "skills",
+            MountKind::Added => "added",
+            MountKind::Folder => "mount",
+        }
+    }
+}
+
+/// The Mounts tab's folders: every bind mount `sbx inspect` reports, in its order; where it gave
+/// no answer, the folders `sbx ls` lists.
+pub fn mount_rows(sb: &Sandbox) -> Vec<MountRow> {
+    let Some(mounts) = &sb.host_mounts else {
+        return (sb.mounts().into_iter().enumerate())
+            .map(|(i, (path, mode))| MountRow {
+                kind: match i {
+                    0 if !sb.mountless() => MountKind::Workspace,
+                    _ => MountKind::Folder,
+                },
+                host: crate::model::tilde(path),
+                target: None,
+                access: mode.to_string(),
+                missing: false,
+            })
+            .collect();
+    };
+    let plain = |read_only: bool| match read_only {
+        true => "read-only",
+        false => "read-write",
+    };
+    (mounts.iter())
+        .map(|m| {
+            let access = match (m.kind, sb.skills) {
+                (MountKind::Workspace, _) if sb.clone => "read-only (clone mode)",
+                (MountKind::Skills, Some(Skills::Known(SkillsMode::Readonly))) if m.read_only => {
+                    skills_mount_text(Skills::Known(SkillsMode::Readonly))
+                }
+                (MountKind::Skills, Some(Skills::Known(SkillsMode::Readwrite))) if !m.read_only => {
+                    skills_mount_text(Skills::Known(SkillsMode::Readwrite))
+                }
+                _ => plain(m.read_only),
+            };
+            MountRow {
+                kind: m.kind,
+                host: crate::model::tilde(&m.host),
+                target: (m.target != m.host.display().to_string()).then(|| m.target.clone()),
+                access: access.to_string(),
+                missing: m.missing && m.kind != MountKind::Workspace,
+            }
+        })
+        .collect()
+}
+
+/// Does [`mount_rows`] already list the skills store? Then the tab draws no separate row for it.
+pub fn lists_skills(sb: &Sandbox) -> bool {
+    (sb.host_mounts.iter().flatten()).any(|m| m.kind == MountKind::Skills)
+}
+
+/// The Mounts tab's separate `skills` row, after [`SKILLS_STORE`]; `None` for no row: a backend
+/// without the store, or a store [`mount_rows`] lists. Where sbx reports the mounts and the store
+/// is not among them, it is not mounted, whatever mode was recorded.
+pub fn skills_row(sb: &Sandbox) -> Option<&'static str> {
+    let skills = sb.skills.filter(|_| !lists_skills(sb))?;
+    Some(match sb.host_mounts {
+        Some(_) => skills_mount_text(Skills::Known(SkillsMode::Off)),
+        None => skills_mount_text(skills),
+    })
 }
 
 /// The Mounts tab's `skills` row: what is mounted, beside [`skills_mount_text`].
@@ -734,6 +831,7 @@ impl Insight {
                     query_match: "subset".into(),
                 }],
                 editable: Some(true),
+                ..Default::default()
             },
             PolicyRule {
                 name: "default-fs-read-allow-all".into(),
@@ -744,6 +842,20 @@ impl Insight {
                 resources: vec!["**".into()],
                 origin: "local".into(),
                 status: "active".into(),
+                ..Default::default()
+            },
+            PolicyRule {
+                name: crate::sbx::FALLBACK_RULE.into(),
+                scope: "global".into(),
+                applies_to: "all".into(),
+                resource_type: "network".into(),
+                decision: "deny".into(),
+                resources: vec!["**".into()],
+                origin: "local".into(),
+                status: "active".into(),
+                editable: Some(false),
+                reason: "Implicit fallback when no applicable policy decides the request.".into(),
+                actions: vec!["net:connect:tcp".into(), "net:connect:udp".into()],
                 ..Default::default()
             },
         ]));
@@ -767,6 +879,7 @@ impl Insight {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::BindMount;
 
     fn rule(kind: &str, decision: &str, scope: &str, name: &str) -> PolicyRule {
         PolicyRule {
@@ -805,6 +918,7 @@ mod tests {
     fn rules_split_by_type_and_sort_deny_first() {
         let mut insight = Insight::default();
         insight.rules.set(Ok(vec![
+            rule("network", "deny", "global", crate::sbx::FALLBACK_RULE),
             rule("network", "allow", "sandbox:s", "kit:s"),
             rule("filesystem:read", "allow", "global", "fs-read"),
             rule("network", "deny", "global", "block-all"),
@@ -814,7 +928,7 @@ mod tests {
             .iter()
             .map(|r| r.name.as_str())
             .collect();
-        assert_eq!(net, vec!["block-all", "kit:s"]);
+        assert_eq!(net, vec!["block-all", "kit:s", crate::sbx::FALLBACK_RULE]);
         assert_eq!(insight.filesystem_rules().len(), 1);
     }
 
@@ -923,6 +1037,100 @@ mod tests {
         assert_eq!(pending_text(Kind::Resources, false), "no reading yet");
         assert_eq!(pending_text(Kind::Log, false), "no log yet");
         assert_eq!(reading_failed("busy"), "last reading failed: busy");
+    }
+
+    fn reported(host: &str, target: &str, read_only: bool, kind: MountKind) -> BindMount {
+        BindMount {
+            host: host.into(),
+            target: target.into(),
+            read_only,
+            kind,
+            missing: false,
+        }
+    }
+
+    #[test]
+    fn the_mounts_tab_lists_what_sbx_reports() {
+        let mut sb = crate::model::sample("s", Some("claude-anthropic"), &[]);
+        sb.workspace = "/proj".into();
+        sb.skills = Some(Skills::Known(SkillsMode::Readonly));
+        let store = "/h/agent-skills";
+        let mut gone = reported("/h/gone", "/h/gone", false, MountKind::Folder);
+        gone.missing = true;
+        let mut ws = reported("/proj", "/proj", false, MountKind::Workspace);
+        ws.missing = true;
+        sb.host_mounts = Some(vec![
+            ws,
+            reported("/h/data", "/workspace/data", true, MountKind::Folder),
+            reported(
+                store,
+                "/home/agent/.local/share/aisbx/skills-store",
+                true,
+                MountKind::Skills,
+            ),
+            reported("/h/added", "/mnt/added", true, MountKind::Added),
+            gone,
+        ]);
+        let rows = mount_rows(&sb);
+        let labels: Vec<&str> = rows.iter().map(|r| r.kind.label()).collect();
+        assert_eq!(labels, ["workspace", "mount", "skills", "added", "mount"]);
+        assert_eq!(rows[0].target, None, "at its host path");
+        assert_eq!(rows[1].target.as_deref(), Some("/workspace/data"));
+        assert_eq!(rows[1].access, "read-only");
+        assert_eq!(
+            rows[2].access,
+            skills_mount_text(Skills::Known(SkillsMode::Readonly)),
+            "the recorded mode words it where sbx agrees"
+        );
+        assert!(!rows[0].missing, "the workspace has its own note");
+        assert!(rows[4].missing);
+        assert!(lists_skills(&sb));
+        assert_eq!(
+            notes(&mount_notes(&sb).about).len(),
+            1,
+            "extra mounts listed"
+        );
+
+        // sbx's report wins where the recorded mode disagrees with it.
+        sb.skills = Some(Skills::Known(SkillsMode::Readwrite));
+        assert_eq!(mount_rows(&sb)[2].access, "read-only");
+
+        // Clone mode: the source at sbx's own path, read-only.
+        sb.clone = true;
+        sb.host_mounts = Some(vec![reported(
+            "/proj",
+            "/run/sandbox/source",
+            true,
+            MountKind::Workspace,
+        )]);
+        let rows = mount_rows(&sb);
+        assert_eq!(rows[0].access, "read-only (clone mode)");
+        assert_eq!(rows[0].target.as_deref(), Some("/run/sandbox/source"));
+        assert!(!lists_skills(&sb));
+        assert_eq!(
+            skills_row(&sb),
+            Some("not mounted"),
+            "sbx reports no store mount, whatever the registry says"
+        );
+        assert_eq!(notes(&mount_notes(&sb).about).len(), 3, "no extra mounts");
+
+        // No answer from sbx: the folders `sbx ls` lists.
+        sb.host_mounts = None;
+        sb.clone = false;
+        sb.ro_mounts = vec!["/cache".into()];
+        let rows = mount_rows(&sb);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            (rows[1].kind, rows[1].access.as_str()),
+            (MountKind::Folder, "read-only")
+        );
+        assert_eq!(
+            skills_row(&sb),
+            Some(skills_mount_text(Skills::Known(SkillsMode::Readwrite))),
+            "without a report, the recorded mode"
+        );
+        sb.skills = None;
+        assert_eq!(skills_row(&sb), None, "no store on this backend");
     }
 
     #[test]

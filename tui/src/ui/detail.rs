@@ -673,11 +673,8 @@ fn overview_parts(sb: &Sandbox, app: &App) -> (Vec<Line<'static>>, Vec<Line<'sta
     if sb.mcp_gateway {
         let servers = app.registry.static_mcp(&sb.name);
         let mut spans = vec![Span::styled("gateway enabled", theme::muted())];
-        if !servers.is_empty() {
-            spans.push(Span::styled(
-                format!("   {}", servers.join(" ")),
-                theme::muted(),
-            ));
+        if let Some(set) = crate::create::mcp_set(&servers) {
+            spans.push(Span::styled(format!("   {set}"), theme::muted()));
         }
         lines.push(field("mcp", spans));
     }
@@ -1030,38 +1027,34 @@ fn bar(fraction: f32, width: usize) -> String {
 }
 
 fn mounts(sb: &Sandbox) -> Vec<Line<'static>> {
-    let mut lines: Vec<Line> = sb
-        .mounts()
-        .into_iter()
-        .enumerate()
-        .map(|(i, (path, mode))| {
-            field(
-                if i == 0 { "workspace" } else { "mount" },
-                vec![
-                    Span::raw(model::tilde(path)),
-                    Span::styled(format!("   {mode}"), theme::muted()),
-                ],
-            )
+    let mut lines: Vec<Line> = (insight::mount_rows(sb).into_iter())
+        .map(|row| {
+            let mut value = vec![Span::raw(row.host)];
+            if let Some(target) = row.target {
+                value.push(Span::styled(format!(" → {target}"), theme::muted()));
+            }
+            value.push(Span::styled(format!("   {}", row.access), theme::muted()));
+            if row.missing {
+                value.push(Span::styled("   ⚠ missing on this host", theme::danger()));
+            }
+            field(row.kind.label(), value)
         })
         .collect();
 
     let about = insight::mount_notes(sb);
     lines.push(Line::from(""));
     lines.extend(notes(&about.about));
-    if let Some(skills) = sb.skills {
+    if let Some(text) = insight::skills_row(sb) {
         lines.push(Line::from(""));
         lines.push(field(
             "skills",
             vec![
                 Span::raw(insight::SKILLS_STORE),
-                Span::styled(
-                    format!("   {}", insight::skills_mount_text(skills)),
-                    theme::muted(),
-                ),
+                Span::styled(format!("   {text}"), theme::muted()),
             ],
         ));
     }
-    if !sb.runtime_mounts.is_empty() {
+    if !sb.runtime_mounts.is_empty() && sb.host_mounts.is_none() {
         lines.push(Line::from(""));
         for mount in &sb.runtime_mounts {
             let mut value = vec![Span::raw(model::tilde(Path::new(&mount.host_path)))];
@@ -1987,6 +1980,40 @@ mod tests {
     }
 
     #[test]
+    fn pinned_mounts_as_sbx_reports_them() {
+        use crate::model::{BindMount, MountKind};
+        let mut sb = running(&[]);
+        sb.skills = Some(Skills::Known(SkillsMode::Readonly));
+        let mount = |host: &str, target: &str, read_only: bool, kind: MountKind| BindMount {
+            host: host.into(),
+            target: target.into(),
+            read_only,
+            kind,
+            missing: false,
+        };
+        let mut gone = mount("/data/gone", "/data/gone", false, MountKind::Folder);
+        gone.missing = true;
+        sb.runtime_mounts = vec![crate::sbx::RuntimeMount {
+            host_path: "/data/set".into(),
+            container_target: "/mnt/set".into(),
+            read_only: true,
+        }];
+        sb.host_mounts = Some(vec![
+            mount("/proj", "/proj", false, MountKind::Workspace),
+            mount("/data/libs", "/workspace/libs", true, MountKind::Folder),
+            mount(
+                "/sbx/agent-skills",
+                "/home/agent/.local/share/aisbx/skills-store",
+                true,
+                MountKind::Skills,
+            ),
+            mount("/data/set", "/mnt/set", true, MountKind::Added),
+            gone,
+        ]);
+        assert_eq!(pin(&mounts(&sb)), PIN_MOUNTS_REPORTED);
+    }
+
+    #[test]
     fn pinned_ports_listed_empty_and_stopped() {
         let sb = running(&[]);
         let app = sampled(&sb);
@@ -2045,6 +2072,7 @@ mod tests {
     const PIN_RESOURCES_STOPPED: &str = "The sandbox is stopped.‹muted›\n\nCPU, memory and disk are read from inside the sandbox, which needs it to be‹muted›\nrunning — starting one just to measure it would be worse than saying so.‹muted›\n\n↵‹key›  start it, or  ‹muted›x‹key›  open a shell inside it‹muted›";
     const PIN_RESOURCES_FIRST: &str = "      CPUs  ‹muted›2 vCPU   load needs a second reading‹muted›\n    Memory  ‹muted›▍░░░░░░░░░░░░░░░░░‹running›   2%‹running›   0.3 GB used / 15.8 GB total‹muted›\n      Disk  ‹muted›▎░░░░░░░░░░░░░░░░░‹running›   2%‹running›   0.3 GB used / 19.5 GB total‹muted›\n    Uptime  ‹muted›8m 25s\n\nThe sandbox microVM's own CPUs, memory and root filesystem — not the host's.‹muted›";
     const PIN_METERS: &str = "████████████▍░░░░░‹running›  69%‹running›\n████████████▋░░░░░‹warn›  70%‹warn›\n████████████████░░‹warn›  89%‹warn›\n████████████████▎░‹red›  90%‹red›";
+    const PIN_MOUNTS_REPORTED: &str = " workspace  ‹muted›/proj   read-write‹muted›\n     mount  ‹muted›/data/libs → /workspace/libs‹muted›   read-only‹muted›\n    skills  ‹muted›/sbx/agent-skills → /home/agent/.local/share/aisbx/skills-store‹muted›   read-only, linked into the agent's skills folder‹muted›\n     added  ‹muted›/data/set → /mnt/set‹muted›   read-only‹muted›\n     mount  ‹muted›/data/gone   read-write‹muted›   ⚠ missing on this host‹danger›\n\nThe workspace is bind-mounted: edits inside the sandbox change these files.‹muted›\nAdded with sbx mount after creation; restored on every start, and mounted again by R.‹muted›";
     const PIN_MOUNTS_BIND: &str = " workspace  ‹muted›/proj   read-write‹muted›\n     mount  ‹muted›/home/u/.gradle   read-only‹muted›\n\nThe workspace is bind-mounted: edits inside the sandbox change these files.‹muted›\n\n    skills  ‹muted›the host's shared agent-skills store   read-only, linked into the agent's skills folder‹muted›";
     const PIN_MOUNTS_CLONE: &str = " workspace  ‹muted›/proj   read-only (clone mode)‹muted›\n\nClone mode: the agent works on a private in-container clone. Fetch its commits‹muted›\nwith  git fetch sandbox-s‹muted›\nNo extra mounts. The host-gradle and host-maven kits add read-only cache mounts.‹muted›\n\n    skills  ‹muted›the host's shared agent-skills store   read-write, mounted over the agent's skills folder‹muted›\n⚠ the workspace folder no longer exists on this host‹danger›";
     const PIN_MOUNTS_MOUNTLESS: &str = "\nNo host folder is mounted (a mountless sandbox): the agent works in /home/agent/workspace,‹muted›\ninside the sandbox. Those files survive a stop, and are deleted with the sandbox —‹muted›\n`sbx cp` copies them out (sandbox paths must be absolute).‹muted›\nNo extra mounts. The host-gradle and host-maven kits add read-only cache mounts.‹muted›\n\n    skills  ‹muted›the host's shared agent-skills store   mode not recorded‹muted›\n\n     added  ‹muted›/data/set → /mnt/set‹muted›   read-only‹muted›\n     added  ‹muted›/data/out   read-write‹muted›\nAdded with sbx mount after creation; restored on every start, and mounted again by R.‹muted›";
@@ -2053,7 +2081,7 @@ mod tests {
     const PIN_PORTS_LOADING: &str = "loading…‹muted›";
     const PIN_PORTS_EMPTY: &str = "No ports published — nothing on the host can reach into this sandbox.‹muted›\n\np‹key›  publish one, e.g.  ‹muted›8080:3000  (host 8080 → sandbox 3000)‹muted›\n\nThe service inside must listen on 0.0.0.0 (or [::]), not 127.0.0.1, to be reachable.‹muted›";
     const PIN_PORTS_STOPPED: &str = "  http://127.0.0.1:8080       ‹running›→  sandbox ‹muted›3000  tcp‹muted›\n  http://127.0.0.1:54321      ‹running›→  sandbox ‹muted›8000  tcp‹muted›  ephemeral‹warn›\n\np‹key›  publish another   ‹muted›u‹key›  unpublish‹muted›\n\nThe service inside must listen on 0.0.0.0 (or [::]), not 127.0.0.1, to be reachable.‹muted›\nThe sandbox is stopped. Published ports are restored when it starts again;‹muted›\npublishing a new one starts it first.‹muted›\nIt stops itself shortly after its last session ends, and these stop answering with it‹muted›\n— ‹muted›b‹key› keeps it running in the background.‹muted›";
-    const PIN_NETWORK: &str = "    policy  ‹muted›global scope\n     proxy  ‹muted›http://gateway.docker.internal:3128   enforces the rules below‹muted›\n   network  ‹muted›sbx-net‹muted›\n\n deny  ‹danger›http            ‹muted›added‹muted›\n        POST api.github.com/repos/**?state=open\n deny  ‹danger›network         ‹muted›local    ‹muted›all sandboxes   tcp+udp‹muted›\n        both.example.com\n deny  ‹danger›network         ‹muted›local    ‹muted›all sandboxes   udp‹muted›   (inactive)‹warn›\n        dns.example.com\n allow ‹running›network         ‹muted›approved‹warn›\n        registry.npmjs.org:443\n allow ‹running›network         ‹muted›kit‹accent›\n        api.anthropic.com  console.anthropic.com  claude.ai\n        platform.claude.com  downloads.claude.ai:443\n        github.com  *.githubusercontent.com\n\n⚠ the web kit allows ** — every host is reachable from this sandbox‹danger›\n\nc‹key›  check whether a host is reachable from this sandbox‹muted›";
+    const PIN_NETWORK: &str = "    policy  ‹muted›global scope\n     proxy  ‹muted›http://gateway.docker.internal:3128   enforces the rules below‹muted›\n   network  ‹muted›sbx-net‹muted›\n\n deny  ‹danger›http            ‹muted›added‹muted›\n        POST api.github.com/repos/**?state=open\n deny  ‹danger›network         ‹muted›local    ‹muted›all sandboxes   tcp+udp‹muted›\n        both.example.com\n deny  ‹danger›network         ‹muted›local    ‹muted›all sandboxes   udp‹muted›   (inactive)‹warn›\n        dns.example.com\n allow ‹running›network         ‹muted›approved‹warn›\n        registry.npmjs.org:443\n allow ‹running›network         ‹muted›kit‹accent›\n        api.anthropic.com  console.anthropic.com  claude.ai\n        platform.claude.com  downloads.claude.ai:443\n        github.com  *.githubusercontent.com\n deny  ‹danger›network         ‹muted›fallback ‹muted›all sandboxes   tcp+udp‹muted›\n        **\n\n⚠ the web kit allows ** — every host is reachable from this sandbox‹danger›\n\nc‹key›  check whether a host is reachable from this sandbox‹muted›";
     const PIN_FILESYSTEM: &str = "Which host paths any sandbox may be given as a workspace.‹muted›\n\n allow ‹running›filesystem:read ‹muted›local    ‹muted›all sandboxes\n        **";
     const PIN_ACTIVITY: &str = "blocked‹heading›\n  registry.example.com:443              ‹danger›forward         ‹muted›×3     ‹muted›10:39:45‹muted›   no rule (default deny)‹muted›\n  evil.example.com:443                  ‹danger›forward         ‹muted›×1     ‹muted›11:00:01‹muted›   deny-evil‹muted›\n  no rule allowed those — the sandbox asked for approval: ‹muted›y‹key› answers it‹muted›\n\nallowed‹heading›\n  api.anthropic.com:443                 ‹running›forward         ‹muted›×128   ‹muted›10:39:45‹muted›\n  github.com:443                        ‹running›forward-bypass  ‹muted›×4     ‹muted›10:39:45‹muted›";
 }

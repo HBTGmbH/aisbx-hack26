@@ -108,9 +108,9 @@ pub enum Handoff {
     /// `sbx run --name ...`: the agent session, after the steps of [`Handoff::prelude`].
     Agent {
         name: String,
-        /// The agent's command and the folder to open it in, if that is not the workspace root
-        /// ([`crate::startdir`]). `Some` runs `sbx exec -it -w` in place of `sbx run --name`.
-        start: Option<(String, PathBuf)>,
+        /// The folder to open the agent in, if that is not the workspace root
+        /// ([`crate::startdir`]): `sbx run --workdir`.
+        start: Option<PathBuf>,
         prelude: Vec<Vec<String>>,
     },
     /// `sbx exec -it … bash` — a plain shell inside the sandbox, opening where its agent does.
@@ -155,12 +155,7 @@ impl Handoff {
 
     pub fn argv(&self) -> Vec<String> {
         match self {
-            Handoff::Agent {
-                name,
-                start: Some((cmd, dir)),
-                ..
-            } => sbx::agent_in_argv(name, cmd, dir),
-            Handoff::Agent { name, .. } => sbx::attach_argv(name),
+            Handoff::Agent { name, start, .. } => sbx::attach_argv(name, start.as_deref()),
             Handoff::Shell { name, workdir } => sbx::shell_argv(name, workdir.as_deref()),
             Handoff::Connect { argv, .. } => argv.clone(),
             Handoff::Edit { path, .. } => terminal::editor_argv(
@@ -363,6 +358,7 @@ impl CreateRow {
             CreateRow::Name
                 | CreateRow::TokenName
                 | CreateRow::Token
+                | CreateRow::ExtraFolders
                 | CreateRow::Ports
                 | CreateRow::DenyNetwork
                 | CreateRow::LitellmName
@@ -416,6 +412,9 @@ pub enum CreateRow {
     Name,
     /// Which folder inside the workspace the agent opens in. Opens the same picker `w` does.
     StartDir,
+    /// More host folders for this sandbox alone, comma-separated, each as sbx takes an extra
+    /// workspace: `PATH[:TARGET][:ro]` ([`crate::folders::extras`]).
+    ExtraFolders,
     Clone,
     /// Mount the workspace's `.git` folder read-only. Only where it has one and clone mode is off.
     GitGuard,
@@ -426,6 +425,8 @@ pub enum CreateRow {
     Ports,
     /// Hosts to deny this one sandbox (`--deny-network`).
     DenyNetwork,
+    /// No MCP server and no tools to find one (`--static-mcp none`). On every host.
+    McpNone,
     /// One MCP server registered on this host, for the sandbox's fixed set (`--static-mcp`). Only
     /// present while the host has servers registered.
     Mcp(usize),
@@ -497,10 +498,12 @@ impl CreateForm {
                 git_guard: false,
                 git_offered: false,
                 folders: Default::default(),
+                extra_folders: TextInput::default(),
                 skills: skills_default,
                 ports: TextInput::default(),
                 deny_network: TextInput::default(),
                 static_mcp: vec![false; mcp.len()],
+                no_mcp: false,
                 mcp,
             },
             wizard: WizardState::default(),
@@ -577,10 +580,10 @@ impl CreateForm {
             .is_some_and(Backend::shares_skills)
     }
 
-    /// Can this backend's agent be started somewhere other than the workspace root?
+    /// Can this backend's agent be started somewhere other than the workspace root? Every one can:
+    /// `sbx run --workdir` needs nothing from the agent.
     pub fn start_dir_offered(&self, catalog: &Catalog) -> bool {
-        self.effective_backend(catalog)
-            .is_some_and(|b| crate::kits::agent_command(&b.agent).is_some())
+        self.effective_backend(catalog).is_some()
     }
 
     /// Are there models to pick? Only where the backend runs on a LiteLLM connection *and* the
@@ -669,6 +672,7 @@ impl CreateForm {
         if self.start_dir_offered(catalog) {
             rows.push(CreateRow::StartDir);
         }
+        rows.push(CreateRow::ExtraFolders);
         rows.push(CreateRow::Clone);
         if self.git_guard_offered() {
             rows.push(CreateRow::GitGuard);
@@ -678,6 +682,7 @@ impl CreateForm {
         }
         rows.push(CreateRow::Ports);
         rows.push(CreateRow::DenyNetwork);
+        rows.push(CreateRow::McpNone);
         rows.extend((0..self.workspace.mcp.len()).map(CreateRow::Mcp));
         rows
     }
@@ -712,6 +717,27 @@ impl CreateForm {
         }
     }
 
+    /// Space, ↵ and a click on an MCP server: flip it. A ticked server ends *none*, since sbx
+    /// refuses `none` beside a server's name.
+    pub(crate) fn toggle_mcp(&mut self, i: usize) {
+        let ws = &mut self.workspace;
+        if let Some(on) = ws.static_mcp.get_mut(i) {
+            *on = !*on;
+            if *on {
+                ws.no_mcp = false;
+            }
+        }
+    }
+
+    /// Space, ↵ and a click on *none*: flip it. Ticked, it clears every server's tick.
+    pub(crate) fn toggle_no_mcp(&mut self) {
+        let ws = &mut self.workspace;
+        ws.no_mcp = !ws.no_mcp;
+        if ws.no_mcp {
+            ws.static_mcp.iter_mut().for_each(|on| *on = false);
+        }
+    }
+
     /// The addons ticked among those offered ([`Self::addon_order`]), in catalog order: a kit
     /// ticked for another harness stays ticked for it, and is not built.
     pub fn selected_addons(&self, catalog: &Catalog) -> Vec<String> {
@@ -726,8 +752,12 @@ impl CreateForm {
             .collect()
     }
 
-    /// The MCP servers ticked, by name — what `--static-mcp` is given.
+    /// The MCP servers ticked, by name, or [`sbx::STATIC_MCP_NONE`] alone: what `--static-mcp` is
+    /// given. Empty leaves the sandbox's set to the agent.
     pub fn selected_mcp(&self) -> Vec<String> {
+        if self.workspace.no_mcp {
+            return vec![sbx::STATIC_MCP_NONE.to_string()];
+        }
         self.workspace
             .mcp
             .iter()
@@ -1363,6 +1393,242 @@ pub enum ConnPlan {
     /// Asked first: it reaches sandboxes on the connection, or it is a rebuild.
     Confirm(Box<Confirm>),
 }
+
+/// One sbx setting the settings screen offers: a boolean, with what each value means.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SettingSpec {
+    pub key: &'static str,
+    /// The row's label.
+    pub label: &'static str,
+    /// The state word for `true`, then for `false`.
+    pub words: [&'static str; 2],
+    /// What `true` means, then `false`.
+    pub meanings: [&'static str; 2],
+    /// What a change takes, and anything else a reader must know.
+    pub note: &'static str,
+    /// The value that keeps more to the sandbox, drawn as the calm state; the other is drawn as a
+    /// warning. `None`: neither value lets more out, so neither is drawn either way.
+    pub cautious: Option<bool>,
+}
+
+impl SettingSpec {
+    /// The state word for `value`.
+    pub fn word(&self, value: bool) -> &'static str {
+        self.words[usize::from(!value)]
+    }
+
+    /// What `value` means.
+    pub fn meaning(&self, value: bool) -> &'static str {
+        self.meanings[usize::from(!value)]
+    }
+
+    /// How a frontend draws `value`'s state.
+    pub fn tone(&self, value: Option<bool>) -> SettingTone {
+        match (value, self.cautious) {
+            (None, _) => SettingTone::Unknown,
+            (Some(_), None) => SettingTone::Plain,
+            (Some(value), Some(cautious)) if value == cautious => SettingTone::Calm,
+            (Some(_), Some(_)) => SettingTone::Warn,
+        }
+    }
+}
+
+/// How a setting's state is drawn: [`SettingSpec::tone`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingTone {
+    Calm,
+    Warn,
+    Plain,
+    Unknown,
+}
+
+/// The settings the screen offers, in its order.
+pub const SETTINGS: [SettingSpec; 4] = [
+    SettingSpec {
+        key: sbx::TELEMETRY_DISABLED,
+        label: "telemetry",
+        words: ["off", "on"],
+        meanings: [
+            "sbx's CLI and daemon send no usage data to Docker; set on this host",
+            "sbx's CLI and daemon send usage data to Docker; sbx's default",
+        ],
+        note: "Stored with `sbx settings set telemetry.disabled true|false`. A running daemon follows \
+               after `sbx daemon restart`. `SBX_NO_TELEMETRY=1` in sbx's environment turns it off as \
+               well.",
+        cautious: Some(true),
+    },
+    SettingSpec {
+        key: sbx::CLIPBOARD_TEXT_COPY,
+        label: "clipboard copy",
+        words: ["on", "off"],
+        meanings: [
+            "any process in a sandbox may copy text to the host clipboard",
+            "nothing in a sandbox writes to the host clipboard; sbx's default",
+        ],
+        note: "Stored with `sbx settings set clipboard.textCopy true|false`, for every sandbox on this \
+               host. On, an agent's copy reaches your clipboard, and so does anything else a sandbox \
+               copies.",
+        cautious: Some(false),
+    },
+    SettingSpec {
+        key: sbx::CLIPBOARD_IMAGE_PASTE,
+        label: "image paste",
+        words: ["on", "off"],
+        meanings: [
+            "Ctrl+V pastes images from the host clipboard into the agent",
+            "agents read no images from the host clipboard; sbx's default",
+        ],
+        note: "Stored with `sbx settings set clipboard.imagePaste true|false`, for every sandbox on this \
+               host; running sandboxes follow within seconds. On, a process in a sandbox can read the \
+               image on your clipboard when you paste.",
+        cautious: Some(false),
+    },
+    SettingSpec {
+        key: sbx::SANDBOX_FUSE,
+        label: "FUSE",
+        words: ["on", "off"],
+        meanings: [
+            "new sandboxes can mount FUSE (/dev/fuse, SYS_ADMIN); sbx's default",
+            "new sandboxes get no /dev/fuse, and root in them cannot mount",
+        ],
+        note: "Stored with `sbx settings set sandbox.fuse true|false`. It reaches only sandboxes \
+               created after the change: an existing one keeps what it was created with, also after a \
+               restart, until a rebuild creates it again. Off, the host-npm and host-pip addons cannot \
+               mount the host's package caches in a new sandbox.",
+        cautious: None,
+    },
+];
+
+/// The settings screen: the [`SETTINGS`] and the skills mode new sandboxes default to, read
+/// from sbx when the screen opens, on F5 and after each change.
+#[derive(Debug, Clone)]
+pub struct SettingsForm {
+    pub focus: usize,
+    /// One per [`SETTINGS`], in its order; `None` while unread or when its read failed.
+    pub values: Vec<Option<sbx::Setting>>,
+    /// `skills.defaultMode`; `None` while unread or when its read failed.
+    pub skills: Option<sbx::Setting>,
+    /// Why the last read failed.
+    pub error: Option<String>,
+}
+
+impl Default for SettingsForm {
+    fn default() -> Self {
+        SettingsForm {
+            focus: 0,
+            values: vec![None; SETTINGS.len()],
+            skills: None,
+            error: None,
+        }
+    }
+}
+
+/// A focusable line on the settings screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingsRow {
+    /// One of the [`SETTINGS`], by index.
+    Setting(usize),
+    /// `skills.defaultMode`: one of three, not a toggle.
+    SkillsDefault,
+    Close,
+}
+
+/// The skills row's label.
+pub const SKILLS_DEFAULT_LABEL: &str = "skills default";
+
+/// The skills row's note: what the mode is the default of.
+pub const SKILLS_DEFAULT_NOTE: &str = "Stored with `sbx settings set skills.defaultMode \
+     off|readonly|readwrite`. The create wizard opens on it, and `aisbx up` and a plain `sbx create` \
+     use it when no `--skills` is given. It reaches only sandboxes created after the change.";
+
+impl SettingsForm {
+    pub fn rows(&self) -> Vec<SettingsRow> {
+        (0..SETTINGS.len())
+            .map(SettingsRow::Setting)
+            .chain([SettingsRow::SkillsDefault, SettingsRow::Close])
+            .collect()
+    }
+
+    /// Read the settings from sbx; nothing runs under `cfg(test)`.
+    pub fn read(&mut self) {
+        if cfg!(any(test, feature = "test-support")) {
+            return;
+        }
+        self.error = None;
+        for (value, spec) in self.values.iter_mut().zip(SETTINGS) {
+            match sbx::setting(spec.key) {
+                Ok(setting) => *value = Some(setting),
+                Err(e) => self.error = Some(format!("{e:#}")),
+            }
+        }
+        match sbx::setting(sbx::SKILLS_DEFAULT_MODE) {
+            Ok(setting) => self.skills = Some(setting),
+            Err(e) => self.error = Some(format!("{e:#}")),
+        }
+    }
+
+    /// The skills mode new sandboxes default to; `None` while unknown.
+    pub fn skills_mode(&self) -> Option<sbx::SkillsMode> {
+        sbx::SkillsMode::parse(self.skills.as_ref()?.value.as_str()?)
+    }
+
+    /// The skills row's state word, what it means, and how it is drawn, for both frontends.
+    pub fn skills_view(&self) -> (&'static str, String, SettingTone) {
+        let Some(mode) = self.skills_mode() else {
+            let meaning = match &self.error {
+                Some(e) => format!("could not read it: {e}"),
+                None => "not read yet".into(),
+            };
+            return ("unknown", meaning, SettingTone::Unknown);
+        };
+        let (meaning, tone) = match mode {
+            sbx::SkillsMode::Off => (
+                "new sandboxes get no shared skills store",
+                SettingTone::Calm,
+            ),
+            sbx::SkillsMode::Readonly => (
+                "new sandboxes see the shared skills and cannot change them; sbx's default",
+                SettingTone::Plain,
+            ),
+            sbx::SkillsMode::Readwrite => (
+                "new sandboxes can change the shared skills every sandbox loads",
+                SettingTone::Warn,
+            ),
+        };
+        (crate::create::skills_mode_name(mode), meaning.into(), tone)
+    }
+
+    /// Setting `i`'s value; `None` while unknown.
+    pub fn value(&self, i: usize) -> Option<bool> {
+        self.values.get(i)?.as_ref()?.flag()
+    }
+
+    /// Setting `i`'s state word and what it means, for both frontends.
+    pub fn view(&self, i: usize) -> (&'static str, String) {
+        let spec = &SETTINGS[i];
+        match (self.value(i), &self.error) {
+            (Some(value), _) => match self.env_var(i) {
+                Some(var) => (
+                    spec.word(value),
+                    format!("{}; set by {var} in sbx's environment", spec.meaning(value)),
+                ),
+                None => (spec.word(value), spec.meaning(value).into()),
+            },
+            (None, Some(e)) => ("unknown", format!("could not read it: {e}")),
+            (None, None) => ("unknown", "not read yet".into()),
+        }
+    }
+
+    /// The environment variable that sets setting `i` now, if one does.
+    pub fn env_var(&self, i: usize) -> Option<&str> {
+        let setting = self.values.get(i)?.as_ref()?;
+        setting.from_env().then_some(setting.env_var.as_str())
+    }
+}
+
+/// Under *Close*: what the settings are.
+pub const SETTINGS_NOTE: &str =
+    "These are sbx's own settings for this host: every sandbox follows them.";
 
 /// The secrets screen holds nothing but the cursor: every row on it is read from the host.
 #[derive(Debug, Clone, Default)]
@@ -2085,6 +2351,14 @@ impl AuthRecord {
     }
 }
 
+/// The status line after aisbx turned sbx's telemetry off on a host where it was left on.
+pub const TELEMETRY_TURNED_OFF: &str =
+    "sbx's telemetry is now off (telemetry.disabled true); turn it back on in Settings (T)";
+
+/// The same for a headless run, on stderr.
+pub const TELEMETRY_TURNED_OFF_HEADLESS: &str =
+    "sbx's telemetry is now off (telemetry.disabled true); `sbx settings set telemetry.disabled false` turns it on";
+
 /// What a freshly created sandbox is, beyond what `sbx inspect` will say about it.
 #[derive(Debug, Clone)]
 pub struct Registered {
@@ -2097,6 +2371,9 @@ pub struct Registered {
     pub start_dir: Option<PathBuf>,
     /// The MCP servers the sandbox was created with (`--static-mcp`).
     pub static_mcp: Vec<String>,
+    /// The host folders typed for this sandbox alone, as `sbx create` took them
+    /// ([`folders::Folder::sbx_spec`]).
+    pub extra_folders: Vec<String>,
 }
 
 /// What to record once a job succeeds.
@@ -2104,6 +2381,8 @@ pub struct Registered {
 pub struct PostJob {
     /// The sandbox is gone — drop its registry entry.
     pub forget: Option<String>,
+    /// A setting changed: read the settings screen's values from sbx again.
+    pub reread_settings: bool,
     /// A named token was removed from the host — drop the generated kit that wired it in.
     pub drop_token_kit: Option<String>,
     /// A sandbox was created — remember the choices sbx bakes into the container and then reports
@@ -2132,9 +2411,9 @@ pub struct PostJob {
     pub drop_connection: Option<String>,
     /// Hand the terminal over to this sandbox when the job finishes.
     pub attach: Option<String>,
-    /// Where that first session opens, when the create form asked for a start folder: the agent's
-    /// command and the absolute directory. Recorded from the form: the snapshot is still in flight.
-    pub attach_start: Option<(String, PathBuf)>,
+    /// Where that first session opens, when the create form asked for a start folder: the absolute
+    /// directory. Recorded from the form: the snapshot is still in flight.
+    pub attach_start: Option<PathBuf>,
     /// The skill sources' pre-start steps for that first session ([`skill_source::install_steps`]
     /// of the form's addons). Recorded from the form, for the same reason.
     pub attach_skill_steps: Vec<Vec<String>>,
@@ -2229,6 +2508,7 @@ pub enum Screen {
     ConnSwitch(ConnSwitchForm),
     /// The host folders every sandbox mounts beside its workspace (`F`).
     Folders(FoldersForm),
+    Settings(SettingsForm),
 }
 
 /// What a key that tries to leave a running job hears: why the job stays on screen.
@@ -2880,6 +3160,11 @@ impl App {
     }
 
     fn apply_post(&mut self, post: &PostJob) {
+        if post.reread_settings {
+            if let Screen::Settings(form) = &mut self.screen {
+                form.read();
+            }
+        }
         if let Some(name) = &post.drop_connection {
             if let Err(e) = crate::litellm::remove_in(&self.litellm_root, name) {
                 self.set_error(format!("{e:#}"));
@@ -2922,6 +3207,8 @@ impl App {
                 .set_start_dir(&made.name, made.start_dir.as_deref());
             self.registry
                 .set_static_mcp(&made.name, made.static_mcp.clone());
+            self.registry
+                .set_extra_folders(&made.name, made.extra_folders.clone());
         }
         if let Some(name) = post.auth.as_ref().and_then(|r| r.token_name.as_ref()) {
             self.registry.set_last_token(name);
@@ -3247,6 +3534,16 @@ impl App {
         self.status = None;
     }
 
+    /// Turn sbx's telemetry off where nobody chose a value ([`sbx::disable_telemetry_by_default`]),
+    /// and say so. Called once as a dashboard starts.
+    pub fn disable_telemetry_by_default(&mut self) {
+        match sbx::disable_telemetry_by_default() {
+            Ok(true) => self.set_info(TELEMETRY_TURNED_OFF),
+            Ok(false) => {}
+            Err(e) => self.set_error(format!("could not turn sbx's telemetry off: {e:#}")),
+        }
+    }
+
     pub fn set_info(&mut self, msg: impl Into<String>) {
         self.status = Some((msg.into(), false, Instant::now()));
     }
@@ -3282,6 +3579,7 @@ impl App {
             Screen::Connection(_) => self.conn_key(key),
             Screen::ConnSwitch(_) => self.conn_switch_key(key),
             Screen::Folders(_) => self.folders_key(key),
+            Screen::Settings(_) => self.settings_key(key),
         }
     }
 
@@ -3521,6 +3819,7 @@ impl App {
             Screen::StartDir(f) => f.rows().len(),
             Screen::Approvals(_) => self.approval_rows().len(),
             Screen::Folders(f) => f.rows().len(),
+            Screen::Settings(f) => f.rows().len(),
             Screen::List => 0,
         };
         if index >= rows {
@@ -3539,6 +3838,7 @@ impl App {
             Screen::StartDir(f) => f.focus = index,
             Screen::Approvals(f) => f.focus = index,
             Screen::Folders(f) => f.focus = index,
+            Screen::Settings(f) => f.focus = index,
             Screen::List => {}
         }
     }
@@ -3650,6 +3950,16 @@ impl App {
                     rows[index],
                     FoldersRow::Browse | FoldersRow::Save | FoldersRow::Close
                 ) {
+                    self.on_key(KeyEvent::from(KeyCode::Enter));
+                }
+            }
+            Screen::Settings(form) => {
+                let rows = form.rows();
+                if index >= rows.len() {
+                    return;
+                }
+                form.focus = index;
+                if rows[index] == SettingsRow::Close {
                     self.on_key(KeyEvent::from(KeyCode::Enter));
                 }
             }
@@ -4611,6 +4921,15 @@ impl App {
     /// takes the cursor and the answer takes that value. A stored connection whose key is there
     /// answers its step, like a radio: picked, and on.
     fn pick_form_choice(&mut self, index: usize, value: usize) {
+        if let Screen::Settings(form) = &mut self.screen {
+            if form.rows().get(index) == Some(&SettingsRow::SkillsDefault) {
+                form.focus = index;
+                if let Some(&mode) = crate::create::SKILLS_MODES.get(value) {
+                    self.set_skills_default(mode);
+                }
+            }
+            return;
+        }
         let catalog = Arc::clone(&self.catalog);
         let Screen::Create(form) = &mut self.screen else {
             return;
@@ -5157,6 +5476,7 @@ impl App {
             | Action::Secrets
             | Action::Skills
             | Action::Folders
+            | Action::Settings
             | Action::Approvals
             | Action::Refresh
             | Action::Help => Ok(()),
@@ -5174,9 +5494,8 @@ impl App {
                 workspace(sb)?;
                 if !sb.can_pick_start_dir() {
                     return Err(Refusal::Error(format!(
-                        "no start folder for a `{}` sandbox — only Claude Code and OpenCode can be \
-                         started outside the workspace root from here",
-                        sb.agent
+                        "no start folder for {} — it mounts no host folder to open a subfolder of",
+                        sb.name
                     )));
                 }
                 Ok(())
@@ -5283,6 +5602,7 @@ impl App {
             Action::StartDir => self.action_start_dir(),
             Action::Skills => self.screen = Screen::Skills(SkillsForm::default()),
             Action::Folders => self.open_folders(None),
+            Action::Settings => self.open_settings(),
             Action::RepoSkills => self.action_sandbox_repo_skills(),
             Action::Approvals => self.action_approvals(),
             Action::KeepRunning => self.action_keep_running(),
@@ -5405,19 +5725,13 @@ impl App {
                 .flatten()
                 .map(|cmd| sbx::exec_argv(name, cmd)),
         );
-        // `None` keeps `sbx run`: no start folder, a missing one, or an agent with no known binary.
         let start = self
             .sandboxes
             .iter()
             .find(|s| s.name == name)
             .filter(|s| !s.start_dir_missing())
-            .and_then(|s| {
-                Some((
-                    crate::kits::agent_command(agent)?.to_string(),
-                    s.start_path(),
-                ))
-            })
-            .filter(|(_, dir)| *dir != self.workspace_of(name));
+            .map(|s| s.start_path())
+            .filter(|dir| *dir != self.workspace_of(name));
         // No trust step for the start folder: Claude Code trusts a folder below the trusted root.
         Handoff::Agent {
             name: name.to_string(),
@@ -5978,8 +6292,8 @@ impl App {
 
     // --- where the agent opens (the start folder) -------------------------------------------
 
-    /// Is there a sandbox whose start folder can be chosen? It needs an agent binary the dashboard
-    /// can name ([`crate::kits::agent_command`]).
+    /// Is there a sandbox whose start folder can be chosen? It needs a host folder
+    /// ([`Sandbox::can_pick_start_dir`]).
     pub fn can_pick_start_dir(&self) -> bool {
         self.selected().is_some_and(|sb| sb.can_pick_start_dir())
     }
@@ -6671,6 +6985,124 @@ impl App {
     fn action_approvals(&mut self) {
         self.screen = Screen::Approvals(ApprovalsForm::default());
         self.refresh();
+    }
+
+    // --- settings --------------------------------------------------------------------------
+
+    /// Open the settings screen on sbx's current values.
+    pub fn open_settings(&mut self) {
+        let mut form = SettingsForm::default();
+        form.read();
+        self.screen = Screen::Settings(form);
+    }
+
+    fn settings_key(&mut self, key: KeyEvent) {
+        let Screen::Settings(form) = &mut self.screen else {
+            return;
+        };
+        let rows = form.rows();
+        form.focus = form.focus.min(rows.len() - 1);
+        let row = rows[form.focus];
+        let n = rows.len();
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => self.screen = Screen::List,
+            KeyCode::Up | KeyCode::BackTab | KeyCode::Char('k') => {
+                form.focus = (form.focus + n - 1) % n
+            }
+            KeyCode::Down | KeyCode::Tab | KeyCode::Char('j') => form.focus = (form.focus + 1) % n,
+            KeyCode::Home | KeyCode::Char('g') => form.focus = 0,
+            KeyCode::End | KeyCode::Char('G') => form.focus = n - 1,
+            KeyCode::Enter | KeyCode::Char(' ') => match row {
+                SettingsRow::Setting(i) => self.toggle_setting(i),
+                SettingsRow::SkillsDefault => self.step_skills_default(true),
+                SettingsRow::Close => self.screen = Screen::List,
+            },
+            KeyCode::Right if row == SettingsRow::SkillsDefault => self.step_skills_default(true),
+            KeyCode::Left if row == SettingsRow::SkillsDefault => self.step_skills_default(false),
+            KeyCode::F(5) => form.read(),
+            KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => form.read(),
+            _ => {}
+        }
+    }
+
+    /// ↵, → or ← on the skills row: the next or the previous mode, tightest first, wrapping.
+    fn step_skills_default(&mut self, forward: bool) {
+        let Screen::Settings(form) = &self.screen else {
+            return;
+        };
+        match form.skills_mode() {
+            Some(mode) => self.set_skills_default(match forward {
+                true => mode.next(),
+                false => mode.prev(),
+            }),
+            None => self.set_error(format!(
+                "sbx's {SKILLS_DEFAULT_LABEL} could not be read — F5 reads it again"
+            )),
+        }
+    }
+
+    /// Make `mode` the skills default: one `sbx settings set`, then read the settings back. The
+    /// next refresh hands it to the create wizard.
+    fn set_skills_default(&mut self, mode: sbx::SkillsMode) {
+        let Screen::Settings(form) = &self.screen else {
+            return;
+        };
+        if form.skills_mode() == Some(mode) {
+            return;
+        }
+        let key = sbx::SKILLS_DEFAULT_MODE;
+        self.start_job(PendingJob {
+            title: format!(
+                "Making {} the skills default",
+                crate::create::skills_mode_name(mode)
+            ),
+            steps: vec![Step::new(
+                format!("sbx settings set {key} {}", mode.flag()),
+                sbx::setting_set_argv(key, mode.flag()),
+            )],
+            post: PostJob {
+                reread_settings: true,
+                ..Default::default()
+            },
+            fallback: None,
+            fallback_hint: None,
+        });
+    }
+
+    /// Turn setting `i` the other way: one `sbx settings set`, then read the settings back.
+    fn toggle_setting(&mut self, i: usize) {
+        let Screen::Settings(form) = &self.screen else {
+            return;
+        };
+        let spec = SETTINGS[i];
+        let Some(value) = form.value(i) else {
+            self.set_error(format!(
+                "sbx's {} setting could not be read — F5 reads it again",
+                spec.label
+            ));
+            return;
+        };
+        if let Some(var) = form.env_var(i) {
+            self.set_error(format!(
+                "{var} in sbx's environment sets {}: a change here would not apply",
+                spec.label
+            ));
+            return;
+        }
+        let new = !value;
+        self.start_job(PendingJob {
+            title: format!("Turning {} {}", spec.label, spec.word(new)),
+            steps: vec![Step::new(
+                format!("sbx settings set {} {new}", spec.key),
+                sbx::setting_set_argv(spec.key, &new.to_string()),
+            )],
+            post: PostJob {
+                reread_settings: true,
+                ..Default::default()
+            },
+            fallback: None,
+            fallback_hint: None,
+        });
     }
 
     fn approvals_key(&mut self, key: KeyEvent) {
@@ -8232,6 +8664,7 @@ impl App {
             problem,
             workspace,
             git_guard,
+            typed_folders,
         ) = {
             let Screen::Create(form) = &self.screen else {
                 return;
@@ -8273,6 +8706,7 @@ impl App {
                     .find_map(|step| form.step_problem(step, &catalog)),
                 form.workspace_root(&self.cwd),
                 form.git_guard_offered() && form.workspace.git_guard,
+                form.workspace.extra_folders.value.trim().to_string(),
             )
         };
         // Checked first: sbx would refuse the create only at the very end.
@@ -8320,7 +8754,15 @@ impl App {
             mounts: mut ro_mounts,
             notes,
         } = model::kit_mounts(&addons);
-        let folder_plan = self.folder_plan(&workspace);
+        let mut folder_plan = self.folder_plan(&workspace);
+        let home = model::home_dir();
+        let (extra, problems) = folders::extras(&typed_folders, &folder_plan, home.as_deref());
+        if let Some(problem) = problems.into_iter().next() {
+            self.set_error(problem);
+            return;
+        }
+        let extra_folders: Vec<String> = extra.iter().map(folders::Folder::sbx_spec).collect();
+        folder_plan.folders.extend(extra);
         ro_mounts.splice(
             0..0,
             git_guard.then(|| folders::git_guard(&workspace)).flatten(),
@@ -8432,15 +8874,11 @@ impl App {
                     skills,
                     start_dir: start_dir.clone(),
                     static_mcp: static_mcp.clone(),
+                    extra_folders,
                 }),
                 auth: use_token.then(|| AuthRecord::named(&name, &token_name)),
                 attach_start: attach
-                    .then(|| {
-                        Some((
-                            crate::kits::agent_command(&backend.agent)?.to_string(),
-                            workspace.join(start_dir.as_ref()?),
-                        ))
-                    })
+                    .then(|| Some(workspace.join(start_dir.as_ref()?)))
                     .flatten(),
                 // The create drops any selection left under this name, so only the addons count.
                 attach_skill_steps: match attach {
@@ -8882,9 +9320,19 @@ impl App {
             mounts: mut ro_mounts,
             notes: mut mount_notes,
         } = model::kit_mounts(addons);
-        // The host folders as the lists say now, and the `.git` guard the sandbox has.
+        // The host folders as the lists say now, those typed for this sandbox alone, and the
+        // `.git` guard the sandbox has.
         let git_guard = folders::has_git_guard(&sb.workspace, &sb.ro_mounts);
-        let folder_plan = self.folder_plan(&sb.workspace);
+        let mut folder_plan = self.folder_plan(&sb.workspace);
+        let recorded = self.registry.extra_folders(name);
+        let home = model::home_dir();
+        let (extra, problems) = folders::extras_of(
+            recorded.iter().map(String::as_str),
+            &folder_plan,
+            home.as_deref(),
+        );
+        folder_plan.folders.extend(extra);
+        mount_notes.extend(problems);
         ro_mounts.splice(
             0..0,
             git_guard
@@ -9155,7 +9603,13 @@ impl App {
             ));
         }
         let static_mcp = self.registry.static_mcp(name);
-        if !static_mcp.is_empty() {
+        if sbx::is_no_mcp(&static_mcp) {
+            body.push(format!(
+                "It comes back with no MCP server, as it was created: {}. One loaded since with \
+                 sbx mcp load is not carried over — sbx reports no sandbox's current servers.",
+                crate::create::NO_MCP
+            ));
+        } else if !static_mcp.is_empty() {
             body.push(format!(
                 "Its MCP servers come back as the fixed set it was created with: {}. One loaded or \
                  unloaded since with sbx mcp load / unload is not carried over — sbx reports no \
@@ -9243,7 +9697,7 @@ impl App {
             loading: false,
             quit: false,
             handoff: None,
-            sbx_version: "v0.50.1".into(),
+            sbx_version: "v0.51.0".into(),
             // The production default, so the tests exercise the path a real start takes.
             auto_update: true,
             // One connection, `acme`, in a scratch folder: never the user's.
@@ -10003,9 +10457,9 @@ mod tests {
         press(&mut app, KeyCode::Left);
         assert_eq!(focus(&app), WizardRow::Cancel);
 
-        // Up leaves the whole line, onto the step's last row: the blocked-hosts field here.
+        // Up leaves the whole line, onto the step's last row: the no-MCP tick here.
         press(&mut app, KeyCode::Up);
-        assert_eq!(focus(&app), WizardRow::Field(CreateRow::DenyNetwork));
+        assert_eq!(focus(&app), WizardRow::Field(CreateRow::McpNone));
         press(&mut app, KeyCode::Down);
         assert_eq!(
             focus(&app),
@@ -10317,6 +10771,80 @@ mod tests {
     }
 
     #[test]
+    fn a_create_mounts_the_folders_typed_for_it_at_their_targets_and_records_them() {
+        let root = std::env::temp_dir().join(format!("aisbx-tests-extras-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for d in ["more-ws", "docs", "data", "kb", "state"] {
+            std::fs::create_dir_all(root.join(d)).unwrap();
+        }
+        let root = std::fs::canonicalize(&root).unwrap();
+        let state = root.join("state");
+        let kb = folders::Entry {
+            path: root.join("kb"),
+            access: folders::Access::Read,
+            purpose: String::new(),
+        };
+        folders::put(&state, kb).unwrap();
+        let mut app = App::for_test(Catalog::load().unwrap(), Vec::new());
+        app.cwd = root.join("more-ws");
+        app.mounts_state = state;
+        let docs = format!("{}:ro", root.join("docs").display());
+        let data = format!("{}:/workspace/data", root.join("data").display());
+
+        app.open_create();
+        if let Screen::Create(form) = &mut app.screen {
+            form.workspace.extra_folders = TextInput::new(format!(" {docs} ,{data}, "));
+        }
+        press_create_only(&mut app);
+        let Some(Modal::Running(_, pending)) = app.modal.take() else {
+            panic!("a job was started: {:?}", app.status)
+        };
+        let create = &pending.steps[0].argv;
+        let at = |spec: &str| create.iter().position(|a| a == spec);
+        let kb = at(&format!("{}:ro", root.join("kb").display())).expect("the host's folder");
+        let typed = (at(&docs).expect("docs"), at(&data).expect("data"));
+        assert!(kb < typed.0 && typed.0 < typed.1, "{create:?}");
+        let kit = create
+            .iter()
+            .find(|a| folders::is_kit(a.rsplit(std::path::MAIN_SEPARATOR).next().unwrap()))
+            .expect("the folder kit");
+        let text = std::fs::read_to_string(crate::kits::descriptor_path(Path::new(kit))).unwrap();
+        let line = format!(
+            "`/workspace/data` (read-write, the host's `{}`)",
+            root.join("data").display()
+        );
+        assert!(
+            text.contains(&line),
+            "the agent learns where it sees the folder: {text}"
+        );
+        let name = (pending.post.register.as_ref()).map(|r| r.name.clone());
+        app.apply_post(&pending.post);
+        assert_eq!(
+            app.registry.extra_folders(&name.expect("registered")),
+            [docs, data],
+            "recorded, so a rebuild mounts them again"
+        );
+
+        let gone = format!("{}:/gone", root.join("gone").display());
+        let steps = submit_create_form(&mut app, |form| {
+            form.workspace.extra_folders = TextInput::new(gone.clone())
+        });
+        assert!(steps.is_empty(), "{steps:?}");
+        let (text, err, _) = app.status.clone().expect("a reason is shown");
+        assert!(err);
+        assert_eq!(text, format!("“{gone}”: the folder does not exist"));
+        let inside = format!("{}:{}/data", root.join("data").display(), app.cwd.display());
+        let steps = submit_create_form(&mut app, |form| {
+            form.workspace.extra_folders = TextInput::new(inside.clone())
+        });
+        assert!(steps.is_empty(), "{steps:?}");
+        let (text, _, _) = app.status.clone().expect("a reason is shown");
+        let why = "the target is the workspace or inside it";
+        assert_eq!(text, format!("“{inside}”: {why}"));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
     fn the_folders_screen_adds_edits_and_deletes_the_hosts_folders() {
         let state =
             std::env::temp_dir().join(format!("aisbx-tests-folders-screen-{}", std::process::id()));
@@ -10612,7 +11140,10 @@ mod tests {
         // Claude Code reads its gateway and pins from its environment, and gets its model picker
         // merged into its settings.
         let handoff = start(&mut app, 0);
-        assert_eq!(handoff.argv(), sbx::attach_argv("claude-litellm-proj"));
+        assert_eq!(
+            handoff.argv(),
+            sbx::attach_argv("claude-litellm-proj", None)
+        );
         let picker = app.config_push("claude-litellm-proj").expect("the picker");
         assert!(picker.contains(&crate::litellm::CLAUDE_SETTINGS_PATH.to_string()));
         assert_eq!(
@@ -10654,7 +11185,10 @@ mod tests {
         app.auto_update = false;
         let handoff = start(&mut app, 0);
         assert_eq!(handoff.prelude(), [label("claude-litellm-proj"), picker]);
-        assert_eq!(handoff.argv(), sbx::attach_argv("claude-litellm-proj"));
+        assert_eq!(
+            handoff.argv(),
+            sbx::attach_argv("claude-litellm-proj", None)
+        );
         assert_eq!(start(&mut app, 1).prelude(), [label("opencode-proj"), push]);
     }
 
@@ -10921,14 +11455,14 @@ mod tests {
     }
 
     #[test]
-    fn a_start_folder_launches_the_agent_through_exec_w_instead_of_run() {
+    fn a_start_folder_launches_the_agent_through_run_workdir() {
         let (mut app, root) = app_in_tree("launch");
 
         app.action_start();
         let handoff = app.handoff.take().expect("a session was handed over");
         assert_eq!(
             handoff.argv(),
-            sbx::attach_argv("claude-litellm-proj"),
+            sbx::attach_argv("claude-litellm-proj", None),
             "no start folder keeps `sbx run --name`, which is what every sandbox did before"
         );
 
@@ -10939,7 +11473,7 @@ mod tests {
         let handoff = app.handoff.take().expect("a session was handed over");
         assert_eq!(
             handoff.argv(),
-            sbx::agent_in_argv("claude-litellm-proj", "claude", &root.join("notes")),
+            sbx::attach_argv("claude-litellm-proj", Some(&root.join("notes"))),
         );
         // The workspace is mounted at its host path, so the argument is the host path verbatim.
         assert!(
@@ -10952,7 +11486,7 @@ mod tests {
     }
 
     #[test]
-    fn a_claude_start_folder_still_launches_in_bypass_permissions_mode() {
+    fn a_start_folder_launches_the_kits_own_entrypoint() {
         let (mut app, root) = app_in_tree("yolo");
         app.sandboxes[0].start_dir = Some(PathBuf::from("notes"));
         app.action_start();
@@ -10961,16 +11495,26 @@ mod tests {
             .take()
             .expect("a session was handed over")
             .argv();
+        let dir = root.join("notes").display().to_string();
         assert_eq!(
-            argv.last().map(String::as_str),
-            Some("--dangerously-skip-permissions"),
-            "{argv:?}"
+            argv,
+            [
+                "sbx",
+                "run",
+                "--name",
+                "claude-litellm-proj",
+                "--workdir",
+                &dir
+            ],
+            "sbx starts the kit's entrypoint, its flags included: no agent binary in the argv"
         );
 
-        // OpenCode gets no flags: its auto-approve is in the container, which `exec` inherits.
-        assert_eq!(
-            sbx::agent_in_argv("opencode-proj", "opencode", &root.join("notes")).last(),
-            Some(&"opencode".to_string()),
+        let mut other = model::sample("other-proj", None, &[]);
+        other.agent = "some-foreign-agent".into();
+        other.workspace = root.clone();
+        assert!(
+            other.can_pick_start_dir(),
+            "an agent aisbx knows nothing about can open in a subfolder too"
         );
     }
 
@@ -10994,7 +11538,7 @@ mod tests {
         );
         assert_eq!(
             handoff.argv(),
-            sbx::agent_in_argv("claude-litellm-proj", "claude", &dir)
+            sbx::attach_argv("claude-litellm-proj", Some(&dir))
         );
         assert!(
             handoff
@@ -11028,7 +11572,7 @@ mod tests {
         );
         assert_eq!(
             handoff.argv(),
-            sbx::agent_in_argv("opencode-proj", "opencode", &root.join("aisbx"))
+            sbx::attach_argv("opencode-proj", Some(&root.join("aisbx")))
         );
     }
 
@@ -11042,7 +11586,7 @@ mod tests {
         let handoff = app.handoff.take().expect("a session was handed over");
         assert_eq!(
             handoff.argv(),
-            sbx::attach_argv("claude-litellm-proj"),
+            sbx::attach_argv("claude-litellm-proj", None),
             "the start is not failed, only moved back to the root"
         );
         assert!(
@@ -11215,20 +11759,27 @@ mod tests {
     }
 
     #[test]
-    fn the_start_folder_is_only_offered_where_the_agent_can_be_launched() {
+    fn the_start_folder_is_offered_wherever_a_host_folder_is_mounted() {
         let claude = model::sample("claude-litellm-proj", Some("claude-litellm"), &[]);
         let mut stranger = model::sample("gemini-lab", None, &[]);
         stranger.agent = "gemini".into();
-        let mut app = App::for_test(Catalog::load().unwrap(), vec![claude, stranger]);
+        let mut scratch = model::sample("claude-litellm-scratch", Some("claude-litellm"), &[]);
+        scratch.workspace = PathBuf::new();
+        let mut app = App::for_test(Catalog::load().unwrap(), vec![claude, stranger, scratch]);
 
         app.cursor = 0;
         assert!(app.can_pick_start_dir());
         app.cursor = 1;
+        assert!(
+            app.can_pick_start_dir(),
+            "`sbx run --workdir` needs nothing from the agent"
+        );
+        app.cursor = 2;
         assert!(!app.can_pick_start_dir());
         app.on_key(KeyEvent::from(KeyCode::Char('w')));
         assert!(
             matches!(app.screen, Screen::List),
-            "no picker for an unknown agent"
+            "no picker without a host folder"
         );
     }
 
@@ -12655,6 +13206,42 @@ mod tests {
     }
 
     #[test]
+    fn a_rebuild_mounts_the_folders_typed_for_it_again_and_names_one_that_is_gone() {
+        let root =
+            std::env::temp_dir().join(format!("aisbx-tests-rebuild-extras-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for d in ["proj", "data", "state"] {
+            std::fs::create_dir_all(root.join(d)).unwrap();
+        }
+        let root = std::fs::canonicalize(&root).unwrap();
+        let mut sb = model::sample("claude-litellm-more", Some("claude-litellm"), &[]);
+        sb.workspace = root.join("proj");
+        let name = sb.name.clone();
+        let mut app = App::for_test(Catalog::load().unwrap(), vec![sb]);
+        app.mounts_state = root.join("state");
+        let data = format!("{}:/workspace/data:ro", root.join("data").display());
+        let gone = root.join("gone").display().to_string();
+        app.registry
+            .set_extra_folders(&name, vec![data.clone(), gone.clone()]);
+        let confirm = app
+            .recreate_confirm(&name, &[], None, "Recreate", Vec::new())
+            .expect("a managed sandbox");
+        let create = (confirm.job.steps.iter())
+            .find(|s| s.argv.get(1).is_some_and(|a| a == "create"))
+            .unwrap();
+        assert!(create.argv.contains(&data), "{:?}", create.argv);
+        assert!(
+            !create.argv.iter().any(|a| a.starts_with(&gone)),
+            "{:?}",
+            create.argv
+        );
+        let body = confirm.body.join("\n");
+        let note = format!("Not mounted: “{gone}”: the folder does not exist.");
+        assert!(body.contains(&note), "{body}");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
     fn a_rebuild_repeats_the_recorded_limits_and_the_sbx_mount_mounts() {
         let mut sb = model::sample("claude-litellm-proj", Some("claude-litellm"), &[]);
         sb.cpus = Some(2);
@@ -13382,6 +13969,56 @@ mod tests {
             panic!("the create form is open")
         };
         assert_eq!(form.wizard_step(), CreateStep::Provider);
+    }
+
+    #[test]
+    fn no_mcp_comes_back_with_the_last_creates_answers() {
+        let mut app = app_on(&[crate::testkit::acme()], Vec::new());
+        app.mcp = vec![sbx::McpServer {
+            name: "notion".into(),
+            status: "ready".into(),
+            ..sbx::McpServer::default()
+        }];
+        app.open_create();
+        let catalog = Arc::clone(&app.catalog);
+        let Screen::Create(form) = &mut app.screen else {
+            panic!("the create form is open")
+        };
+        form.toggle_no_mcp();
+        let defaults = form.defaults(&catalog);
+        assert_eq!(defaults.mcp, ["none"]);
+
+        app.registry.set_create_defaults(defaults);
+        app.screen = Screen::List;
+        app.open_create();
+        let Screen::Create(form) = &app.screen else {
+            panic!("the create form is open")
+        };
+        assert!(form.workspace.no_mcp);
+        assert_eq!(form.workspace.static_mcp, [false]);
+        assert_eq!(form.selected_mcp(), ["none"]);
+    }
+
+    #[test]
+    fn a_rebuild_repeats_no_mcp_and_says_so() {
+        let sb = model::sample("box", Some("claude-anthropic"), &[]);
+        let mut app = App::for_test(Catalog::load().unwrap(), vec![sb]);
+        app.registry.set_static_mcp("box", vec!["none".into()]);
+        app.cursor = 0;
+        app.action_recreate();
+        let Some(Modal::Confirm(confirm)) = &app.modal else {
+            panic!("a rebuild asks first: {:?}", app.status)
+        };
+        let create = (confirm.job.steps.iter())
+            .find(|s| s.argv.get(1).map(String::as_str) == Some("create"))
+            .expect("a create step");
+        let at = (create.argv.iter())
+            .position(|a| a == "--static-mcp")
+            .expect("the fixed set");
+        assert_eq!(create.argv[at + 1], "none");
+        let body = confirm.body.join(" ");
+        assert!(body.contains(crate::create::NO_MCP), "{body}");
+        assert!(!body.contains("fixed set it was created with"), "{body}");
     }
 
     #[test]
@@ -14864,6 +15501,214 @@ mod action_tests {
     }
 
     #[test]
+    fn t_opens_the_settings_and_a_change_is_one_settings_job() {
+        let mut app = app();
+        on(&mut app, "box");
+        app.on_key(KeyEvent::from(KeyCode::Char('T')));
+        let Screen::Settings(form) = &mut app.screen else {
+            panic!("T opens the settings: {:?}", said(&app))
+        };
+        let rows = form.rows();
+        assert_eq!(
+            rows,
+            [
+                SettingsRow::Setting(0),
+                SettingsRow::Setting(1),
+                SettingsRow::Setting(2),
+                SettingsRow::Setting(3),
+                SettingsRow::SkillsDefault,
+                SettingsRow::Close
+            ]
+        );
+        assert_eq!(form.view(0).0, "unknown", "nothing is read under test");
+
+        // Unknown: nothing is changed blind.
+        app.on_key(KeyEvent::from(KeyCode::Enter));
+        assert!(app.modal.is_none());
+        assert!(said(&app).is_some_and(|(text, error)| error && text.contains("F5")));
+
+        let (telemetry, copy) = (sbx::TELEMETRY_DISABLED, sbx::CLIPBOARD_TEXT_COPY);
+        let paste = sbx::CLIPBOARD_IMAGE_PASTE;
+        for (i, value, key, set) in [
+            (0, false, telemetry, "true"),
+            (0, true, telemetry, "false"),
+            (1, false, copy, "true"),
+            (2, false, paste, "true"),
+            (2, true, paste, "false"),
+            (3, true, sbx::SANDBOX_FUSE, "false"),
+        ] {
+            app.modal = None;
+            let Screen::Settings(form) = &mut app.screen else {
+                panic!("still on the settings")
+            };
+            form.values[i] = Some(crate::testkit::bool_setting(key, value));
+            form.focus = i;
+            app.on_key(KeyEvent::from(KeyCode::Char(' ')));
+            let Some(Modal::Running(_, pending)) = &app.modal else {
+                panic!("a change runs a job: {:?}", said(&app))
+            };
+            assert_eq!(pending.steps[0].argv, sbx::setting_set_argv(key, set));
+            assert!(pending.post.reread_settings, "and reads the values back");
+        }
+
+        // A click on a setting only moves the cursor; one on Close closes.
+        app.modal = None;
+        app.click(Hit::FormRow(1));
+        assert!(app.modal.is_none(), "no job from a click on the row");
+        app.click(Hit::FormRow(5));
+        assert!(matches!(app.screen, Screen::List));
+    }
+
+    #[test]
+    fn the_skills_default_walks_its_three_modes_one_job_each() {
+        let mut app = app();
+        app.on_key(KeyEvent::from(KeyCode::Char('T')));
+        let skills_row = SETTINGS.len();
+        let job = |app: &App| match &app.modal {
+            Some(Modal::Running(_, pending)) => Some(pending.steps[0].argv.clone()),
+            _ => None,
+        };
+        let set = |mode: &str| sbx::setting_set_argv(sbx::SKILLS_DEFAULT_MODE, mode);
+        let at = |app: &mut App, mode: &str| {
+            app.modal = None;
+            let Screen::Settings(form) = &mut app.screen else {
+                panic!("on the settings")
+            };
+            form.skills = Some(crate::testkit::skills_default(mode));
+            form.focus = skills_row;
+        };
+
+        // Unknown: refused.
+        let Screen::Settings(form) = &mut app.screen else {
+            panic!("T opens the settings")
+        };
+        form.focus = skills_row;
+        app.on_key(KeyEvent::from(KeyCode::Enter));
+        assert!(job(&app).is_none());
+        assert!(said(&app).is_some_and(|(text, error)| error && text.contains("F5")));
+
+        // ↵ and → walk forward, ← back, tightest first and wrapping.
+        for (from, key, to) in [
+            ("readonly", KeyCode::Enter, "readwrite"),
+            ("readonly", KeyCode::Right, "readwrite"),
+            ("readwrite", KeyCode::Char(' '), "off"),
+            ("readonly", KeyCode::Left, "off"),
+            ("off", KeyCode::Left, "readwrite"),
+        ] {
+            at(&mut app, from);
+            app.on_key(KeyEvent::from(key));
+            assert_eq!(job(&app), Some(set(to)), "{key:?} from {from}");
+        }
+
+        // A click on a mode sets it; one on the current mode does nothing.
+        at(&mut app, "readonly");
+        app.click(Hit::FormChoice(skills_row, 0));
+        assert_eq!(job(&app), Some(set("off")));
+        at(&mut app, "readonly");
+        app.click(Hit::FormChoice(skills_row, 1));
+        assert!(job(&app).is_none(), "already read-only");
+    }
+
+    #[test]
+    fn the_skills_default_says_what_new_sandboxes_get() {
+        let mut form = SettingsForm::default();
+        assert_eq!(form.skills_view().0, "unknown");
+        for (mode, word, tone) in [
+            ("off", "off", SettingTone::Calm),
+            ("readonly", "read-only", SettingTone::Plain),
+            ("readwrite", "read-write", SettingTone::Warn),
+        ] {
+            form.skills = Some(crate::testkit::skills_default(mode));
+            let (state, meaning, got) = form.skills_view();
+            assert_eq!((state, got), (word, tone), "{mode}");
+            assert!(meaning.starts_with("new sandboxes"), "{meaning}");
+        }
+        assert!(SKILLS_DEFAULT_NOTE.contains(sbx::SKILLS_DEFAULT_MODE));
+    }
+
+    #[test]
+    fn a_setting_the_environment_sets_says_so_and_is_not_changed() {
+        let mut app = app();
+        app.on_key(KeyEvent::from(KeyCode::Char('T')));
+        let Screen::Settings(form) = &mut app.screen else {
+            panic!("T opens the settings")
+        };
+        let mut set = crate::testkit::bool_setting(sbx::CLIPBOARD_IMAGE_PASTE, true);
+        set.source = "envvar".into();
+        form.values[2] = Some(set);
+        form.focus = 2;
+        let (state, meaning) = form.view(2);
+        assert_eq!(state, "on");
+        assert!(
+            meaning.contains("set by DOCKER_SANDBOXES_CLIPBOARD_IMAGE_PASTE"),
+            "{meaning}"
+        );
+        app.on_key(KeyEvent::from(KeyCode::Enter));
+        assert!(app.modal.is_none(), "a stored value would not apply");
+        assert!(said(&app).is_some_and(|(text, error)| {
+            error && text.contains("DOCKER_SANDBOXES_CLIPBOARD_IMAGE_PASTE")
+        }));
+    }
+
+    #[test]
+    fn each_setting_says_what_its_value_means() {
+        let mut form = SettingsForm::default();
+        assert_eq!(form.view(0).0, "unknown");
+        form.error = Some("daemon down".into());
+        assert!(form.view(1).1.contains("daemon down"));
+        let copy = |value| crate::testkit::bool_setting(sbx::CLIPBOARD_TEXT_COPY, value);
+        let telemetry = |value| crate::testkit::bool_setting(sbx::TELEMETRY_DISABLED, value);
+        let paste = |value| crate::testkit::bool_setting(sbx::CLIPBOARD_IMAGE_PASTE, value);
+        let fuse = |value| crate::testkit::bool_setting(sbx::SANDBOX_FUSE, value);
+        form.values = vec![
+            Some(telemetry(true)),
+            Some(copy(true)),
+            Some(paste(true)),
+            Some(fuse(true)),
+        ];
+        assert_eq!(form.view(0), ("off", SETTINGS[0].meanings[0].to_string()));
+        assert_eq!(form.view(1), ("on", SETTINGS[1].meanings[0].to_string()));
+        assert_eq!(form.view(2), ("on", SETTINGS[2].meanings[0].to_string()));
+        assert_eq!(form.view(3), ("on", SETTINGS[3].meanings[0].to_string()));
+        let tones: Vec<SettingTone> = (0..SETTINGS.len())
+            .map(|i| SETTINGS[i].tone(form.value(i)))
+            .collect();
+        assert_eq!(
+            tones,
+            [
+                SettingTone::Calm,
+                SettingTone::Warn,
+                SettingTone::Warn,
+                SettingTone::Plain
+            ],
+            "telemetry off is calm, an opened clipboard a warning, FUSE neither"
+        );
+        assert_eq!(SETTINGS[0].tone(None), SettingTone::Unknown);
+        form.values = vec![
+            Some(telemetry(false)),
+            Some(copy(false)),
+            Some(paste(false)),
+            Some(fuse(false)),
+        ];
+        assert_eq!(
+            form.view(0).0,
+            "on",
+            "telemetry.disabled false: telemetry on"
+        );
+        assert_eq!(form.view(1).0, "off");
+        assert_eq!(form.view(2).0, "off");
+        assert_eq!(form.view(3).0, "off");
+        assert_eq!(SETTINGS[3].tone(Some(false)), SettingTone::Plain);
+        for spec in SETTINGS {
+            assert!(
+                spec.note.contains(spec.key),
+                "{} names its command",
+                spec.label
+            );
+        }
+    }
+
+    #[test]
     fn each_action_key_is_perform() {
         for cell in ["box", "run", "new"] {
             for action in Action::ALL {
@@ -15724,12 +16569,16 @@ mod form_decision_tests {
                 ("Kits", CreateStep::Kits, true),
                 ("Label", CreateStep::Workspace, false),
                 ("Opens in", CreateStep::Workspace, true),
+                ("More folders", CreateStep::Workspace, true),
                 ("Clone mode", CreateStep::Workspace, true),
                 ("Skills", CreateStep::Workspace, true),
                 ("Ports", CreateStep::Workspace, true),
                 ("Blocked hosts", CreateStep::Workspace, true),
+                ("MCP servers", CreateStep::Workspace, true),
             ]
         );
+        assert_eq!(review.answers[8].value, "none");
+        assert_eq!(review.answers[13].value, crate::create::DYNAMIC_MCP);
         assert_eq!(review.answers[0].value, "LiteLLM");
         assert_eq!(review.answers[1].value, "acme");
         assert_eq!(review.answers[2].value, "Claude Code");
@@ -15770,7 +16619,7 @@ mod form_decision_tests {
                 .default
         };
         type Change = fn(&mut CreateForm, &Catalog);
-        let changes: [(&str, Change); 9] = [
+        let changes: [(&str, Change); 11] = [
             ("Models", |f, c| {
                 f.connection
                     .models
@@ -15781,6 +16630,9 @@ mod form_decision_tests {
             ("Opens in", |f, _| {
                 f.workspace.start_dir = Some("sub".into())
             }),
+            ("More folders", |f, _| {
+                f.workspace.extra_folders = TextInput::new("/srv/docs:ro")
+            }),
             ("Clone mode", |f, _| f.workspace.clone = true),
             ("Skills", |f, _| {
                 f.workspace.skills = f.workspace.skills.next()
@@ -15790,6 +16642,7 @@ mod form_decision_tests {
                 f.workspace.deny_network = TextInput::new("example.com")
             }),
             ("MCP servers", |f, _| f.workspace.static_mcp[0] = true),
+            ("MCP servers", |f, _| f.workspace.no_mcp = true),
         ];
         for (label, change) in changes {
             app.open_create();

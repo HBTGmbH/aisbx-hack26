@@ -160,6 +160,8 @@ before this file exists: wait for it before you rely on the cache.
 - **Private packages in your caches become readable to the agent.**
 - The agent cannot write to the host caches, also not as root.
 - The mounts are fixed at creation. To add a kit later, rebuild.
+- **They need sbx's FUSE setting on**, which is its default. With *FUSE* off (`T`), root in a new sandbox cannot
+  mount, so the overlay fails and the status file says `failed`. See [FUSE](sandboxes.md#fuse-filesystems-t).
 
 ## Host skills (read-only)
 

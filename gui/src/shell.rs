@@ -87,7 +87,10 @@ fn open(args: &Args) -> State {
         }
     };
     match App::new(catalog, args.show_other, version, true, args.auto_update) {
-        Ok(app) => State::Ready(Box::new(app)),
+        Ok(mut app) => {
+            app.disable_telemetry_by_default();
+            State::Ready(Box::new(app))
+        }
         Err(e) => blocked(e, false),
     }
 }
@@ -185,6 +188,7 @@ fn form_screen(screen: &Screen) -> bool {
         | Screen::Connection(_)
         | Screen::ConnSwitch(_)
         | Screen::Folders(_)
+        | Screen::Settings(_)
         | Screen::Connect(_) => true,
         Screen::List => false,
     }
@@ -447,6 +451,7 @@ fn screen(ui: &mut egui::Ui, app: &mut App, moved: bool, busy: bool) {
         Screen::Approvals(_) => approvals::show(ui, app),
         Screen::Connect(_) => connect::show(ui, app),
         Screen::Folders(_) => crate::folders::show(ui, app),
+        Screen::Settings(_) => crate::settings::show(ui, app),
     }
 }
 

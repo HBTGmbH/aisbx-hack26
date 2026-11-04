@@ -52,6 +52,7 @@ pub(crate) fn draw_in(frame: &mut Frame, app: &mut App, caps: theme::Caps) {
         Screen::Connection(_) => form::render_connection(frame, app, body),
         Screen::ConnSwitch(_) => form::render_conn_switch(frame, app, body),
         Screen::Folders(_) => form::render_folders(frame, app, body),
+        Screen::Settings(_) => form::render_settings(frame, app, body),
     };
     hits.extend(render_header(frame, app, header));
     let footer_hits = render_footer(frame, app, footer, caps);
@@ -276,6 +277,7 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect, caps: theme::Caps) ->
                     CreateRow::Addon(_)
                     | CreateRow::Clone
                     | CreateRow::GitGuard
+                    | CreateRow::McpNone
                     | CreateRow::Mcp(_),
                 )) => vec![
                     ("↑↓", "move", KeyCode::Down),
@@ -378,6 +380,11 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect, caps: theme::Caps) ->
             ("↑↓", "move", KeyCode::Down),
             ("a/↵", "allow", KeyCode::Char('a')),
             ("d", "dismiss", KeyCode::Char('d')),
+            ("esc", "back", KeyCode::Esc),
+        ],
+        Screen::Settings(_) => vec![
+            ("↑↓", "move", KeyCode::Down),
+            ("↵", "change", KeyCode::Enter),
             ("esc", "back", KeyCode::Esc),
         ],
         // Left/right walks the tree here, not the button line, so it is named before Enter.
@@ -704,6 +711,21 @@ pub(crate) mod tests_support {
         out.push(("Approvals — two sandboxes".to_string(), render(&mut app)));
         app.approvals.clear();
         out.push(("Approvals — nothing waiting".to_string(), render(&mut app)));
+        let setting = aisbx_core::testkit::bool_setting;
+        app.screen = Screen::Settings(crate::app::SettingsForm {
+            values: vec![
+                Some(setting(crate::sbx::TELEMETRY_DISABLED, true)),
+                Some(setting(crate::sbx::CLIPBOARD_TEXT_COPY, false)),
+                Some(setting(crate::sbx::CLIPBOARD_IMAGE_PASTE, false)),
+                Some(setting(crate::sbx::SANDBOX_FUSE, true)),
+            ],
+            skills: Some(aisbx_core::testkit::skills_default("readonly")),
+            ..Default::default()
+        });
+        out.push((
+            "Settings — telemetry, clipboard copy and image paste off".to_string(),
+            render(&mut app),
+        ));
         app.screen = Screen::List;
 
         // Kept running, with a published port and recorded limits.
@@ -1192,6 +1214,49 @@ mod tests {
 
     /// Two sandboxes in the current folder plus one that belongs elsewhere, so every render goes
     /// through both sections.
+    #[test]
+    fn the_settings_screen_shows_telemetry_and_what_a_change_does() {
+        let mut app = app_with(populated());
+        app.on_key(KeyEvent::from(KeyCode::Char('T')));
+        let Screen::Settings(form) = &mut app.screen else {
+            panic!("T opens the settings")
+        };
+        let setting = aisbx_core::testkit::bool_setting;
+        form.values = vec![
+            Some(setting(crate::sbx::TELEMETRY_DISABLED, false)),
+            Some(setting(crate::sbx::CLIPBOARD_TEXT_COPY, false)),
+            Some(setting(crate::sbx::CLIPBOARD_IMAGE_PASTE, false)),
+            Some(setting(crate::sbx::SANDBOX_FUSE, true)),
+        ];
+        form.skills = Some(aisbx_core::testkit::skills_default("readonly"));
+        let screen = super::tests_support::render_at(&mut app, 110, 30);
+        let [telemetry, copy, paste, fuse] = crate::app::SETTINGS;
+        for text in [
+            "Settings",
+            telemetry.label,
+            telemetry.meaning(false),
+            copy.label,
+            copy.meaning(false),
+            paste.label,
+            paste.meaning(false),
+            fuse.label,
+            fuse.meaning(true),
+            crate::app::SKILLS_DEFAULT_LABEL,
+            "read-only",
+            "Close",
+        ] {
+            assert!(screen.contains(text), "{text:?}: {screen}");
+        }
+        assert!(
+            screen.contains("A running daemon follows"),
+            "what a change needs: {screen}"
+        );
+        assert!(screen.contains("change"), "the footer names ↵: {screen}");
+        for &(w, h) in SIZES {
+            super::tests_support::render_at(&mut app, w, h);
+        }
+    }
+
     pub(super) fn populated() -> Vec<Sandbox> {
         let mut a = model::sample(
             "claude-anthropic-proj",
@@ -1345,18 +1410,16 @@ mod tests {
     }
 
     #[test]
-    fn the_create_form_offers_blocked_hosts_and_only_offers_mcp_when_there_is_any() {
+    fn the_create_form_offers_blocked_hosts_and_mcp_servers_where_there_are_any() {
         let mut app = app_with(populated());
         app.open_create();
         show_step(&mut app, CreateStep::Workspace);
 
-        // No MCP servers registered — the section is not on the form at all.
+        // No MCP servers registered: the section holds only `none`, which takes the tools away.
         let screen = super::tests_support::render_at(&mut app, 110, 40);
         assert!(screen.contains("blocked hosts"), "{screen}");
-        assert!(
-            !screen.contains("MCP servers"),
-            "nothing registered, so nothing offered: {screen}"
-        );
+        assert!(screen.contains("MCP servers"), "{screen}");
+        assert!(screen.contains(crate::create::NO_MCP), "{screen}");
         assert!(
             screen.contains("[ Next ]"),
             "the step still reaches its buttons: {screen}"
@@ -1401,6 +1464,37 @@ mod tests {
         assert!(form.selected_mcp().is_empty(), "nothing ticked by default");
         form.workspace.static_mcp[0] = true;
         assert_eq!(form.selected_mcp(), vec!["notion"]);
+    }
+
+    #[test]
+    fn no_mcp_and_a_server_tick_never_stand_together() {
+        let mut app = app_with(populated());
+        app.mcp = vec![crate::sbx::McpServer {
+            name: "notion".into(),
+            status: "ready".into(),
+            ..crate::sbx::McpServer::default()
+        }];
+        app.open_create();
+        let none = focus_row(&mut app, CreateRow::McpNone);
+        let server = focus_row(&mut app, CreateRow::Mcp(0));
+        assert_eq!(server, none + 1, "the servers follow `none`");
+        let press = |app: &mut App, row: CreateRow| {
+            focus_row(app, row);
+            app.on_key(KeyEvent::from(KeyCode::Char(' ')));
+        };
+        let picked = |app: &App| match &app.screen {
+            Screen::Create(form) => form.selected_mcp(),
+            _ => unreachable!("the create form is open"),
+        };
+
+        press(&mut app, CreateRow::Mcp(0));
+        assert_eq!(picked(&app), ["notion"]);
+        press(&mut app, CreateRow::McpNone);
+        assert_eq!(picked(&app), ["none"], "`none` clears the servers' ticks");
+        press(&mut app, CreateRow::Mcp(0));
+        assert_eq!(picked(&app), ["notion"], "a server's tick ends `none`");
+        press(&mut app, CreateRow::Mcp(0));
+        assert!(picked(&app).is_empty(), "nothing ticked: the dynamic mode");
     }
 
     /// Put the create wizard on the step that owns `want`, with its cursor on it, found by identity,

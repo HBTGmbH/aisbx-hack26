@@ -1404,8 +1404,10 @@ pub fn plan(state: &Path, sandbox: &str, hold: bool) -> Result<Plan> {
     Ok(plan)
 }
 
-/// `sbx` for the sync: no host SSH agent and no token variable in its environment.
+/// `sbx` for the sync: never asking ([`sbx::no_input`]), no host SSH agent and no token variable
+/// in its environment.
 fn sbx_command(argv: &[String]) -> Command {
+    let argv = sbx::no_input(argv);
     let (program, args) = argv.split_first().expect("an argv names its program");
     let mut cmd = Command::new(program);
     cmd.args(args);
@@ -2351,6 +2353,11 @@ mod tests {
         assert_eq!(&argv[..6], ["sbx", "exec", "-i", "box", "sh", "-c"]);
         assert_eq!(argv[6], SCRIPT);
         assert_eq!(&argv[7..], ["sh", "finish"]);
+        let cmd = sbx_command(&argv);
+        let args: Vec<&std::ffi::OsStr> = cmd.get_args().collect();
+        assert_eq!(cmd.get_program(), "sbx");
+        assert_eq!(args[..3], ["--no-input", "exec", "-i"], "{args:?}");
+        assert_eq!(args.len(), argv.len(), "only the flag is new");
     }
 
     fn named(names: &[&str]) -> Skills {

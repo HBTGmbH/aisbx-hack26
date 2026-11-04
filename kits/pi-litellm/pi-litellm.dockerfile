@@ -1,10 +1,11 @@
 # syntax=docker/dockerfile:1
-# Image of the pi-litellm workload: Docker's shell template with Pi installed into the agent's ~/.local.
-FROM docker/sandbox-templates:shell-docker
+# Image of the pi-litellm workload: Docker's shell image with Docker Engine, and Pi installed into the
+# agent's ~/.local.
+FROM docker.io/sbx/shell-docker-image:latest
 
 COPY --chmod=0755 files/ /usr/local/lib/aisbx/
 
-# Pi's find tool runs fd (Ubuntu's fdfind); the template has rg but no fd.
+# Pi's find tool runs fd (Ubuntu's fdfind); the image has rg but no fd.
 USER root
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends fd-find \

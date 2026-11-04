@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/ilja82/aisbx/actions/workflows/ci.yml/badge.svg)](https://github.com/ilja82/aisbx/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
-[![sbx 0.50.1 or later](https://img.shields.io/badge/sbx-0.50.1%2B-2496ED)](https://docs.docker.com/ai/sandboxes/)
+[![sbx 0.51.0 or later](https://img.shields.io/badge/sbx-0.51.0%2B-2496ED)](https://docs.docker.com/ai/sandboxes/)
 ![Platforms: macOS, Linux, Windows](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey)
 
 Run AI coding agents in a [Docker Sandbox](https://docs.docker.com/ai/sandboxes/) (`sbx`), on your own
@@ -24,7 +24,8 @@ sandbox with your project folder in it.
 - **No secret in the sandbox:** keys and tokens stay in the host keychain
   ([one exception](docs/agents.md#antigravity-agy)).
 - **A closed network:** a sandbox reaches only the hosts its kits allow; any other request waits for your approval.
-- **No telemetry** from the agents ([Telemetry](docs/network.md#telemetry-and-non-essential-traffic)).
+- **No telemetry** from the agents ([Telemetry](docs/network.md#telemetry-and-non-essential-traffic)), and sbx's own
+  telemetry off unless you turned it on ([sbx's own telemetry](docs/network.md#sbxs-own-telemetry-t)).
 
 ## How it fits together
 
@@ -38,7 +39,7 @@ sandbox with your project folder in it.
 
 ## Requirements
 
-- [sbx](https://docs.docker.com/ai/sandboxes/) **0.50.1** or later. The dashboard refuses an older version
+- [sbx](https://docs.docker.com/ai/sandboxes/) **0.51.0** or later. The dashboard refuses an older version
   ([why](docs/development.md#sbx-version)).
 - Docker with Buildx on the host. sbx uses it to build the image of each kit.
 - To build from source only: a Rust toolchain. The launcher builds aisbx with it. `aisbx-ui` needs Rust 1.95 or

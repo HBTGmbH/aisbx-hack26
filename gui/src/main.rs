@@ -31,6 +31,7 @@ mod roster;
 mod screens_golden;
 mod secrets;
 mod session;
+mod settings;
 mod shell;
 mod skills;
 mod startdir;
@@ -42,6 +43,7 @@ mod wizard;
 use args::Parsed;
 
 fn main() -> anyhow::Result<()> {
+    aisbx_core::sbx::no_telemetry_env();
     let mut args = match args::parse(std::env::args().skip(1)) {
         Ok(Parsed::Run(args)) => args,
         Ok(Parsed::Help) => {

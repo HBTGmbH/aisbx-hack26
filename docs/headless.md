@@ -213,6 +213,9 @@ An exit code of 0 does not prove the agent succeeded. Read the agent's own outpu
 
 - **No host SSH agent.** sbx forwards the SSH agent of whichever client creates, starts or joins a sandbox. So
   every sbx call a headless command makes drops `SSH_AUTH_SOCK`. `--ssh-agent` opts in.
+- **No prompts.** Every sbx call that creates, starts, changes or runs something in a sandbox passes sbx's
+  `--no-input`. A step that would ask a question, a Docker sign-in for example, fails at once and names the command
+  to run. So a script never waits for an answer that nobody gives. The reads (`sbx ls`, `sbx inspect`) ask nothing.
 - **Held requests are reported and dismissed** after the run, one stderr line each. `--approvals keep` leaves them
   for `y`. Under deny-all a blocked request does not hang the agent: it gets `403 Approval required for <host>` at
   once.

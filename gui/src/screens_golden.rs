@@ -282,6 +282,89 @@ fn allowing_a_request_through_the_window_is_the_same_job() {
     assert!(got.starts_with("job ") && got.contains("allow"), "{got}");
 }
 
+#[test]
+fn the_settings_page_turns_each_setting_with_its_own_button() {
+    use aisbx_core::sbx::{self, CLIPBOARD_TEXT_COPY, TELEMETRY_DISABLED};
+    for (needle, key) in [
+        ("Turn off", TELEMETRY_DISABLED),
+        ("Turn on", CLIPBOARD_TEXT_COPY),
+    ] {
+        let mut w = win(on_login());
+        w.type_text("T");
+        let Screen::Settings(form) = &mut w.app.screen else {
+            panic!("T opens the settings")
+        };
+        form.values = vec![
+            Some(testkit::bool_setting(TELEMETRY_DISABLED, false)),
+            Some(testkit::bool_setting(CLIPBOARD_TEXT_COPY, false)),
+            Some(testkit::bool_setting(sbx::CLIPBOARD_IMAGE_PASTE, false)),
+            Some(testkit::bool_setting(sbx::SANDBOX_FUSE, true)),
+        ];
+        form.skills = Some(testkit::skills_default("readonly"));
+        w.frame(Vec::new());
+        let drawn = w.drawn.join("\n");
+        for text in [
+            "Settings",
+            "Telemetry",
+            "Clipboard copy",
+            "Image paste",
+            "FUSE",
+            "Turn off",
+            "Turn on",
+            "Close",
+        ] {
+            assert!(drawn.contains(text), "{text}: {drawn}");
+        }
+        assert!(
+            w.drawn.iter().any(|t| t == "on"),
+            "telemetry's state: {drawn}"
+        );
+        assert!(
+            w.drawn.iter().any(|t| t == "off"),
+            "the clipboard's: {drawn}"
+        );
+        // The calm colour for what keeps more to the sandbox, the warning for the rest.
+        let dark = w.ctx.global_style().visuals.dark_mode;
+        let (warn, calm) = (crate::theme::warn(dark), crate::theme::running(dark));
+        let colour = |text: &str| w.colored.iter().find(|(t, _)| t == text).map(|(_, c)| *c);
+        assert_eq!(colour("on"), Some(warn), "telemetry on: {:?}", w.colored);
+        assert_eq!(
+            colour("off"),
+            Some(calm),
+            "no clipboard copy: {:?}",
+            w.colored
+        );
+        let pos = drawn_at(&mut w, needle);
+        click(&mut w, pos);
+        let Some(Modal::Running(_, pending)) = &w.app.modal else {
+            panic!("{needle} runs the job: {:?}", w.app.status)
+        };
+        assert_eq!(pending.steps[0].argv, sbx::setting_set_argv(key, "true"));
+    }
+}
+
+#[test]
+fn the_settings_page_sets_the_skills_default_with_a_mode_button() {
+    let mut w = win(on_login());
+    w.type_text("T");
+    let Screen::Settings(form) = &mut w.app.screen else {
+        panic!("T opens the settings")
+    };
+    form.skills = Some(testkit::skills_default("readonly"));
+    w.frame(Vec::new());
+    let drawn = w.drawn.join("\n");
+    for text in ["Skills default", "read-only", "Off", "Read-write"] {
+        assert!(drawn.contains(text), "{text}: {drawn}");
+    }
+    let pos = drawn_at(&mut w, "Read-write");
+    click(&mut w, pos);
+    let Some(Modal::Running(_, pending)) = &w.app.modal else {
+        panic!("the mode's button runs the job: {:?}", w.app.status)
+    };
+    let set = aisbx_core::sbx::setting_set_argv(aisbx_core::sbx::SKILLS_DEFAULT_MODE, "readwrite");
+    assert_eq!(pending.steps[0].argv, set);
+}
+
 // --- the same frame -------------------------------------------------------------------------
 
 fn win(app: App) -> Win {

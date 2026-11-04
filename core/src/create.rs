@@ -252,6 +252,9 @@ pub struct WorkspaceAnswers {
     /// The host folders the sandbox mounts beside the workspace ([`crate::folders::plan`]), read
     /// when the form opens and when the mounted folder changes.
     pub folders: crate::folders::Plan,
+    /// More host folders for this sandbox alone, as typed ([`CreateForm::extra_folders`]).
+    /// `App::submit_create` writes them to the registry, so a rebuild mounts them again.
+    pub extra_folders: TextInput,
     /// How the host's shared agent-skills store is mounted. Opens on the host's own
     /// `skills.defaultMode`, and is always passed explicitly.
     pub skills: crate::sbx::SkillsMode,
@@ -262,6 +265,9 @@ pub struct WorkspaceAnswers {
     /// Which of [`WorkspaceAnswers::mcp`] go into the sandbox's fixed MCP set. Parallel to
     /// `mcp`, the way `KitsAnswers::host` is to `addons`.
     pub static_mcp: Vec<bool>,
+    /// No MCP server at all, and no tools to find one (`--static-mcp none`). Never on together
+    /// with a tick in `static_mcp`.
+    pub no_mcp: bool,
     /// The MCP servers registered on this host when the form was opened, in the order offered.
     /// Empty on a host with none, which is when the whole section is left off the form.
     pub mcp: Vec<crate::sbx::McpServer>,
@@ -291,11 +297,13 @@ impl CreateRow {
             CreateRow::Addon(_) => CreateStep::Kits,
             CreateRow::Name
             | CreateRow::StartDir
+            | CreateRow::ExtraFolders
             | CreateRow::Clone
             | CreateRow::GitGuard
             | CreateRow::Skills
             | CreateRow::Ports
             | CreateRow::DenyNetwork
+            | CreateRow::McpNone
             | CreateRow::Mcp(_) => CreateStep::Workspace,
         }
     }
@@ -319,7 +327,8 @@ impl CreateForm {
     }
 
     /// What is wrong with one row's answer, if a create would be refused over it. Only a new token
-    /// and *new connection...* have fields to check, besides the ports and the blocked hosts.
+    /// and *new connection...* have fields to check, besides the more folders, the ports and the
+    /// blocked hosts.
     pub fn field_problem(&self, row: CreateRow, catalog: &Catalog) -> Option<String> {
         let ws = &self.workspace;
         let new_token = self.use_token(catalog) && self.connection.account == AccountChoice::New;
@@ -327,6 +336,7 @@ impl CreateForm {
         let name = self.connection.token_name.value.trim();
         let field = ConnField::ALL.into_iter().find(|f| f.row() == row);
         let problem = match row {
+            CreateRow::ExtraFolders => return self.extra_folders().1.into_iter().next(),
             CreateRow::Ports => return Self::port_problem(ws.ports.value.trim()),
             CreateRow::DenyNetwork => return Self::deny_problem(ws.deny_network.value.trim()),
             _ if field.is_some() && new_conn => {
@@ -365,6 +375,7 @@ impl CreateForm {
             CreateRow::Name => Some(&self.workspace.name),
             CreateRow::TokenName => Some(&self.connection.token_name),
             CreateRow::Token => Some(&self.connection.token),
+            CreateRow::ExtraFolders => Some(&self.workspace.extra_folders),
             CreateRow::Ports => Some(&self.workspace.ports),
             CreateRow::DenyNetwork => Some(&self.workspace.deny_network),
             CreateRow::LitellmName => Some(&self.connection.new_conn.name),
@@ -487,8 +498,9 @@ impl CreateForm {
         ws.skills = defaults.skills.unwrap_or(skills_default);
         ws.ports.set(&defaults.ports);
         ws.deny_network.set(&defaults.deny_network);
+        ws.no_mcp = crate::sbx::is_no_mcp(&defaults.mcp);
         for (on, server) in ws.static_mcp.iter_mut().zip(&ws.mcp) {
-            *on = defaults.mcp.contains(&server.name);
+            *on = !ws.no_mcp && defaults.mcp.contains(&server.name);
         }
         self.refresh_auto_name(catalog);
         true
@@ -745,6 +757,23 @@ pub fn only_now_note(reason: &str) -> String {
 /// rebuild. Quiet on purpose: most kits carry it.
 pub const ONLY_NOW: &str = "only now";
 
+/// What `--static-mcp none` leaves the agent, after the word *none*.
+pub const NO_MCP: &str = "no server, and no tools to find or add one";
+
+/// The Review's MCP answer when nothing is ticked: sbx's dynamic mode, where the agent finds and
+/// attaches the host's registered servers itself.
+pub const DYNAMIC_MCP: &str = "dynamic: the agent finds the host's servers";
+
+/// A sandbox's MCP set as the details name it, from the registry: `None` for the dynamic mode,
+/// which has no fixed set to name.
+pub fn mcp_set(servers: &[String]) -> Option<String> {
+    match (crate::sbx::is_no_mcp(servers), servers.is_empty()) {
+        (true, _) => Some(format!("none: {NO_MCP}")),
+        (false, true) => None,
+        (false, false) => Some(servers.join(" ")),
+    }
+}
+
 /// The GUI's marker on a kit that `sbx kit add` can add to the sandbox later: the GUI marks the
 /// few exceptions, the TUI marks the rule ([`ONLY_NOW`]).
 pub const ADD_LATER: &str = "can add later";
@@ -896,6 +925,14 @@ impl CreateForm {
             .unwrap_or_else(|| cwd.to_path_buf())
     }
 
+    /// The folders typed into [`CreateRow::ExtraFolders`], checked against those the mounted
+    /// folder's plan mounts ([`crate::folders::extras`]), and what is wrong with any of them.
+    pub fn extra_folders(&self) -> (Vec<crate::folders::Folder>, Vec<String>) {
+        let ws = &self.workspace;
+        let home = crate::model::home_dir();
+        crate::folders::extras(ws.extra_folders.value.trim(), &ws.folders, home.as_deref())
+    }
+
     /// Whether [`CreateRow::GitGuard`] is offered: the workspace has a `.git` folder, and clone
     /// mode, which mounts the whole workspace read-only, is off.
     pub fn git_guard_offered(&self) -> bool {
@@ -1003,6 +1040,14 @@ impl CreateForm {
                 ws.start_dir.is_none() && ws.root.is_none(),
             );
         }
+        let extra = ws.extra_folders.value.trim();
+        let more = or_none(extra);
+        answer(
+            CreateStep::Workspace,
+            "More folders",
+            more,
+            extra.is_empty(),
+        );
         let clone = match ws.clone {
             true => "on — the agent works on its own copy",
             false => "off",
@@ -1042,18 +1087,20 @@ impl CreateForm {
         let deny = or_none(&ws.deny_network.value);
         let open = empty(&ws.deny_network);
         answer(CreateStep::Workspace, "Blocked hosts", deny, open);
-        if !ws.mcp.is_empty() {
-            let picked = self.selected_mcp();
-            let mcp = or_none(&picked.join(", "));
-            answer(CreateStep::Workspace, "MCP servers", mcp, picked.is_empty());
-        }
+        let picked = self.selected_mcp();
+        let mcp = match (ws.no_mcp, picked.is_empty()) {
+            (true, _) => format!("none: {NO_MCP}"),
+            (false, true) => DYNAMIC_MCP.to_string(),
+            (false, false) => picked.join(", "),
+        };
+        answer(CreateStep::Workspace, "MCP servers", mcp, picked.is_empty());
 
         let crate::model::KitMounts { mounts, mut notes } = crate::model::kit_mounts(&addons);
         notes.extend(ws.folders.notes.iter().cloned());
-        let folders = ws.folders.folders.iter().map(|f| match f.access {
-            crate::folders::Access::Write => crate::model::tilde(&f.path),
-            crate::folders::Access::Read => format!("{}:ro", crate::model::tilde(&f.path)),
-        });
+        let (extra, _) = self.extra_folders();
+        let folders = (ws.folders.folders.iter())
+            .chain(&extra)
+            .map(crate::folders::Folder::shown_spec);
         let git = (self.git_guard_offered() && ws.git_guard)
             .then(|| format!("{}:ro", crate::model::tilde(&root.join(".git"))));
         Review {
@@ -1458,6 +1505,7 @@ impl CreateForm {
             CreateRow::Name => Some(&mut self.workspace.name),
             CreateRow::TokenName => Some(&mut self.connection.token_name),
             CreateRow::Token => Some(&mut self.connection.token),
+            CreateRow::ExtraFolders => Some(&mut self.workspace.extra_folders),
             CreateRow::Ports => Some(&mut self.workspace.ports),
             CreateRow::DenyNetwork => Some(&mut self.workspace.deny_network),
             CreateRow::LitellmName => Some(&mut self.connection.new_conn.name),
@@ -1496,9 +1544,8 @@ impl CreateForm {
                 match row {
                     CreateRow::Backend(i) => self.harness.backend = i,
                     CreateRow::Addon(i) => self.toggle_addon(i),
-                    CreateRow::Mcp(i) => {
-                        self.workspace.static_mcp[i] = !self.workspace.static_mcp[i]
-                    }
+                    CreateRow::Mcp(i) => self.toggle_mcp(i),
+                    CreateRow::McpNone => self.toggle_no_mcp(),
                     CreateRow::Clone => self.workspace.clone = !self.workspace.clone,
                     CreateRow::GitGuard => self.workspace.git_guard = !self.workspace.git_guard,
                     // Three values, so space walks them rather than flipping one — off →
@@ -1534,6 +1581,7 @@ impl CreateForm {
                     CreateRow::Name
                     | CreateRow::TokenName
                     | CreateRow::Token
+                    | CreateRow::ExtraFolders
                     | CreateRow::Ports
                     | CreateRow::DenyNetwork
                     | CreateRow::LitellmName
@@ -1593,10 +1641,12 @@ impl CreateForm {
                 CreateRow::ModelsRefresh => return FieldEffect::FetchModels,
                 // ↵ on a checkbox ticks it, exactly as space does — an MCP server is picked the
                 // same way an addon kit is.
-                CreateRow::Mcp(i) => self.workspace.static_mcp[i] = !self.workspace.static_mcp[i],
+                CreateRow::Mcp(i) => self.toggle_mcp(i),
+                CreateRow::McpNone => self.toggle_no_mcp(),
                 CreateRow::Name
                 | CreateRow::TokenName
                 | CreateRow::Token
+                | CreateRow::ExtraFolders
                 | CreateRow::Ports
                 | CreateRow::DenyNetwork
                 | CreateRow::LitellmName
@@ -1736,6 +1786,9 @@ pub fn field_gloss(row: CreateRow) -> &'static str {
         CreateRow::StartDir => "where the agent starts; .. at the top mounts the folder above",
         CreateRow::Clone => "the agent works on its own copy; your files stay read-only",
         CreateRow::GitGuard => "the agent can read the history but not commit or change hooks",
+        CreateRow::ExtraFolders => {
+            "host folders for this sandbox alone, comma-separated: PATH[:/in/sandbox][:ro]"
+        }
         CreateRow::Ports => "published at creation, space- or comma-separated",
         CreateRow::DenyNetwork => "hosts this sandbox alone may not reach",
         CreateRow::TokenName => "lower-case a–z, 0–9 and “-”; later sandboxes pick it by name",
@@ -2063,6 +2116,11 @@ impl CreateForm {
                     format!("{text} Fixed at creation; changing it later means a rebuild."),
                 )
             }
+            CreateRow::ExtraFolders => Help::new(
+                "more folders",
+                "Optional. Host folders for this sandbox alone, comma-separated: ~/docs:ro read-only, \
+                 ~/libs:/workspace/libs at that path. A rebuild keeps them.",
+            ),
             CreateRow::Ports => Help::new(
                 "ports",
                 "8080:3000 binds host port 8080 to sandbox port 3000; a bare 3000 takes any free \
@@ -2073,6 +2131,12 @@ impl CreateForm {
                 "Optional; most leave it empty. Hosts this sandbox alone may not reach, say \
                  github.com, which the balanced policy opens: a.example.com, *.example.com, ** \
                  for all. A deny beats every allow.",
+            ),
+            CreateRow::McpNone => Help::new(
+                "no MCP servers",
+                "Optional. The agent gets no MCP server and no tools to find or add one: sbx's \
+                 --static-mcp none. Untick it and tick no server, and the agent finds the host's \
+                 registered servers itself. Later: sbx mcp load <name> --sandbox <sandbox>.",
             ),
             CreateRow::Mcp(i) => {
                 let Some(server) = ws.mcp.get(i) else {
@@ -2537,6 +2601,18 @@ mod tests {
         KeyEvent::from(code)
     }
 
+    #[test]
+    fn the_details_name_a_fixed_mcp_set_and_none_but_not_the_dynamic_mode() {
+        assert_eq!(mcp_set(&[]), None);
+        let set = ["github".to_string(), "notion".to_string()];
+        assert_eq!(mcp_set(&set).as_deref(), Some("github notion"));
+        let none = mcp_set(&["NONE".to_string()]).expect("named");
+        assert!(
+            none.starts_with("none: ") && none.ends_with(NO_MCP),
+            "{none}"
+        );
+    }
+
     /// The row the wizard's one cursor is on.
     fn focused(form: &CreateForm, catalog: &Catalog) -> WizardRow {
         form.wizard_rows(catalog)[form.wizard_focus()]
@@ -2561,6 +2637,11 @@ mod tests {
         assert_eq!(focused(f, &catalog), WizardRow::Field(CreateRow::Clone));
         f.field_key(&catalog, CreateRow::Mcp(0), key(KeyCode::Enter));
         assert_eq!(f.workspace.static_mcp, vec![true]);
+        f.field_key(&catalog, CreateRow::McpNone, key(KeyCode::Enter));
+        assert!(f.workspace.no_mcp && f.workspace.static_mcp == vec![false]);
+        f.field_key(&catalog, CreateRow::McpNone, space);
+        assert!(!f.workspace.no_mcp);
+        f.field_key(&catalog, CreateRow::Mcp(0), space);
 
         // The skills mode walks on space and on ←→; on any other row ←→ is the wizard's.
         let start = f.workspace.skills;
@@ -2762,6 +2843,58 @@ mod tests {
         assert_eq!(shown.as_deref(), Some(NO_VALUE), "after a refusal");
         let help = f.help(&app_ref(&catalog), WizardRow::Field(CreateRow::Token));
         assert_eq!(help.problem.as_deref(), Some(NO_VALUE));
+    }
+
+    /// More folders are typed on the Workspace step, refused there by the first bad entry, and
+    /// reviewed as typed, with what sbx gets among the mounts.
+    #[test]
+    fn more_folders_are_checked_on_their_step_and_reviewed_with_their_targets() {
+        let root = std::env::temp_dir().join(format!("aisbx-tests-more-{}", std::process::id()));
+        for d in ["proj", "data"] {
+            std::fs::create_dir_all(root.join(d)).unwrap();
+        }
+        let root = std::fs::canonicalize(&root).unwrap();
+        let mut app = App::for_test(Catalog::load().unwrap(), Vec::new());
+        app.cwd = root.join("proj");
+        app.open_create();
+        let catalog = std::sync::Arc::clone(&app.catalog);
+        let f = form_mut(&mut app);
+        let rows = f.rows_of(CreateStep::Workspace, &catalog);
+        let at = |row| rows.iter().position(|r| *r == row);
+        assert_eq!(
+            at(CreateRow::ExtraFolders),
+            at(CreateRow::Clone).map(|i| i - 1)
+        );
+        assert!(CreateRow::ExtraFolders.is_text());
+        assert!(f.focus_field(&catalog, CreateRow::ExtraFolders));
+        for c in "docs".chars() {
+            f.field_key(&catalog, CreateRow::ExtraFolders, key(KeyCode::Char(c)));
+        }
+        let relative = "“docs”: give the host folder as an absolute path or ~/…";
+        let problem = f.field_problem(CreateRow::ExtraFolders, &catalog);
+        assert_eq!(problem.as_deref(), Some(relative));
+        let step = f.step_problem(CreateStep::Workspace, &catalog);
+        assert_eq!(step.as_deref(), Some(relative));
+        assert!(f.wizard_goto(&catalog, CreateStep::Review).is_err());
+
+        let typed = format!("{}:/workspace/data:ro", root.join("data").display());
+        f.workspace.extra_folders = TextInput::new(typed.clone());
+        assert_eq!(f.field_problem(CreateRow::ExtraFolders, &catalog), None);
+        let review = match &app.screen {
+            Screen::Create(form) => form.review(&app),
+            _ => panic!("the create form is open"),
+        };
+        let more = review.answers.iter().find(|a| a.label == "More folders");
+        assert_eq!(
+            more.map(|a| (a.value.as_str(), a.default)),
+            Some((typed.as_str(), false))
+        );
+        let shown = format!(
+            "{}:/workspace/data:ro",
+            crate::model::tilde(&root.join("data"))
+        );
+        assert_eq!(review.mounts.last(), Some(&shown), "{:?}", review.mounts);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// An app for `help` to read: the one the form was opened in is borrowed by the form.

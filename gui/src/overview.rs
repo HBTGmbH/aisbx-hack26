@@ -227,8 +227,8 @@ fn agent_rows(app: &App, sb: &Sandbox) -> Vec<Row> {
     if sb.mcp_gateway {
         let servers = app.registry.static_mcp(&sb.name);
         let mut value = vec![weak("gateway enabled")];
-        if !servers.is_empty() {
-            value.push(weak(servers.join(" ")));
+        if let Some(set) = aisbx_core::create::mcp_set(&servers) {
+            value.push(weak(set));
         }
         out.push(row("MCP", value));
     }

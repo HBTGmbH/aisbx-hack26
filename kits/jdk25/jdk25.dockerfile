@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 # Image of the jdk25 mixin: Eclipse Temurin JDK 25 at /opt/jdk-25, its binaries linked into
 # /usr/local/bin, which is on every image's PATH.
-FROM docker/sandbox-templates:shell-docker AS build
+FROM docker.io/sbx/shell-image:latest AS build
 USER root
 ARG TARGETARCH
 RUN set -eu; \

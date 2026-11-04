@@ -22,6 +22,7 @@ const BAD_PORT: &str =
     "“8080:not-a-port” is not a port mapping — use 8080:3000, 3000, or 127.0.0.1:8080:3000/tcp";
 const BAD_HOST: &str =
     "“bad!host” is not a host to deny — use api.example.com, *.example.com or **";
+const NOT_ABSOLUTE: &str = "“docs:ro”: give the host folder as an absolute path or ~/…";
 const BAD_NAME: &str = "name the token in lower-case letters, digits and dashes";
 const TAKEN: &str = "a token of that name exists — pick it in the list";
 const NO_VALUE: &str =
@@ -483,6 +484,35 @@ fn w7_start_dir() {
     let _ = std::fs::remove_dir_all(&base);
 }
 
+#[test]
+fn w7b_more_folders() {
+    let base = std::env::temp_dir().join(format!("aisbx-wizard-more-{}", std::process::id()));
+    std::fs::create_dir_all(base.join("data")).unwrap();
+    let data = std::fs::canonicalize(base.join("data")).unwrap();
+    let typed = format!("{}:/workspace/data:ro", data.display());
+    let cwd = PathBuf::from("/proj-more");
+
+    let mut app = new_app();
+    app.cwd = cwd.clone();
+    open(&mut app);
+    walk_to(&mut app, CreateStep::Workspace);
+    type_into(&mut app, CreateRow::ExtraFolders, &typed);
+    let wizard = create_only(&mut app);
+
+    let mut app = new_app();
+    app.cwd = cwd;
+    let expected = answered(&mut app, WizardRow::CreateOnly, |_, form| {
+        form.workspace.extra_folders = TextInput::new(typed.clone());
+    });
+    assert_same_job(&wizard, &expected);
+    assert!(
+        wizard.steps[0].argv.contains(&typed),
+        "{:?}",
+        wizard.steps[0].argv
+    );
+    let _ = std::fs::remove_dir_all(&base);
+}
+
 /// Next on the step owning the field: refused with the create's own message, and the wizard
 /// stays where it is. Ctrl-S from the review says the same, from the same step.
 fn refused_on(app: &mut App, owner: CreateStep, message: &str) {
@@ -510,6 +540,12 @@ fn w8_refusals() {
     walk_to(&mut app, CreateStep::Workspace);
     type_into(&mut app, CreateRow::DenyNetwork, "example.com bad!host");
     refused_on(&mut app, CreateStep::Workspace, BAD_HOST);
+
+    let mut app = new_app();
+    open(&mut app);
+    walk_to(&mut app, CreateStep::Workspace);
+    type_into(&mut app, CreateRow::ExtraFolders, "docs:ro");
+    refused_on(&mut app, CreateStep::Workspace, NOT_ABSOLUTE);
 
     let mut app = new_app();
     open(&mut app);

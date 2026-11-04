@@ -101,7 +101,7 @@ This text version shows more row states: a setup token, a LiteLLM connection, an
 foreign kit.
 
 ```text
- aisbx  ~/my-project   ● 2 of 4 running                    ⚑ 1 approval waiting    sbx v0.50.1
+ aisbx  ~/my-project   ● 2 of 4 running                    ⚑ 1 approval waiting    sbx v0.51.0
  Sandboxes ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   This folder  ~/my-project   2 sandboxes ───────────────────────────────────────────────────
   ▌● My private Claude Code              Claude Code · token private  running · 1 session
@@ -130,7 +130,7 @@ foreign kit.
     sbx name  claude-token-my-project
          ssh  claude-token-my-project.sbx   o connects an editor or a shell
      created  2026-10-28 05:20 UTC   11 hours ago
-    location  local  ·  sandboxd v0.50.1
+    location  local  ·  sandboxd v0.51.0  ·  created by sbx v0.51.0
 ────────────────────────────────────────────────────────────────────────────────────────────────
  ↵ start  y approvals  x shell  n new  e kits  o connect  w start folder  A account  i repo skills
 ```
@@ -184,6 +184,7 @@ Each sandbox is one row of three columns. The columns line up down the list.
 | `K` | [the shared agent-skills store](skills.md#shared-agent-skills); its *Repo skills for all sandboxes* row picks [repo skills](skills.md#skills-from-skill-repos-aisbx-skill) for every sandbox |
 | `i` | this sandbox's own [repo skills](skills.md#skills-from-skill-repos-aisbx-skill), and *Sync now* |
 | `F` | [the host folders every sandbox mounts](sandboxes.md#host-folders-f-and-companionjson): add, edit (`↵`) or delete (`d`) one |
+| `T` | sbx's settings for this host: [telemetry](network.md#sbxs-own-telemetry-t), [clipboard copy and image paste](sandboxes.md#the-host-clipboard-t) and [FUSE](sandboxes.md#fuse-filesystems-t), each turned on or off with `↵`, and the [skills default](skills.md#share-modes), which `↵`, `←` and `→` walk |
 | `p` / `u` | [publish / unpublish a port](sandboxes.md#ports-p--u) |
 | `L` | LiteLLM sandboxes: fetch the connection's [model list](litellm.md#the-gateways-model-list) now |
 | `b` | [keep the sandbox running](sandboxes.md#keeping-a-sandbox-running-b) after its sessions end, or rebuild it back |
@@ -286,11 +287,11 @@ like a setup assistant. In both, click a step to go there.
      Code, RTK and Ponytail for Claude Code and OpenCode.
    - Most kits can be added only now: adding one later means a rebuild. The terminal marks those *only now*. The
      window marks the few that can be added later, *Can add later*.
-6. **Workspace and options**: label, start folder, clone mode, *`.git` read-only*, skills mode, ports and blocked
-   hosts (under *Network*), and MCP servers.
+6. **Workspace and options**: label, start folder, more folders, clone mode, *`.git` read-only*, skills mode, ports
+   and blocked hosts (under *Network*), and MCP servers.
    - `..` at the top of the start folder mounts the folder above instead (see
      [A folder above](sandboxes.md#mounting-a-folder-above-the-current-one)).
-   - For *`.git` read-only*, see [Host folders](sandboxes.md#host-folders-f-and-companionjson).
+   - For *More folders* and *`.git` read-only*, see [Host folders](sandboxes.md#host-folders-f-and-companionjson).
    - The wizard makes the label from the agent and the kits until you type one. The first character you type
      replaces it; an arrow key edits it instead.
 7. **Review**: every answer under the step it belongs to, the sbx name and the mounts. Then **Create & start**,
@@ -393,7 +394,7 @@ The details pane shows the selected sandbox in seven tabs. Press `tab` or `1`…
 | --- | --- | --- |
 | `1 Overview` | what needs you first: status (and an unresponsive guest), where the requests waiting for approval go, a missing secret, keep-running. Then agent, account, pinned models and kits, folder and skills mode, names and SSH host, created / last used and CPU/memory limits, location, image, auth mode, injected secrets, MCP servers. On a wide terminal, the names and everything after them are in a second column | `sbx ls --json`, `sbx inspect --json`, `sbx policy approval ls --json` |
 | `2 Resources` | vCPUs and load, memory, disk, uptime (the sandbox's own, not the host's). From the second reading on, CPU and memory also show as sparklines of the readings taken while the tab is open, beside their meters where the terminal is wide enough | `sbx exec` of a `/proc` + `df` probe |
-| `3 Mounts` | the host paths mounted in (read-write or read-only), the skills mount, folders added later with `sbx mount` | `sbx ls --json`, `sbx inspect --json` |
+| `3 Mounts` | every folder sbx mounts from the host: the workspace, extra folders, the skills store, folders added later with `sbx mount`. Each with its path in the sandbox where that differs, read-write or read-only, and a warning when the host folder is gone | `sbx inspect --json`, `sbx ls --json` |
 | `4 Ports` | port forwards, as URLs | `sbx ports <name> --json` |
 | `5 Network` | every network rule that applies (allow / deny, HTTP method / path), where it came from (`kit`, `added`, `approved`, `preset`, `org`), and `all sandboxes` on a rule of the host-wide policy (a rule of the sandbox's own says nothing) | `sbx policy ls <name> --json` |
 | `6 Filesystem` | the filesystem read / write rules | the same call |

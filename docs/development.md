@@ -58,21 +58,30 @@ $ sh tests/repo-skills-test.sh
 
 ## sbx version
 
-The dashboard needs **sbx 0.50.1** or later and refuses an older sbx. The kits, the JSON it reads and the commands it
-runs are measured on sbx 0.50. 0.50.1 fixes an issue that prevented sandboxes from starting. 0.50 brings security fixes
-and HTTP rules with query parameters, which a rebuild carries over.
+The dashboard needs **sbx 0.51.0** or later and refuses an older sbx. The JSON it reads and every kit build are
+measured on sbx 0.51.0. The checks by hand in [On an upgrade](#on-an-upgrade) were last run on sbx 0.50. aisbx uses
+these 0.51.0 features:
 
-The 0.50 security fixes: host Git commands do not run programs that a sandbox set in the `.git` folder of the
-workspace. sbx composes a local kit, as every kit here is, only from a build with a matching digest. The host
-browser helper for a sign-in runs only from trusted system locations.
+- `sbx run --workdir` opens the agent in its start folder, with the kit's own launch command.
+- `sbx secret set-custom --value-stdin` reads a token or a gateway key from stdin. Older sbx rejects the flag.
+- `sbx policy ls` lists the policy's fallback rule. The Network tab marks it `fallback`.
+- `sbx inspect` names the sbx release that created a sandbox. The details pane shows it.
+
+sbx 0.51.0 no longer publishes Docker's Codex and OpenCode templates and no longer updates the shell templates. The
+`codex-openai`, `opencode-litellm` and `pi-litellm` kits build on `docker.io/sbx/shell-docker-image`. The build steps
+of the addon kits and the model fetcher use `docker.io/sbx/shell-image`. The Claude kits stay on Docker's
+`claude-code-docker` template, which Docker still rebuilds.
+
+0.51.0 also blocks symbolic links in mounted folders from reaching other host paths through `sbx cp`. Unix clients
+check that the daemon socket belongs to the same user.
 
 ### aisbx version
 
-The aisbx version is the sbx version it needs plus a counter: aisbx **0.50.1.0** needs sbx 0.50.1. Count the last
+The aisbx version is the sbx version it needs plus a counter: aisbx **0.51.0.0** needs sbx 0.51.0. Count the last
 number up for each aisbx release on the same sbx version. Set it back to 0 when aisbx moves to a newer sbx.
 
-Cargo accepts only three numbers, so the root `Cargo.toml` writes 0.50.1.0 as `version = "0.50.1+0"`.
-`aisbx --version` and `aisbx-ui --version` print 0.50.1.0. A test in `core/src/lib.rs` fails when the first three
+Cargo accepts only three numbers, so the root `Cargo.toml` writes 0.51.0.0 as `version = "0.51.0+0"`.
+`aisbx --version` and `aisbx-ui --version` print 0.51.0.0. A test in `core/src/lib.rs` fails when the first three
 numbers differ from `sbx::REQUIRED_VERSION`.
 
 ### Rules for sbx calls
@@ -126,9 +135,9 @@ platform on the GitHub release page.
 
    ```console
    $ python3 scripts/package.py version
-   0.50.1.0
-   $ git tag v0.50.1.0
-   $ git push origin v0.50.1.0
+   0.51.0.0
+   $ git tag v0.51.0.0
+   $ git push origin v0.51.0.0
    ```
 
 3. The workflow stops when the tag is not `v` plus the `Cargo.toml` version. Otherwise it makes a draft

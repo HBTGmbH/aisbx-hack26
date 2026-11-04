@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 # Image of the ponytail mixin: the pinned npm package at /opt/ponytail (root-owned, so read-only for
 # the agent), the activation hook and the marker. To bump, change VERSION and SHA256 together.
-FROM docker/sandbox-templates:shell-docker AS build
+FROM docker.io/sbx/shell-image:latest AS build
 USER root
 RUN set -eu; \
     VERSION=5.3.2; \

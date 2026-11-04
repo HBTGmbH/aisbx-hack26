@@ -59,7 +59,7 @@ Later sandboxes pick the token by its name. The host keychain keeps the token on
 
 ```console
 $ printf '%s' "$TOKEN" | sbx secret set-custom \
-    --host api.anthropic.com --placeholder sbx-cs-aisbx-tok-private
+    --host api.anthropic.com --placeholder sbx-cs-aisbx-tok-private --value-stdin
 $ sbx run --kit ~/.local/state/aisbx/tokens/token-private ./kits/claude-token
 ```
 

@@ -55,7 +55,7 @@ check "kit-spec v3" grep -qx 'schemaVersion: "3"' "$spec"
 check "a workload (no sbx agent ships Pi)" grep -qx 'kind: workload' "$spec"
 check "a description naming Pi" sh -c 'grep "^description: " "$1" | grep -q "Pi"' sh "$spec"
 check "launched by sbx (sbx@1)" grep -q 'type: com.docker.sandbox/sbx@1' "$spec"
-check "on the shell template" grep -qx 'FROM docker/sandbox-templates:shell-docker' "$recipe"
+check "on Docker's shell image" grep -qx 'FROM docker.io/sbx/shell-docker-image:latest' "$recipe"
 check "fd for Pi's find tool (Pi takes fdfind)" grep -q 'apt-get install .*fd-find' "$recipe"
 check "the image goes back to the agent user" sh -c 'grep "^USER " "$1" | tail -1 | grep -qx "USER agent"' sh "$recipe"
 check "the entrypoint is the installed pi, by absolute path" \

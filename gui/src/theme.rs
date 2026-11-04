@@ -494,7 +494,7 @@ mod tests {
             }
             // A colour on its own badge (opaque) and on its own callout (a tint over the page).
             let weak = v.weak_text_color();
-            let tags = [weak, accent(dark)];
+            let tags = [weak, accent(dark), danger(dark)];
             for colour in HUES.map(|h| hue(h, dark)).into_iter().chain(tags) {
                 let fill = badge_fill(colour, dark);
                 assert_eq!(fill.a(), 255, "dark {dark}: a badge is opaque");

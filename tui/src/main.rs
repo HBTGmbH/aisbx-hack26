@@ -59,6 +59,7 @@ Set AISBX_HOME to point at the aisbx checkout if aisbx cannot find its kits/ dir
 ";
 
 fn main() -> ExitCode {
+    sbx::no_telemetry_env();
     // Before any dashboard setup: its Ctrl-C handler would swallow the interrupt `aisbx run` needs.
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().is_some_and(|a| headless::is_subcommand(a)) {
@@ -109,6 +110,7 @@ fn run() -> Result<()> {
     let stop = stop_signals();
 
     let mut app = App::new(catalog, show_other, version, mouse, auto_update)?;
+    app.disable_telemetry_by_default();
     let mut terminal = ratatui::init();
     mouse_off_on_panic();
     let mut mouse_on = false;

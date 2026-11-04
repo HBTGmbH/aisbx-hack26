@@ -10,7 +10,7 @@ use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 
 /// The oldest sbx release the dashboard accepts. docs/development.md, *sbx version*, says why.
-pub const REQUIRED_VERSION: &str = "0.50.1";
+pub const REQUIRED_VERSION: &str = "0.51.0";
 
 /// How a sandbox mounts the host's shared agent-skills store (`--skills`). sbx reports the mode
 /// nowhere, so a rebuild repeats it from the registry; see [`crate::state::Entry`].
@@ -179,11 +179,19 @@ pub struct InspectEntry {
     pub mcp_gateway: bool,
     #[serde(default)]
     pub daemon_version: String,
+    /// The sbx release that created the sandbox. Empty for one created before sbx reported it.
+    #[serde(default)]
+    pub created_version: String,
     /// Host folders added to the sandbox **after it was created**, with `sbx mount`. Read leniently
     /// through [`InspectEntry::dynamic_mounts`], since one malformed element must not cost the
     /// whole `inspect` (and with it the sandbox's kit list).
     #[serde(default)]
     pub runtime_mounts: Vec<serde_json::Value>,
+    /// Every folder bind-mounted from the host, in sbx's order: the workspace (in clone mode the
+    /// clone's source), the extra workspaces, the skills store, kit folders and `sbx mount` folders.
+    /// Read leniently through [`InspectEntry::bind_mounts`], like `runtime_mounts`.
+    #[serde(default)]
+    pub host_mounts: Vec<serde_json::Value>,
     /// See [`LsEntry::guest_unresponsive`]; read from both, since either may carry it.
     #[serde(default)]
     pub guest_unresponsive: bool,
@@ -196,15 +204,29 @@ impl InspectEntry {
     /// The `sbx mount` mounts this sandbox carries. It skips an element of an unknown shape
     /// instead of failing on it.
     pub fn dynamic_mounts(&self) -> Vec<RuntimeMount> {
-        self.runtime_mounts
-            .iter()
-            .filter_map(|v| serde_json::from_value::<RuntimeMount>(v.clone()).ok())
-            .filter(|m| !m.host_path.is_empty())
-            .collect()
+        lenient_mounts(&self.runtime_mounts)
+    }
+
+    /// Every host folder the sandbox mounts ([`InspectEntry::host_mounts`]), skipping an element
+    /// of an unknown shape.
+    pub fn bind_mounts(&self) -> Vec<HostMount> {
+        lenient_mounts(&self.host_mounts)
     }
 }
 
-/// One host folder added with `sbx mount`: `runtime_mounts` in `sbx inspect --json`.
+fn lenient_mounts(values: &[serde_json::Value]) -> Vec<RuntimeMount> {
+    values
+        .iter()
+        .filter_map(|v| serde_json::from_value::<RuntimeMount>(v.clone()).ok())
+        .filter(|m| !m.host_path.is_empty())
+        .collect()
+}
+
+/// One bind mount of `host_mounts` in `sbx inspect --json`: the same fields as a [`RuntimeMount`].
+pub type HostMount = RuntimeMount;
+
+/// One host folder mounted into the sandbox: an element of `runtime_mounts` (added with
+/// `sbx mount`) or of `host_mounts` (every bind mount) in `sbx inspect --json`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 pub struct RuntimeMount {
     #[serde(default)]
@@ -289,7 +311,14 @@ pub struct PolicyRule {
     /// An HTTP rule's host + path pairs.
     #[serde(default)]
     pub http_targets: Vec<HttpTarget>,
+    /// Why the rule exists, in words, where sbx gives a reason.
+    #[serde(default)]
+    pub reason: String,
 }
+
+/// The name of the policy's fallback rule: the global `deny **` that decides a request no other
+/// rule matches. See [`PolicyRule::is_fallback`].
+pub const FALLBACK_RULE: &str = "default-deny-all";
 
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct Provenance {
@@ -378,12 +407,21 @@ impl PolicyRule {
             || self.name.starts_with("kit:")
     }
 
+    /// Is this the policy's fallback, which decides a request no other rule matches, rather than
+    /// a rule someone wrote?
+    pub fn is_fallback(&self) -> bool {
+        self.name == FALLBACK_RULE && self.provenance.created_via.is_empty()
+    }
+
     /// Who put the rule there, in the words the Network tab uses: `kit`, `approved`, `added`,
-    /// `preset` or `org`. Read off `provenance` and the name rather than `origin`, since a kit's
-    /// own rule reports the same `origin` (`scoped`) as one the user added.
+    /// `preset`, `org` or `fallback`. Read off `provenance` and the name rather than `origin`, since
+    /// a kit's own rule reports the same `origin` (`scoped`) as one the user added.
     pub fn source(&self) -> &str {
         if self.origin == "org" {
             return "org";
+        }
+        if self.is_fallback() {
+            return "fallback";
         }
         if self.is_kit_rule() {
             return "kit";
@@ -618,7 +656,7 @@ struct VersionClient {
     version: String,
 }
 
-/// The CLI's own version, `v0.50.1`, from `sbx version --json`.
+/// The CLI's own version, `v0.51.0`, from `sbx version --json`.
 pub fn version() -> Result<String> {
     let out = Command::new("sbx")
         .args(["version", "--json"])
@@ -1343,36 +1381,39 @@ pub fn create_argv(spec: Create<'_>) -> Vec<String> {
     argv
 }
 
+/// sbx's global flag for a caller with no person to answer: a command that would ask fails and
+/// names the command to run instead.
+pub const NO_INPUT: &str = "--no-input";
+
+/// `argv` with [`NO_INPUT`] right after `sbx`, before the subcommand, where `sbx exec` cannot hand
+/// it to the command it runs. Another program's argv, or one that has the flag there, is unchanged.
+pub fn no_input(argv: &[String]) -> Vec<String> {
+    let mut out = argv.to_vec();
+    let is_sbx = out.first().map(String::as_str) == Some("sbx");
+    if is_sbx && out.get(1).map(String::as_str) != Some(NO_INPUT) {
+        out.insert(1, NO_INPUT.to_string());
+    }
+    out
+}
+
 /// Attach to (and start) an existing sandbox. Runs in the foreground with the terminal handed
 /// over — never through the job runner.
 ///
-/// This starts the agent at the **top of the workspace**. For a session that opens somewhere
-/// inside it instead, see [`agent_in_argv`].
-pub fn attach_argv(name: &str) -> Vec<String> {
-    vec!["sbx".into(), "run".into(), "--name".into(), name.into()]
-}
-
-/// Start the agent in a **subdirectory** of the workspace — the one thing [`attach_argv`] cannot
-/// do: an `sbx exec -it -w` of the agent's binary ([`crate::kits::agent_command`]), with the
-/// flags `sbx run` would add ([`crate::kits::agent_launch_args`]). See [`crate::startdir`].
-///
-/// The caller checks that the directory exists, on the host, where the same path is the same
-/// directory: `exec` refuses a missing one only after the terminal handover.
-pub fn agent_in_argv(name: &str, agent_cmd: &str, workdir: &Path) -> Vec<String> {
+/// `workdir` is where the agent opens ([`crate::startdir`]); `None` is the top of the workspace.
+/// `sbx run` launches the kit's own entrypoint, so this works for every agent. The caller checks
+/// that the directory exists, on the host, where the same path is the same directory: sbx refuses
+/// a missing one only after the terminal handover.
+pub fn attach_argv(name: &str, workdir: Option<&Path>) -> Vec<String> {
     let mut argv = vec![
         "sbx".to_string(),
-        "exec".into(),
-        "-it".into(),
-        "-w".into(),
-        workdir.display().to_string(),
+        "run".into(),
+        "--name".into(),
         name.into(),
-        agent_cmd.into(),
     ];
-    argv.extend(
-        crate::kits::agent_launch_args(agent_cmd)
-            .iter()
-            .map(|a| (*a).to_string()),
-    );
+    if let Some(dir) = workdir {
+        argv.push("--workdir".into());
+        argv.push(dir.display().to_string());
+    }
     argv
 }
 
@@ -2021,6 +2062,141 @@ impl McpServer {
     }
 }
 
+/// The setting that turns telemetry off for sbx's CLI and daemon.
+pub const TELEMETRY_DISABLED: &str = "telemetry.disabled";
+
+/// The setting that lets processes in a sandbox copy text to the host clipboard.
+pub const CLIPBOARD_TEXT_COPY: &str = "clipboard.textCopy";
+
+/// The setting that lets agents in a sandbox read images from the host clipboard on a paste.
+pub const CLIPBOARD_IMAGE_PASTE: &str = "clipboard.imagePaste";
+
+/// The setting that gives new local sandboxes `/dev/fuse` and `SYS_ADMIN`.
+pub const SANDBOX_FUSE: &str = "sandbox.fuse";
+
+/// The skills mode a create without `--skills` gets: `off`, `readonly` or `readwrite`.
+pub const SKILLS_DEFAULT_MODE: &str = "skills.defaultMode";
+
+/// One setting, as `sbx settings get <key> --json` reports it.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct Setting {
+    #[serde(default)]
+    pub key: String,
+    #[serde(default)]
+    pub value: serde_json::Value,
+    #[serde(default)]
+    pub default: serde_json::Value,
+    /// `default`, `override` while `sbx settings set` keeps another value, or `envvar` while the
+    /// daemon's environment sets it.
+    #[serde(default)]
+    pub source: String,
+    /// The environment variable that wins over a stored value, for a setting that has one.
+    #[serde(default)]
+    pub env_var: String,
+    /// The daemon follows a change only after `sbx daemon restart`.
+    #[serde(default)]
+    pub requires_restart: bool,
+    #[serde(default)]
+    pub description: String,
+}
+
+impl Setting {
+    /// A boolean setting's value; `None` for any other kind.
+    pub fn flag(&self) -> Option<bool> {
+        self.value.as_bool()
+    }
+
+    /// Does the daemon's environment set it? Then `sbx settings set` stores a value that does not
+    /// apply.
+    pub fn from_env(&self) -> bool {
+        self.source == "envvar"
+    }
+}
+
+/// Read one setting from sbx.
+pub fn setting(key: &str) -> Result<Setting> {
+    let out = Command::new("sbx")
+        .args(["settings", "get", key, "--json"])
+        .output()
+        .with_context(|| format!("running `sbx settings get {key} --json`"))?;
+    if !out.status.success() {
+        return Err(anyhow!(
+            "sbx settings get {key} failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    parse_json(&out.stdout).with_context(|| format!("parsing `sbx settings get {key} --json`"))
+}
+
+/// The environment variable that turns sbx's telemetry off for the CLI it is set for.
+pub const NO_TELEMETRY_ENV: &str = "SBX_NO_TELEMETRY";
+
+/// What [`no_telemetry_env`] sets `SBX_NO_TELEMETRY` to: `1`, unless it already has a value.
+pub fn no_telemetry_value(current: Option<&std::ffi::OsStr>) -> Option<&'static str> {
+    current.is_none().then_some("1")
+}
+
+/// Set `SBX_NO_TELEMETRY=1` for this process, so every `sbx` it starts inherits it; a value
+/// already set stays. Call first in `main`, before any thread starts.
+pub fn no_telemetry_env() {
+    if let Some(value) = no_telemetry_value(std::env::var_os(NO_TELEMETRY_ENV).as_deref()) {
+        std::env::set_var(NO_TELEMETRY_ENV, value);
+    }
+}
+
+/// Does `telemetry` still stand at sbx's default, telemetry on, which aisbx turns off? A value
+/// someone stored, or set through `SBX_NO_TELEMETRY`, is theirs and stays.
+pub fn telemetry_left_on(telemetry: &Setting) -> bool {
+    telemetry.key == TELEMETRY_DISABLED
+        && telemetry.source == "default"
+        && telemetry.value == serde_json::Value::Bool(false)
+}
+
+/// Turn sbx's telemetry off where nobody chose a value ([`telemetry_left_on`]). `Ok(true)`: it
+/// was turned off now. Never under the test guard.
+pub fn disable_telemetry_by_default() -> Result<bool> {
+    if cfg!(any(test, feature = "test-support")) {
+        return Ok(false);
+    }
+    if !telemetry_left_on(&setting(TELEMETRY_DISABLED)?) {
+        return Ok(false);
+    }
+    let argv = setting_set_argv(TELEMETRY_DISABLED, "true");
+    let out = Command::new(&argv[0])
+        .args(&argv[1..])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .context("running `sbx settings set telemetry.disabled true`")?;
+    anyhow::ensure!(
+        out.status.success(),
+        "sbx settings set telemetry.disabled true failed: {}",
+        String::from_utf8_lossy(&out.stderr).trim()
+    );
+    Ok(true)
+}
+
+/// Store a setting on this host. It asks nothing, also without a terminal.
+pub fn setting_set_argv(key: &str, value: &str) -> Vec<String> {
+    vec![
+        "sbx".into(),
+        "settings".into(),
+        "set".into(),
+        key.into(),
+        value.into(),
+    ]
+}
+
+/// The `--static-mcp` value for a sandbox with no MCP server and no tools to find one. sbx reserves
+/// the name and reads it in any case.
+pub const STATIC_MCP_NONE: &str = "none";
+
+/// Is this fixed MCP set the empty one, [`STATIC_MCP_NONE`]?
+pub fn is_no_mcp(servers: &[String]) -> bool {
+    servers
+        .iter()
+        .any(|s| s.eq_ignore_ascii_case(STATIC_MCP_NONE))
+}
+
 /// Every MCP server registered on this host. A *failure* is also an empty list: an unexpected
 /// shape must not stop a sandbox being created.
 pub fn mcp_servers() -> Vec<McpServer> {
@@ -2285,9 +2461,9 @@ pub fn token_name_ok(name: &str) -> bool {
 }
 
 /// Store or rotate the named token itself: one global row, no environment variable anywhere.
-/// **The value is written to the child's stdin**, never to argv, where `ps` would show it to every
-/// process on the host - see [`crate::job::Step::stdin`]. Rotating takes effect at once for
-/// *every* sandbox pointed at the name.
+/// **The value is written to the child's stdin** (`--value-stdin`), never to argv, where `ps`
+/// would show it to every process on the host - see [`crate::job::Step::stdin`]. Rotating takes
+/// effect at once for *every* sandbox pointed at the name.
 ///
 /// **No `-g`**: global is the default scope, and `--global` is deprecated.
 pub fn secret_set_named_token_argv(placeholder: &str) -> Vec<String> {
@@ -2299,6 +2475,7 @@ pub fn secret_set_named_token_argv(placeholder: &str) -> Vec<String> {
         TOKEN_HOST.into(),
         "--placeholder".into(),
         placeholder.into(),
+        "--value-stdin".into(),
     ]
 }
 
@@ -2317,6 +2494,7 @@ pub fn secret_set_litellm_key_argv(host: &str, placeholder: &str) -> Vec<String>
         host.into(),
         "--placeholder".into(),
         placeholder.into(),
+        "--value-stdin".into(),
     ]
 }
 
@@ -2498,6 +2676,33 @@ mod live {
         // What an omitted `--skills` would mean, and so what the create form opens on. A setting
         // sbx renamed or dropped answers nothing and reads as `readonly`.
         println!("skills.defaultMode: {:?}", skills_default_mode().flag());
+        // The settings screen's rows: booleans, read as sbx prints them.
+        for key in [
+            TELEMETRY_DISABLED,
+            CLIPBOARD_TEXT_COPY,
+            CLIPBOARD_IMAGE_PASTE,
+            SANDBOX_FUSE,
+        ] {
+            let setting = setting(key).expect("sbx settings get --json");
+            println!(
+                "{key}: {:?} ({}, restart {})",
+                setting.flag(),
+                setting.source,
+                setting.requires_restart
+            );
+            assert_eq!(setting.key, key);
+            assert!(setting.flag().is_some(), "{key} is no longer a bool");
+        }
+        let skills = setting(SKILLS_DEFAULT_MODE).expect("sbx settings get --json");
+        println!(
+            "{SKILLS_DEFAULT_MODE}: {:?} ({})",
+            skills.value, skills.source
+        );
+        let mode = skills.value.as_str().and_then(SkillsMode::parse);
+        assert!(
+            mode.is_some(),
+            "skills.defaultMode is no longer one of the three modes"
+        );
         // What `sbx prune` would sweep — read-only, and it never starts a sandbox. Every candidate
         // is a stopped sandbox from the list above.
         let prune = prune_preview().expect("sbx prune --dry-run --json");
@@ -2613,6 +2818,16 @@ mod live {
                 inspect.runtime_mounts.len(),
                 inspect.dynamic_mounts().len(),
                 "a runtime_mounts element no longer has the measured shape"
+            );
+            // What the Mounts tab lists: every bind mount, as host → target and access.
+            let bound: Vec<String> = (inspect.bind_mounts().iter())
+                .map(|m| format!("{} → {} ro={}", m.host_path, m.target(), m.read_only))
+                .collect();
+            println!("  {} host mount(s): {bound:?}", bound.len());
+            assert_eq!(
+                inspect.host_mounts.len(),
+                bound.len(),
+                "a host_mounts element no longer has the measured shape"
             );
             // Everything below is what the details tabs read; a shape change must fail loudly.
             let rules = policy_rules(&entry.name).expect("sbx policy ls --json");
@@ -2748,6 +2963,32 @@ mod tests {
     }
 
     #[test]
+    fn every_sbx_call_gets_no_telemetry_unless_a_value_is_set() {
+        assert_eq!(NO_TELEMETRY_ENV, "SBX_NO_TELEMETRY");
+        assert_eq!(no_telemetry_value(None), Some("1"));
+        assert_eq!(no_telemetry_value(Some(std::ffi::OsStr::new("0"))), None);
+    }
+
+    #[test]
+    fn telemetry_is_turned_off_only_where_nobody_chose() {
+        let at = |value: bool, source: &str| Setting {
+            key: TELEMETRY_DISABLED.into(),
+            value: serde_json::Value::Bool(value),
+            source: source.into(),
+            ..Setting::default()
+        };
+        assert!(telemetry_left_on(&at(false, "default")));
+        assert!(!telemetry_left_on(&at(false, "override")), "chosen on");
+        assert!(!telemetry_left_on(&at(false, "envvar")));
+        assert!(!telemetry_left_on(&at(true, "override")), "off already");
+        let other = Setting {
+            key: CLIPBOARD_TEXT_COPY.into(),
+            ..at(false, "default")
+        };
+        assert!(!telemetry_left_on(&other));
+    }
+
+    #[test]
     fn a_template_goes_just_before_the_agent() {
         let reference = "my-template-claude-anthropic:20261020t030000z";
         let argv = create_argv(Create {
@@ -2771,22 +3012,23 @@ mod tests {
 
     #[test]
     fn the_gate_names_the_version_it_refuses() {
-        assert_eq!(gate("v0.50.1".into()).unwrap(), "v0.50.1");
-        assert!(gate("v0.50.0".into()).is_err());
-        let err = gate("v0.49.2".into()).unwrap_err().to_string();
+        assert_eq!(gate("v0.51.0".into()).unwrap(), "v0.51.0");
+        assert!(gate("v0.50.1".into()).is_err());
+        let err = gate("v0.50.1".into()).unwrap_err().to_string();
         assert!(
-            err.starts_with("this sbx is v0.49.2, but this dashboard needs 0.50.1+ — "),
+            err.starts_with("this sbx is v0.50.1, but this dashboard needs 0.51.0+ — "),
             "{err}"
         );
     }
 
     #[test]
-    fn version_gate_accepts_0501_and_newer() {
-        assert!(meets_required_version("v0.50.1"));
-        assert!(meets_required_version("0.50.1"));
-        assert!(meets_required_version("v0.50.2"));
+    fn version_gate_accepts_0510_and_newer() {
         assert!(meets_required_version("v0.51.0"));
+        assert!(meets_required_version("0.51.0"));
+        assert!(meets_required_version("v0.51.1"));
+        assert!(meets_required_version("v0.52.0"));
         assert!(meets_required_version("v1.0.0"));
+        assert!(!meets_required_version("v0.50.1"));
         assert!(!meets_required_version("v0.50.0"));
         assert!(!meets_required_version("v0.50"));
         assert!(!meets_required_version("v0.49.2"));
@@ -3097,7 +3339,8 @@ mod tests {
           {"id":"d231","name":"approval:d231","scope":"sandbox:s","applies_to":"sandbox:s","resource_type":"network","decision":"allow","resources":["example.org:443"],"origin":"scoped","status":"active","provenance":{"created_via":"approval"},"actions":["net:connect:tcp"]},
           {"id":"c3c3","name":"c3c3","policy_id":"4621","scope":"sandbox:s","applies_to":"sandbox:s","resource_type":"http","decision":"allow","resources":["api.example.com"],"origin":"scoped","layer":"local","status":"active","editable":true,"sandbox_id":"s","provenance":{"created_via":"added"},"actions":["http:request:get"],"methods":["GET"],"http_targets":[{"host":"api.example.com","path":"/search","query":[{"name":"team","value_pattern":"platform"},{"name":"label","value_pattern":"release*"}],"query_match":"subset"}]},
           {"id":"a37d","name":"a37d","policy_id":"4621","scope":"sandbox:s","applies_to":"sandbox:s","resource_type":"http","decision":"allow","resources":["api.example.net"],"origin":"scoped","layer":"local","status":"active","editable":true,"sandbox_id":"s","provenance":{"created_via":"added"},"actions":["http:request:*"],"http_targets":[{"host":"api.example.net","path":"/**","query":[{"name":"k","value_pattern":"%2A"},{"name":"k","value_pattern":"a+b"}],"query_match":"subset"}]},
-          {"id":"default-fs-read-allow-all","name":"default-fs-read-allow-all","scope":"global","applies_to":"all","resource_type":"filesystem:read","decision":"allow","resources":["**"],"origin":"local","provenance":{"created_via":"added"},"actions":["fs:mount:read"]}
+          {"id":"default-fs-read-allow-all","name":"default-fs-read-allow-all","scope":"global","applies_to":"all","resource_type":"filesystem:read","decision":"allow","resources":["**"],"origin":"local","provenance":{"created_via":"added"},"actions":["fs:mount:read"]},
+          {"id":"default-deny-all","name":"default-deny-all","policy_name":"default-deny-all","scope":"global","applies_to":"all","resource_type":"network","decision":"deny","resources":["**"],"origin":"local","layer":"local","status":"active","reason":"Implicit fallback when no applicable policy decides the request.","editable":false,"actions":["net:connect:tcp","net:connect:udp"]}
         ]}"#;
         parse_json::<PolicyLsOutput>(raw).unwrap().rules
     }
@@ -3142,6 +3385,12 @@ mod tests {
         assert!(by("0430").owned_by("s") && by("approval:d231").owned_by("s"));
         assert!(!by("0430").owned_by("other"));
         assert!(!by("default-fs-read-allow-all").owned_by("s"));
+        // The fallback decides what no rule matches: listed, never a rule of the sandbox's.
+        let fallback = by(FALLBACK_RULE);
+        assert!(fallback.is_fallback() && fallback.is_network() && !fallback.allows());
+        assert_eq!(fallback.source(), "fallback");
+        assert!(!fallback.owned_by("s"));
+        assert!(rules.iter().filter(|r| r.is_fallback()).count() == 1);
     }
 
     #[test]
@@ -3262,6 +3511,88 @@ mod tests {
         let inspect: InspectEntry = parse_json(raw).unwrap();
         assert!(inspect.detached);
         assert!(!parse_json::<InspectEntry>(b"{}").unwrap().detached);
+    }
+
+    #[test]
+    fn no_input_goes_right_after_sbx_once() {
+        let own = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<String>>();
+        let argv = own(&["sbx", "exec", "box", "agent", "--no-input"]);
+        let out = no_input(&argv);
+        assert_eq!(
+            out,
+            own(&["sbx", "--no-input", "exec", "box", "agent", "--no-input"]),
+            "before the subcommand, the agent's own argv untouched"
+        );
+        assert_eq!(no_input(&out), out, "once");
+        let git = own(&["git", "status"]);
+        assert_eq!(no_input(&git), git, "not an sbx call");
+        assert!(no_input(&[]).is_empty());
+    }
+
+    #[test]
+    fn a_setting_reads_as_sbx_prints_it_and_is_set_without_a_question() {
+        let raw = br#"{"default": false,
+          "description": "Disable telemetry. SBX_NO_TELEMETRY=1 also disables telemetry.",
+          "key": "telemetry.disabled", "requires_restart": true, "source": "override",
+          "type": "bool", "value": true}"#;
+        let setting: Setting = parse_json(raw).unwrap();
+        assert_eq!(setting.key, TELEMETRY_DISABLED);
+        assert_eq!(setting.flag(), Some(true));
+        assert_eq!(setting.source, "override");
+        assert!(setting.requires_restart);
+        let paste = br#"{"default": false,
+          "description": "Allow sandboxed agents to read the host clipboard for image paste (Ctrl+V).",
+          "env_var": "DOCKER_SANDBOXES_CLIPBOARD_IMAGE_PASTE", "key": "clipboard.imagePaste",
+          "source": "default", "type": "bool", "value": false}"#;
+        let mut paste: Setting = parse_json(paste).unwrap();
+        assert_eq!(paste.env_var, "DOCKER_SANDBOXES_CLIPBOARD_IMAGE_PASTE");
+        assert!(!paste.from_env() && !paste.requires_restart);
+        paste.source = "envvar".into();
+        assert!(paste.from_env(), "sbx's docs: the environment's value wins");
+        let text: Setting = parse_json(br#"{"key":"proxy","value":"http://p:3128"}"#).unwrap();
+        assert_eq!(text.flag(), None, "not a boolean setting");
+        assert_eq!(
+            setting_set_argv(TELEMETRY_DISABLED, "true"),
+            ["sbx", "settings", "set", "telemetry.disabled", "true"]
+        );
+    }
+
+    #[test]
+    fn inspect_lists_every_bind_mount_and_skips_a_bad_element() {
+        let raw = br#"{"name":"box","host_mounts":[
+            {"container_target":"/w","host_path":"/w","read_only":false},
+            {"container_target":"/workspace/data","host_path":"/h/data","read_only":true},
+            {"host_path":42},
+            {"container_target":"/x","host_path":"","read_only":true}
+        ],"runtime_mounts":[]}"#;
+        let inspect: InspectEntry = parse_json(raw).unwrap();
+        let mounts = inspect.bind_mounts();
+        assert_eq!(
+            mounts.len(),
+            2,
+            "a malformed and an empty element are skipped"
+        );
+        assert_eq!(mounts[1].host_path, "/h/data");
+        assert_eq!(mounts[1].target(), "/workspace/data");
+        assert!(mounts[1].read_only && !mounts[0].read_only);
+        assert!(parse_json::<InspectEntry>(b"{}")
+            .unwrap()
+            .bind_mounts()
+            .is_empty());
+    }
+
+    #[test]
+    fn inspect_reports_the_release_that_created_the_sandbox() {
+        let raw = br#"{"name":"aisbx-probe-wd","agent":"probe-wd-kit","state":"running",
+            "created_version":"v0.51.0","uptime":"34s","mcp_gateway":true,"runtime_mounts":[],
+            "sessions":0,"daemon_version":"v0.51.0","daemon_uptime":"14m",
+            "host_mounts":[{"container_target":"/w","host_path":"/w","read_only":false}],
+            "working_dir":"","effective_working_dir":"/w"}"#;
+        let inspect: InspectEntry = parse_json(raw).unwrap();
+        assert_eq!(inspect.created_version, "v0.51.0");
+        assert_eq!(inspect.daemon_version, "v0.51.0");
+        let older: InspectEntry = parse_json(br#"{"daemon_version":"v0.51.0"}"#).unwrap();
+        assert!(older.created_version.is_empty());
     }
 
     #[test]
@@ -3490,6 +3821,7 @@ mod tests {
         assert!(!named.contains(&"-g".to_string()), "{named:?}");
         assert!(!named.contains(&"--sandbox".to_string()), "{named:?}");
         assert!(!named.iter().any(|a| a == "--value" || a == "-t"));
+        assert_eq!(named.last().map(String::as_str), Some("--value-stdin"));
         assert!(
             !named.iter().any(|a| a == "--env"),
             "a global --env row lands in EVERY sandbox: {named:?}"
@@ -3533,7 +3865,8 @@ mod tests {
                 "--host",
                 "litellm.example.com",
                 "--placeholder",
-                "sbx-cs-aisbx-llm-acme"
+                "sbx-cs-aisbx-llm-acme",
+                "--value-stdin"
             ]
         );
         assert!(!set

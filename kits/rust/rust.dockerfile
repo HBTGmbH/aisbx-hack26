@@ -2,7 +2,7 @@
 # Image of the rust mixin: the Rust toolchain at /opt/rust, its binaries linked into /usr/local/bin,
 # and the linker hook. Version and digests: https://static.rust-lang.org/dist/channel-rust-stable.toml
 # of 2026-10-15, the `hash` of each component's .tar.gz.
-FROM docker/sandbox-templates:shell-docker AS build
+FROM docker.io/sbx/shell-image:latest AS build
 USER root
 ARG TARGETARCH
 RUN <<'SH'

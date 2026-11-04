@@ -91,6 +91,42 @@ pub fn connection(name: &str, url: &str) -> crate::litellm::Connection {
     }
 }
 
+/// A boolean sbx setting as `sbx settings get --json` reports it, with sbx's default: `true` for
+/// `sandbox.fuse`, else `false`.
+pub fn bool_setting(key: &str, value: bool) -> crate::sbx::Setting {
+    let default = key == crate::sbx::SANDBOX_FUSE;
+    crate::sbx::Setting {
+        key: key.into(),
+        value: serde_json::Value::Bool(value),
+        default: serde_json::Value::Bool(default),
+        source: match value == default {
+            true => "default".into(),
+            false => "override".into(),
+        },
+        requires_restart: key == crate::sbx::TELEMETRY_DISABLED,
+        env_var: match key == crate::sbx::CLIPBOARD_IMAGE_PASTE {
+            true => "DOCKER_SANDBOXES_CLIPBOARD_IMAGE_PASTE".into(),
+            false => String::new(),
+        },
+        description: String::new(),
+    }
+}
+
+/// `skills.defaultMode` as `sbx settings get --json` reports it: a string, sbx's default
+/// `readonly`.
+pub fn skills_default(mode: &str) -> crate::sbx::Setting {
+    crate::sbx::Setting {
+        key: crate::sbx::SKILLS_DEFAULT_MODE.into(),
+        value: serde_json::Value::String(mode.into()),
+        default: serde_json::Value::String("readonly".into()),
+        source: match mode == "readonly" {
+            true => "default".into(),
+            false => "override".into(),
+        },
+        ..Default::default()
+    }
+}
+
 /// The connection every test app is given ([`litellm_root`]): `acme` on [`ACME_URL`].
 pub fn acme() -> crate::litellm::Connection {
     connection("acme", ACME_URL)

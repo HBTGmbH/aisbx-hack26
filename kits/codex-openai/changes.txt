@@ -1,0 +1,1 @@
+Built on Docker's maintained shell image instead of the Codex template Docker no longer publishes.

@@ -240,6 +240,8 @@ pub enum Origin {
     Host,
     /// The workspace's `companion.json`.
     Companion,
+    /// Typed into the create wizard for this one sandbox ([`extras`]).
+    Wizard,
 }
 
 impl Origin {
@@ -247,32 +249,183 @@ impl Origin {
         match self {
             Origin::Host => "every sandbox",
             Origin::Companion => COMPANION_FILE,
+            Origin::Wizard => "this sandbox",
         }
     }
 }
 
-/// A folder a sandbox mounts beside its workspace, at its own absolute host path.
+/// A folder a sandbox mounts beside its workspace: at its own absolute host path, or at `target`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Folder {
     pub path: PathBuf,
     pub access: Access,
     pub purpose: String,
     pub origin: Origin,
+    /// Where the sandbox sees it, when not at its host path.
+    pub target: Option<String>,
 }
 
 impl Folder {
-    /// The extra workspace as `sbx create` takes it.
+    /// The extra workspace as `sbx create` takes it: `PATH[:TARGET][:ro]`.
     pub fn sbx_spec(&self) -> String {
-        match self.access {
-            Access::Write => self.path.display().to_string(),
-            Access::Read => format!("{}:ro", self.path.display()),
+        self.spec(self.path.display().to_string())
+    }
+
+    /// [`Folder::sbx_spec`] with `~` for the home folder, for the Review.
+    pub fn shown_spec(&self) -> String {
+        self.spec(crate::model::tilde(&self.path))
+    }
+
+    fn spec(&self, host: String) -> String {
+        let mut spec = host;
+        if let Some(target) = &self.target {
+            spec.push(':');
+            spec.push_str(target);
+        }
+        if self.access == Access::Read {
+            spec.push_str(":ro");
+        }
+        spec
+    }
+
+    /// Where the sandbox sees it.
+    pub fn sandbox_path(&self) -> String {
+        match &self.target {
+            Some(target) => target.clone(),
+            None => self.path.display().to_string(),
         }
     }
+}
+
+/// One typed entry as sbx reads it: the host path, the target after its last colon where that
+/// starts with `/`, and `:ro` at the end. A drive letter (`C:/data`) stays part of the path.
+fn entry_parts(entry: &str) -> (&str, Option<&str>, Access) {
+    let (rest, access) = match entry.strip_suffix(":ro") {
+        Some(rest) => (rest, Access::Read),
+        None => (entry, Access::Write),
+    };
+    let drive = |p: &str| p.len() == 1 && p.chars().all(|c| c.is_ascii_alphabetic());
+    match rest.rsplit_once(':') {
+        Some((path, target)) if !path.is_empty() && !drive(path) && target.starts_with('/') => {
+            (path, Some(target), access)
+        }
+        _ => (rest, None, access),
+    }
+}
+
+/// The host folder of an extra workspace as sbx writes it (`PATH[:TARGET][:ro]`), and whether
+/// it is read-only.
+pub fn spec_host(spec: &str) -> (&str, bool) {
+    let (path, _, access) = entry_parts(spec);
+    (path, access == Access::Read)
+}
+
+/// Where sbx mounts a clone-mode sandbox's source, a target no folder may take.
+pub const CLONE_SOURCE: &str = "/run/sandbox/source";
+
+/// The folders typed into the create wizard for one sandbox, comma-separated: see [`extras_of`].
+pub fn extras(text: &str, plan: &Plan, home: Option<&Path>) -> (Vec<Folder>, Vec<String>) {
+    extras_of(text.split(','), plan, home)
+}
+
+/// The folders one sandbox mounts beside `plan`'s, each `PATH`, `PATH:ro`, `PATH:TARGET` or
+/// `PATH:TARGET:ro`, with TARGET an absolute path inside the sandbox. Each is checked like the
+/// host's list ([`plan`]: it must exist, be a folder outside the workspace and pass
+/// [`crate::model::mount_refusal`]), must not be one `plan` mounts already, and its target must
+/// follow sbx's rules: absolute, not `/`, none twice, not the workspace or a path inside it, not
+/// [`CLONE_SOURCE`], not where another folder is mounted. `~/` is the home folder. A problem is one
+/// message per entry.
+pub fn extras_of<'a>(
+    entries: impl IntoIterator<Item = &'a str>,
+    plan: &Plan,
+    home: Option<&Path>,
+) -> (Vec<Folder>, Vec<String>) {
+    let (workspace, planned) = (plan.workspace.as_path(), plan.folders.as_slice());
+    let mut folders: Vec<Folder> = Vec::new();
+    let mut problems = Vec::new();
+    let workspace_real = fs::canonicalize(workspace).ok();
+    let home_real = home.map(|h| fs::canonicalize(h).unwrap_or_else(|_| h.to_path_buf()));
+    let in_workspace = |p: &str| {
+        let p = Path::new(p);
+        !workspace.as_os_str().is_empty()
+            && (p.starts_with(workspace)
+                || workspace_real.as_ref().is_some_and(|w| p.starts_with(w)))
+    };
+    for entry in entries.into_iter().map(str::trim).filter(|e| !e.is_empty()) {
+        let (path, target, access) = entry_parts(entry);
+        let target = target.map(str::to_string);
+        let expanded = match (path.strip_prefix("~/"), home) {
+            (Some(below), Some(home)) => home.join(below),
+            _ => PathBuf::from(path),
+        };
+        let problem = |why: &str| format!("“{entry}”: {why}");
+        if !expanded.is_absolute() {
+            problems.push(problem("give the host folder as an absolute path or ~/…"));
+            continue;
+        }
+        let Ok(real) = fs::canonicalize(&expanded) else {
+            problems.push(problem("the folder does not exist"));
+            continue;
+        };
+        if !real.is_dir() {
+            problems.push(problem("it is not a folder"));
+            continue;
+        }
+        if workspace_real
+            .as_ref()
+            .is_some_and(|ws| real.starts_with(ws))
+        {
+            problems.push(problem("it is in the workspace, which is mounted already"));
+            continue;
+        }
+        if let Some(why) =
+            (home_real.as_deref()).and_then(|h| crate::model::mount_refusal(&real, h))
+        {
+            problems.push(problem(&why));
+            continue;
+        }
+        if planned.iter().any(|f| f.path == real) {
+            problems.push(problem("it is a host folder every sandbox mounts already"));
+            continue;
+        }
+        if folders.iter().any(|f| f.path == real && f.target == target) {
+            problems.push(problem("listed twice"));
+            continue;
+        }
+        let at = target.clone().unwrap_or_else(|| real.display().to_string());
+        let taken = |f: &Folder| f.sandbox_path() == at;
+        let why = match &target {
+            Some(t) if t.trim_end_matches('/').is_empty() => Some("the target cannot be /"),
+            Some(t) if t.contains('\0') => Some("the target holds a NUL character"),
+            Some(t) if in_workspace(t) => Some("the target is the workspace or inside it"),
+            Some(t) if t == CLONE_SOURCE || t.starts_with(&format!("{CLONE_SOURCE}/")) => {
+                Some("the target is where clone mode keeps its source")
+            }
+            _ if planned.iter().any(taken) || folders.iter().any(taken) => {
+                Some("another folder is mounted at that path in the sandbox")
+            }
+            _ => None,
+        };
+        if let Some(why) = why {
+            problems.push(problem(why));
+            continue;
+        }
+        folders.push(Folder {
+            path: real,
+            access,
+            purpose: String::new(),
+            origin: Origin::Wizard,
+            target,
+        });
+    }
+    (folders, problems)
 }
 
 /// The folders a sandbox on `workspace` mounts, and why any listed folder is left out.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Plan {
+    /// The workspace the plan is for; empty for a mountless sandbox.
+    pub workspace: PathBuf,
     pub folders: Vec<Folder>,
     pub notes: Vec<String>,
 }
@@ -316,6 +469,7 @@ pub fn plan(workspace: &Path, host: &[Entry], home: Option<&Path>) -> Plan {
         wanted.push((e.path.clone(), e.access, one_line(&e.purpose), Origin::Host));
     }
     let workspace_real = fs::canonicalize(workspace).ok();
+    let home_real = home.map(|h| fs::canonicalize(h).unwrap_or_else(|_| h.to_path_buf()));
     let mut folders: Vec<Folder> = Vec::new();
     for (path, access, purpose, origin) in wanted {
         let shown = path.display().to_string();
@@ -336,7 +490,9 @@ pub fn plan(workspace: &Path, host: &[Entry], home: Option<&Path>) -> Plan {
             ));
             continue;
         }
-        if let Some(why) = home.and_then(|h| crate::model::mount_refusal(&real, h)) {
+        if let Some(why) =
+            (home_real.as_deref()).and_then(|h| crate::model::mount_refusal(&real, h))
+        {
             notes.push(format!("{shown}: not mounted, {why}"));
             continue;
         }
@@ -352,10 +508,15 @@ pub fn plan(workspace: &Path, host: &[Entry], home: Option<&Path>) -> Plan {
                 access,
                 purpose,
                 origin,
+                target: None,
             }),
         }
     }
-    Plan { folders, notes }
+    Plan {
+        workspace: workspace.to_path_buf(),
+        folders,
+        notes,
+    }
 }
 
 /// The workspace's `companion.json`, `None` without one.
@@ -453,16 +614,21 @@ pub fn context(folders: &[Folder], git_guard: bool) -> String {
     if !folders.is_empty() {
         out.push_str(
             "Host folders are mounted in this sandbox beside the workspace, each at its own host \
-             path. Look there for what each one is for; never write into a read-only one:\n\n",
+             path unless another one is named. Look there for what each one is for; never write \
+             into a read-only one:\n\n",
         );
         for f in folders {
             let purpose = match f.purpose.as_str() {
                 "" => String::new(),
                 p => format!(": {p}"),
             };
+            let from = match &f.target {
+                Some(_) => format!(", the host's `{}`", f.path.display()),
+                None => String::new(),
+            };
             out.push_str(&format!(
-                "- `{}` ({}){purpose}\n",
-                f.path.display(),
+                "- `{}` ({}{from}){purpose}\n",
+                f.sandbox_path(),
                 f.access.label()
             ));
         }
@@ -492,12 +658,12 @@ pub fn summary(folders: &[Folder], git_guard: bool) -> String {
                     (true, p) if !p.is_empty() => {
                         format!(
                             "{} ({}): {}",
-                            f.path.display(),
+                            f.sandbox_path(),
                             f.access.label(),
                             p.trim_end_matches('.')
                         )
                     }
-                    _ => format!("{} ({})", f.path.display(), f.access.label()),
+                    _ => format!("{} ({})", f.sandbox_path(), f.access.label()),
                 })
                 .collect();
             listed.join("; ")
@@ -697,6 +863,121 @@ mod tests {
     }
 
     #[test]
+    fn typed_folders_parse_with_their_targets_and_follow_sbxs_rules() {
+        let root = std::env::temp_dir().join(format!("aisbx-extras-{}", std::process::id()));
+        let (ws, data, docs, home) = (
+            root.join("ws"),
+            root.join("data"),
+            root.join("docs"),
+            root.join("home"),
+        );
+        for dir in [&ws, &data, &docs, &home, &ws.join("inner")] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        let real = |p: &Path| fs::canonicalize(p).unwrap();
+        let text = format!(
+            "{}, {}:ro, {}:/workspace/data:ro",
+            data.display(),
+            docs.display(),
+            docs.display()
+        );
+        let plan = |folders: Vec<Folder>| Plan {
+            workspace: ws.clone(),
+            folders,
+            notes: Vec::new(),
+        };
+        let (folders, problems) = extras(&text, &plan(Vec::new()), Some(&home));
+        assert!(problems.is_empty(), "{problems:?}");
+        let specs: Vec<String> = folders.iter().map(Folder::sbx_spec).collect();
+        assert_eq!(
+            specs,
+            [
+                real(&data).display().to_string(),
+                format!("{}:ro", real(&docs).display()),
+                format!("{}:/workspace/data:ro", real(&docs).display()),
+            ]
+        );
+        assert_eq!(folders[2].sandbox_path(), "/workspace/data");
+        assert!(folders.iter().all(|f| f.origin == Origin::Wizard));
+
+        let refused = |text: &str, planned: &[Folder]| {
+            let (folders, problems) = extras(text, &plan(planned.to_vec()), Some(&home));
+            assert!(folders.is_empty(), "{text}: {folders:?}");
+            problems.join(" | ")
+        };
+        let at = |target: &str| format!("{}:{target}", data.display());
+        let refused_last = |text: &str| {
+            let (folders, problems) = extras(text, &plan(Vec::new()), Some(&home));
+            assert_eq!(
+                (folders.len(), problems.len()),
+                (1, 1),
+                "{text}: {problems:?}"
+            );
+            problems[0].clone()
+        };
+        assert!(refused("relative/path", &[]).contains("absolute"));
+        assert!(refused(&format!("{}/nope", root.display()), &[]).contains("does not exist"));
+        assert!(refused(&ws.join("inner").display().to_string(), &[]).contains("in the workspace"));
+        assert!(refused(&home.display().to_string(), &[]).contains("home folder"));
+        assert!(refused(&at("/"), &[]).contains("cannot be /"));
+        let inside = at(&format!("{}/sub", ws.display()));
+        assert!(refused(&inside, &[]).contains("workspace or inside it"));
+        assert!(refused(&at(CLONE_SOURCE), &[]).contains("clone mode"));
+        let planned = Folder {
+            path: real(&docs),
+            access: Access::Read,
+            purpose: String::new(),
+            origin: Origin::Host,
+            target: None,
+        };
+        let docs_text = docs.display().to_string();
+        assert!(
+            refused(&docs_text, std::slice::from_ref(&planned)).contains("every sandbox mounts")
+        );
+        let clash = at(&real(&docs).display().to_string());
+        assert!(refused(&clash, &[planned]).contains("another folder"));
+        let at_docs = format!(
+            "{}, {}",
+            at(&real(&docs).display().to_string()),
+            docs.display()
+        );
+        assert!(refused_last(&at_docs).contains("another folder is mounted at that path"));
+        for twice in [
+            format!("{0}:/t, {0}:/t", data.display()),
+            format!("{0}, {0}", data.display()),
+        ] {
+            let (_, problems) = extras(&twice, &plan(Vec::new()), Some(&home));
+            assert_eq!(problems.len(), 1, "{problems:?}");
+            assert!(problems[0].ends_with(": listed twice"), "{problems:?}");
+        }
+        let tilde = extras("~/", &plan(Vec::new()), Some(&home)).1;
+        assert!(tilde[0].contains("home folder"), "{tilde:?}");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_entry_splits_at_the_targets_colon_and_keeps_a_drive_letter() {
+        let (r, w) = (Access::Read, Access::Write);
+        let cases = [
+            ("/srv/a", ("/srv/a", None, w)),
+            ("/srv/a:ro", ("/srv/a", None, r)),
+            ("/srv/a:/t", ("/srv/a", Some("/t"), w)),
+            ("~/a:/t/b:ro", ("~/a", Some("/t/b"), r)),
+            ("/srv/a:relative", ("/srv/a:relative", None, w)),
+            ("C:/data", ("C:/data", None, w)),
+            ("C:/data:ro", ("C:/data", None, r)),
+            (
+                "C:/data:/workspace/data:ro",
+                ("C:/data", Some("/workspace/data"), r),
+            ),
+            (r"C:\data:ro", (r"C:\data", None, r)),
+        ];
+        for (entry, want) in cases {
+            assert_eq!(entry_parts(entry), want, "{entry}");
+        }
+    }
+
+    #[test]
     fn the_kit_lists_each_folder_with_its_purpose_for_the_agent() {
         let folders = [
             Folder {
@@ -704,12 +985,21 @@ mod tests {
                 access: Access::Write,
                 purpose: "the knowledge base ${{ x }}".into(),
                 origin: Origin::Companion,
+                target: None,
             },
             Folder {
                 path: PathBuf::from("/srv/docs"),
                 access: Access::Read,
                 purpose: String::new(),
                 origin: Origin::Host,
+                target: None,
+            },
+            Folder {
+                path: PathBuf::from("/srv/data"),
+                access: Access::Read,
+                purpose: String::new(),
+                origin: Origin::Wizard,
+                target: Some("/workspace/data".into()),
             },
         ];
         let dir = ensure_kit("my.proj", &folders, true).unwrap().unwrap();
@@ -725,14 +1015,18 @@ mod tests {
         let content = caps["config"]["content"].as_str().unwrap();
         assert!(content.contains("- `/srv/kb` (read-write): the knowledge base $ {{ x }}\n"));
         assert!(content.contains("- `/srv/docs` (read-only)\n"));
+        assert!(
+            content.contains("- `/workspace/data` (read-only, the host's `/srv/data`)\n"),
+            "a folder at its own target names where the sandbox sees it: {content}"
+        );
         assert!(content.contains("`.git` folder is mounted read-only"));
         assert!(!text.contains("${{"));
         assert_eq!(
             doc["description"].as_str(),
             Some(
                 "Host folders mounted beside the workspace: /srv/kb (read-write): the knowledge \
-                 base $ {{ x }}; /srv/docs (read-only). The workspace's .git folder is read-only: \
-                 leave commits to the user."
+                 base $ {{ x }}; /srv/docs (read-only); /workspace/data (read-only). The \
+                 workspace's .git folder is read-only: leave commits to the user."
             )
         );
         let many: Vec<Folder> = (0..40)
@@ -758,6 +1052,7 @@ mod tests {
             access: Access::Write,
             purpose: "the knowledge base: \"quoted\", $HOME and `code`".into(),
             origin: Origin::Companion,
+            target: None,
         }];
         let dir = ensure_kit("aisbx-selftest-folders", &folders, true)
             .unwrap()

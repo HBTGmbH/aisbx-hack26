@@ -23,7 +23,8 @@ sandbox, whatever the kits say.
 Select a sandbox and press `c`, then type the host. The dashboard tells whether the policy allows it. This opens no
 connection. Without the dashboard, run `sbx policy check network --sandbox <name> <host>`.
 
-The *5 Network* tab shows every rule that applies to the sandbox and where it came from.
+The *5 Network* tab shows every rule that applies to the sandbox and where it came from. The last row, marked
+`fallback`, is the policy's own `deny **`: it decides every request that no other rule matches.
 
 ### A blocked host asks first
 
@@ -80,6 +81,23 @@ A kit's allow-list can only open hosts, never close one. Under `deny-all`, these
 
 The kits configure each agent not to send telemetry at all. This matters because under `balanced` the telemetry
 hosts may be open, and Anthropic metrics can go through `api.anthropic.com`.
+
+### sbx's own telemetry (`T`)
+
+sbx's CLI and daemon send usage data to Docker unless you turn it off. The dashboard turns it off when it starts,
+and `aisbx up`, `run`, `status`, `stop` and `rm` before they run, while the setting still has sbx's default.
+Each says so once (the dashboard in its status line, a headless run on stderr). A value you set yourself stays. Press `T`
+(or *Settings* in the window's header) and choose *telemetry*: `↵` turns it on or off again. A running daemon follows the change after
+`sbx daemon restart`. Without the dashboard:
+
+```console
+$ sbx settings set telemetry.disabled true
+$ sbx daemon restart
+```
+
+`SBX_NO_TELEMETRY=1` in sbx's environment turns it off too, but the setting does not show that. `aisbx` and
+`aisbx-ui` set it for every `sbx` they start, unless it already has a value; set `SBX_NO_TELEMETRY=0` before you
+start them to leave it to the setting.
 
 ### The Claude kits' switches
 

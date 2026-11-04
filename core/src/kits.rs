@@ -275,8 +275,8 @@ const PI_PACKAGE: &str = "@earendil-works/pi-coding-agent";
 /// `@opencode/cli` range, else `opencode upgrade`.
 const OPENCODE_UPDATE: &str = r#"if [ -n "${OPENCODE_LITELLM_VERSION:-}" ]; then npm install -g --force "@opencode/cli@$OPENCODE_LITELLM_VERSION"; else opencode upgrade; fi"#;
 
-/// The command that launches this agent, for a start other than the workspace root
-/// ([`crate::startdir`]). `None` for an agent this repo has no facts for.
+/// The binary that runs this agent: its harness, which addons and the headless argv key on. `None`
+/// for an agent this repo has no facts for.
 pub fn agent_command(agent: &str) -> Option<&'static str> {
     match cli(agent)? {
         Cli::Claude => Some("claude"),
@@ -299,8 +299,9 @@ pub fn headroom_warning(agent: &str) -> &'static str {
     }
 }
 
-/// The flags `sbx run` would have added, for the [`agent_command`] launch that replaces it.
-/// `sbx exec` runs the exact argv: without them, Claude Code asks before every tool call.
+/// The flags `sbx run` adds from the kit's entrypoint, for a launch through `sbx exec`
+/// ([`headless_argv`]), which runs the exact argv: without them, Claude Code asks before every tool
+/// call.
 pub fn agent_launch_args(agent_cmd: &str) -> &'static [&'static str] {
     match agent_cmd {
         "claude" => &["--dangerously-skip-permissions"],

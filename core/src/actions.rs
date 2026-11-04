@@ -17,6 +17,7 @@ pub enum Action {
     Skills,
     RepoSkills,
     Folders,
+    Settings,
     Approvals,
     KeepRunning,
     RefreshModels,
@@ -45,7 +46,7 @@ pub enum Refusal {
 }
 
 impl Action {
-    pub const ALL: [Action; 25] = [
+    pub const ALL: [Action; 26] = [
         Action::Start,
         Action::Shell,
         Action::New,
@@ -57,6 +58,7 @@ impl Action {
         Action::Skills,
         Action::RepoSkills,
         Action::Folders,
+        Action::Settings,
         Action::Approvals,
         Action::KeepRunning,
         Action::RefreshModels,
@@ -88,6 +90,7 @@ impl Action {
             Action::Skills => (Char('K'), "Skills"),
             Action::RepoSkills => (Char('i'), "Repo skills"),
             Action::Folders => (Char('F'), "Host folders"),
+            Action::Settings => (Char('T'), "Settings"),
             Action::Approvals => (Char('y'), "Approvals"),
             Action::KeepRunning => (Char('b'), "Keep running"),
             Action::RefreshModels => (Char('L'), "Refresh models"),
@@ -143,6 +146,7 @@ impl Action {
             Action::Skills => "Manage the shared skills store",
             Action::RepoSkills => "Pick the skills from skill repositories this sandbox gets",
             Action::Folders => "List the host folders every sandbox mounts, and what each is for",
+            Action::Settings => "Change sbx's settings for this host, such as telemetry",
             Action::Approvals => "Answer the network requests waiting for approval",
             Action::KeepRunning => "Keep the sandbox running without a session, or stop doing so",
             Action::RefreshModels => "Fetch the gateway's model list again",

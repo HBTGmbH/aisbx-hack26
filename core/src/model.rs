@@ -203,6 +203,9 @@ pub struct Sandbox {
     /// Host folders added after creation with `sbx mount` (`runtime_mounts`), restored on every
     /// start. Not the workspaces given at creation ([`sbx::InspectEntry::runtime_mounts`]).
     pub runtime_mounts: Vec<sbx::RuntimeMount>,
+    /// Every folder sbx bind-mounts into the sandbox, as `sbx inspect` reports it; `None` when it
+    /// gave no answer.
+    pub host_mounts: Option<Vec<BindMount>>,
     /// In detached mode (`b`, or `sbx run -d` from the CLI): it keeps running after its sessions
     /// end. Read off `detached` in `ls --json` / `inspect --json`, never remembered.
     pub keep_running: bool,
@@ -229,6 +232,9 @@ pub struct Sandbox {
     pub secrets: Vec<(String, String)>,
     pub mcp_gateway: bool,
     pub daemon_version: String,
+    /// The sbx release that created the sandbox, as `sbx inspect` reports it; empty when it does
+    /// not.
+    pub created_version: String,
 }
 
 impl Sandbox {
@@ -281,12 +287,9 @@ impl Sandbox {
         }
     }
 
-    /// Can this sandbox be given a start folder at all? Only where [`crate::kits::agent_command`]
-    /// knows the agent's binary: `sbx exec -w` needs a command.
+    /// Can this sandbox be given a start folder at all? Any sandbox with a workspace on the host.
     pub fn can_pick_start_dir(&self) -> bool {
-        !self.workspace_missing
-            && !self.mountless()
-            && crate::kits::agent_command(&self.agent).is_some()
+        !self.workspace_missing && !self.mountless()
     }
 
     /// Where the agent opens, written so the mount and the working directory stay distinguishable:
@@ -341,12 +344,17 @@ impl Sandbox {
         }
     }
 
-    /// Where the sandbox lives: always this machine, plus the daemon version when sbx reports one.
+    /// Where the sandbox lives: always this machine, plus the daemon version and the sbx release
+    /// that created the sandbox, each when sbx reports it.
     pub fn location(&self) -> String {
-        match self.daemon_version.is_empty() {
-            true => "local".into(),
-            false => format!("local  ·  sandboxd {}", self.daemon_version),
+        let mut out = String::from("local");
+        if !self.daemon_version.is_empty() {
+            out.push_str(&format!("  ·  sandboxd {}", self.daemon_version));
         }
+        if !self.created_version.is_empty() {
+            out.push_str(&format!("  ·  created by sbx {}", self.created_version));
+        }
+        out
     }
 
     /// Everything mounted from the host, primary workspace first, as (path, mode).
@@ -686,6 +694,10 @@ pub const MOUNTLESS_WORKDIR: &str = "/home/agent/workspace";
 /// current kit hash in the registry as its drift baseline; only a later change is drift.
 pub fn resolve(snapshot: &Snapshot, catalog: &Catalog, registry: &mut Registry) -> Vec<Sandbox> {
     let mut out = Vec::with_capacity(snapshot.sandboxes.len());
+    let store = (snapshot.skills.as_ref())
+        .map(|s| PathBuf::from(&s.store))
+        .filter(|p| !p.as_os_str().is_empty())
+        .or_else(sbx::skills_store);
 
     for raw in &snapshot.sandboxes {
         let name = raw.ls.name.clone();
@@ -759,9 +771,7 @@ pub fn resolve(snapshot: &Snapshot, catalog: &Catalog, registry: &mut Registry) 
         });
 
         let (workspace, ro_mounts, rw_mounts) = split_workspaces(&raw.ls.workspaces);
-        // sbx does not fill `workspace_missing` in practice, so check the host path too.
-        let workspace_missing =
-            raw.ls.workspace_missing || (!workspace.as_os_str().is_empty() && !workspace.is_dir());
+        let workspace_missing = !workspace.as_os_str().is_empty() && !workspace.is_dir();
 
         let changed = changed_kits(
             registry,
@@ -816,6 +826,14 @@ pub fn resolve(snapshot: &Snapshot, catalog: &Catalog, registry: &mut Registry) 
             });
 
         let inspect = raw.inspect.clone().unwrap_or_default();
+        let host_mounts = raw.inspect.is_some().then(|| {
+            bind_mounts(
+                &inspect.bind_mounts(),
+                &workspace,
+                store.as_deref(),
+                &inspect.dynamic_mounts(),
+            )
+        });
         out.push(Sandbox {
             label,
             agent: raw.ls.agent.clone(),
@@ -851,6 +869,7 @@ pub fn resolve(snapshot: &Snapshot, catalog: &Catalog, registry: &mut Registry) 
             memory_spec: raw.ls.memory_spec(),
             unresponsive: raw.ls.guest_unresponsive || inspect.guest_unresponsive,
             runtime_mounts: inspect.dynamic_mounts(),
+            host_mounts,
             keep_running: raw.ls.detached || inspect.detached,
             image: inspect.image,
             image_digest: inspect.image_digest,
@@ -869,6 +888,7 @@ pub fn resolve(snapshot: &Snapshot, catalog: &Catalog, registry: &mut Registry) 
                 .collect(),
             mcp_gateway: inspect.mcp_gateway,
             daemon_version: inspect.daemon_version,
+            created_version: inspect.created_version,
             name,
         });
     }
@@ -879,6 +899,66 @@ pub fn resolve(snapshot: &Snapshot, catalog: &Catalog, registry: &mut Registry) 
 
 /// The primary workspace, then the extra ones: read-only (`:ro`) and read-write. An extra one
 /// without the suffix is writable from inside.
+/// What a bind mount is to its sandbox.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MountKind {
+    /// The folder the sandbox is built on; in clone mode, the clone's read-only source.
+    Workspace,
+    /// sbx's shared agent-skills store.
+    Skills,
+    /// A folder added with `sbx mount` after creation.
+    Added,
+    /// Any other: an extra workspace, a kit's folder.
+    Folder,
+}
+
+/// One folder sbx bind-mounts into a sandbox ([`sbx::InspectEntry::host_mounts`]), with what this
+/// host knows of it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BindMount {
+    pub host: PathBuf,
+    /// Where it is inside the sandbox.
+    pub target: String,
+    pub read_only: bool,
+    pub kind: MountKind,
+    /// The host folder is gone. Checked on this host: sbx flags only the sandbox as a whole.
+    pub missing: bool,
+}
+
+/// Name each of sbx's bind mounts by what it is to the sandbox, and check its host folder.
+fn bind_mounts(
+    mounts: &[sbx::HostMount],
+    workspace: &Path,
+    store: Option<&Path>,
+    added: &[sbx::RuntimeMount],
+) -> Vec<BindMount> {
+    mounts
+        .iter()
+        .map(|m| {
+            let host = PathBuf::from(&m.host_path);
+            let kind = if !workspace.as_os_str().is_empty() && host == workspace {
+                MountKind::Workspace
+            } else if store == Some(host.as_path()) {
+                MountKind::Skills
+            } else if added
+                .iter()
+                .any(|a| a.host_path == m.host_path && a.target() == m.target())
+            {
+                MountKind::Added
+            } else {
+                MountKind::Folder
+            };
+            BindMount {
+                missing: !host.exists(),
+                target: m.target().to_string(),
+                read_only: m.read_only,
+                kind,
+                host,
+            }
+        })
+        .collect()
+}
+
 fn split_workspaces(workspaces: &[String]) -> (PathBuf, Vec<PathBuf>, Vec<PathBuf>) {
     let mut iter = workspaces.iter();
     let primary = iter
@@ -887,9 +967,9 @@ fn split_workspaces(workspaces: &[String]) -> (PathBuf, Vec<PathBuf>, Vec<PathBu
         .unwrap_or_default();
     let (mut ro, mut rw) = (Vec::new(), Vec::new());
     for w in iter {
-        match w.strip_suffix(":ro") {
-            Some(path) => ro.push(PathBuf::from(path)),
-            None => rw.push(PathBuf::from(w)),
+        match crate::folders::spec_host(w) {
+            (path, true) => ro.push(PathBuf::from(path)),
+            (path, false) => rw.push(PathBuf::from(path)),
         }
     }
     (primary, ro, rw)
@@ -1497,6 +1577,7 @@ pub fn sample(name: &str, backend: Option<&str>, addons: &[&str]) -> Sandbox {
         memory_spec: None,
         unresponsive: false,
         runtime_mounts: Vec::new(),
+        host_mounts: None,
         keep_running: false,
         // The real rule, not a copy: a fixture must not claim a store the backend never mounts.
         skills: crate::kits::Catalog::load()
@@ -1530,13 +1611,111 @@ pub fn sample(name: &str, backend: Option<&str>, addons: &[&str]) -> Sandbox {
         policy_scope: "global".into(),
         secrets: Vec::new(),
         mcp_gateway: false,
-        daemon_version: "v0.50.0".into(),
+        daemon_version: "v0.51.0".into(),
+        created_version: String::new(),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bind_mounts_are_named_by_what_they_are_and_checked_on_the_host() {
+        let root = std::env::temp_dir().join(format!("aisbx-bind-{}", std::process::id()));
+        let (ws, data, store, added) = (
+            root.join("ws"),
+            root.join("data"),
+            root.join("agent-skills"),
+            root.join("added"),
+        );
+        for dir in [&ws, &data, &store, &added] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        let mount = |host: &Path, target: &str, read_only: bool| sbx::HostMount {
+            host_path: host.display().to_string(),
+            container_target: target.to_string(),
+            read_only,
+        };
+        let gone = root.join("gone");
+        let reported = [
+            mount(&ws, &ws.display().to_string(), false),
+            mount(&data, "/workspace/data", true),
+            mount(&store, "/home/agent/.local/share/aisbx/skills-store", true),
+            mount(&added, "/mnt/added", true),
+            mount(&gone, &gone.display().to_string(), false),
+        ];
+        let runtime = [mount(&added, "/mnt/added", true)];
+        let mounts = bind_mounts(&reported, &ws, Some(&store), &runtime);
+        let kinds: Vec<MountKind> = mounts.iter().map(|m| m.kind).collect();
+        assert_eq!(
+            kinds,
+            [
+                MountKind::Workspace,
+                MountKind::Folder,
+                MountKind::Skills,
+                MountKind::Added,
+                MountKind::Folder
+            ]
+        );
+        assert_eq!(mounts[1].target, "/workspace/data");
+        let missing: Vec<bool> = mounts.iter().map(|m| m.missing).collect();
+        assert_eq!(missing, [false, false, false, false, true]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_missing_extra_folder_is_not_a_missing_workspace() {
+        let ws = std::env::temp_dir().join(format!("aisbx-ws-{}", std::process::id()));
+        std::fs::create_dir_all(&ws).unwrap();
+        let mut ls = sbx::LsEntry {
+            name: "box".into(),
+            agent: "claude".into(),
+            workspaces: vec![ws.display().to_string(), "/gone-extra:ro".into()],
+            workspace_missing: true,
+            ..Default::default()
+        };
+        let mut snap = Snapshot {
+            sandboxes: vec![Raw {
+                ls: ls.clone(),
+                inspect: None,
+            }],
+            kit_hashes: BTreeMap::new(),
+            secrets: None,
+            mcp: Vec::new(),
+            skills: None,
+            skills_default: sbx::SkillsMode::default(),
+            approvals: None,
+            policy_needs_init: None,
+            fetchers: Vec::new(),
+        };
+        let catalog = Catalog::load().unwrap();
+        let sb = resolve(&snap, &catalog, &mut Registry::empty()).remove(0);
+        assert!(
+            !sb.workspace_missing,
+            "sbx 0.51 sets the flag for an extra folder; the workspace is here"
+        );
+        assert_eq!(sb.host_mounts, None, "no inspect, no report");
+        let _ = std::fs::remove_dir_all(&ws);
+
+        ls.workspaces[0] = "/no/such/aisbx-workspace".into();
+        snap.sandboxes[0].ls = ls;
+        let sb = resolve(&snap, &catalog, &mut Registry::empty()).remove(0);
+        assert!(sb.workspace_missing, "a gone workspace still says so");
+    }
+
+    #[test]
+    fn the_location_names_the_release_that_created_the_sandbox_when_sbx_does() {
+        let mut sb = sample("s", Some("claude-litellm"), &[]);
+        assert_eq!(sb.location(), "local  ·  sandboxd v0.51.0");
+        sb.created_version = "v0.51.0".into();
+        assert_eq!(
+            sb.location(),
+            "local  ·  sandboxd v0.51.0  ·  created by sbx v0.51.0"
+        );
+        sb.daemon_version.clear();
+        assert_eq!(sb.location(), "local  ·  created by sbx v0.51.0");
+    }
 
     /// The badges and the ids name the same kits in one order, a kit of no catalog marked `?`
     /// in both; an id is one word, where a label may be two.
@@ -1653,10 +1832,22 @@ mod tests {
             "/proj".to_string(),
             "/home/u/.m2/repository:ro".to_string(),
             "/home/u/.cache/ci-deps/x".to_string(),
+            "/srv/data:/workspace/data:ro".to_string(),
+            "/srv/libs:/workspace/libs".to_string(),
         ]);
         assert_eq!(ws, PathBuf::from("/proj"));
-        assert_eq!(ro, vec![PathBuf::from("/home/u/.m2/repository")]);
-        assert_eq!(rw, vec![PathBuf::from("/home/u/.cache/ci-deps/x")]);
+        assert_eq!(
+            ro,
+            [PathBuf::from("/home/u/.m2/repository"), "/srv/data".into()],
+            "a folder at a target of its own is still its host folder"
+        );
+        assert_eq!(
+            rw,
+            [
+                PathBuf::from("/home/u/.cache/ci-deps/x"),
+                "/srv/libs".into()
+            ]
+        );
     }
 
     /// A throwaway HOME for the package-cache tests (never the real one: `HOME` is process-wide
@@ -2350,11 +2541,15 @@ mod checkout_tests {
             .position(|a| a.kit.name == "rtk")
             .unwrap();
         catalog.addons[rtk_at].kit.changes = vec!["Older.".into()];
-        // The backend's own list stays out of it: the shipped one grows.
+        // The shipped lists of the backend and of jdk25 stay out of it: they grow.
         let backend_at = (catalog.backends.iter())
             .position(|b| b.kit.name == "claude-anthropic")
             .unwrap();
         catalog.backends[backend_at].kit.changes = Vec::new();
+        let jdk_at = (catalog.addons.iter())
+            .position(|a| a.kit.name == "jdk25")
+            .unwrap();
+        catalog.addons[jdk_at].kit.changes = Vec::new();
         let rtk_name = catalog.addons[rtk_at].kit.display_name.clone();
         let here = catalog.kits_dir.clone();
         let mut registry = Registry::empty();

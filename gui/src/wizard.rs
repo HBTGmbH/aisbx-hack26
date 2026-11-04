@@ -1251,8 +1251,8 @@ fn workspace_step(ui: &mut egui::Ui, at: &mut Draw<'_, '_>) {
     let ws = &form.workspace;
     controls::section(
         ui,
-        "Name and start folder",
-        "Your label, and where the agent opens",
+        "Name and folders",
+        "Your label, where the agent opens, and more host folders",
     );
     text_field(
         ui,
@@ -1287,6 +1287,15 @@ fn workspace_step(ui: &mut egui::Ui, at: &mut Draw<'_, '_>) {
         });
         at.take(response, row);
     }
+    text_field(
+        ui,
+        at,
+        CreateRow::ExtraFolders,
+        "More folders",
+        &ws.extra_folders,
+        "~/docs:ro, ~/libs:/workspace/libs",
+        true,
+    );
 
     controls::section(ui, "Options", "");
     let width = ui.available_width().min(FIELD + 120.0);
@@ -1370,35 +1379,46 @@ fn workspace_step(ui: &mut egui::Ui, at: &mut Draw<'_, '_>) {
         true,
     );
 
-    if !ws.mcp.is_empty() {
-        controls::section(
-            ui,
-            "MCP servers",
-            "The sandbox's fixed set. A server's credentials stay on the host.",
-        );
-        for (i, server) in ws.mcp.iter().enumerate() {
-            let row = WizardRow::Field(CreateRow::Mcp(i));
-            let status = format!("Not ready: {}", server.status);
-            let mut badges = Vec::new();
-            if !server.ready() {
-                badges.push(Badge {
-                    text: &status,
-                    color: theme::warn(dark),
-                });
-            }
-            let item = Item {
-                mark: Mark::Check,
-                title: &server.name,
-                detail: &server.transport,
-                badges,
-                color: theme::accent(dark),
-                checked: ws.static_mcp.get(i).copied().unwrap_or(false),
-                enabled: true,
-                focused: at.focused(row),
-            };
-            let response = controls::check_item(ui, item, width);
-            at.take(response, row);
+    controls::section(
+        ui,
+        "MCP servers",
+        "The sandbox's fixed set. A server's credentials stay on the host.",
+    );
+    let row = WizardRow::Field(CreateRow::McpNone);
+    let item = Item {
+        mark: Mark::Check,
+        title: "None",
+        detail: aisbx_core::create::NO_MCP,
+        badges: Vec::new(),
+        color: theme::accent(dark),
+        checked: ws.no_mcp,
+        enabled: true,
+        focused: at.focused(row),
+    };
+    let response = controls::check_item(ui, item, width);
+    at.take(response, row);
+    for (i, server) in ws.mcp.iter().enumerate() {
+        let row = WizardRow::Field(CreateRow::Mcp(i));
+        let status = format!("Not ready: {}", server.status);
+        let mut badges = Vec::new();
+        if !server.ready() {
+            badges.push(Badge {
+                text: &status,
+                color: theme::warn(dark),
+            });
         }
+        let item = Item {
+            mark: Mark::Check,
+            title: &server.name,
+            detail: &server.transport,
+            badges,
+            color: theme::accent(dark),
+            checked: ws.static_mcp.get(i).copied().unwrap_or(false),
+            enabled: true,
+            focused: at.focused(row),
+        };
+        let response = controls::check_item(ui, item, width);
+        at.take(response, row);
     }
 }
 

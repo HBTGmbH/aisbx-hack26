@@ -167,6 +167,13 @@ fn collect(shape: &egui::Shape, w: &mut Win) {
     }
 }
 
+/// Frames enough for a scroll the last frame asked for to finish moving.
+pub(crate) fn settle(w: &mut Win) {
+    for _ in 0..20 {
+        w.frame(Vec::new());
+    }
+}
+
 /// A primary click at `pos`, pressed in one frame and released in the next.
 pub(crate) fn click(w: &mut Win, pos: egui::Pos2) {
     let button = |pressed| egui::Event::PointerButton {
@@ -497,12 +504,33 @@ fn the_golden_answers_through_the_window_start_the_same_job() {
         &[Do::Walk(CreateStep::Workspace), Do::Tick(CreateRow::Mcp(0))],
         false,
     );
+    // g7: a host folder for this sandbox alone, read-only at a target of its own.
+    let folder = std::fs::canonicalize(std::env::temp_dir()).unwrap();
+    let typed: &'static str =
+        Box::leak(format!("{}:/workspace/data:ro", folder.display()).into_boxed_str());
+    let more = &|app: &mut App| app.cwd = std::path::PathBuf::from("/proj-more");
+    same_job(
+        more,
+        &[
+            Do::Walk(CreateStep::Workspace),
+            Do::Type(CreateRow::ExtraFolders, typed),
+        ],
+        false,
+    );
     // g8: refusals, word for word.
     same_job(
         none,
         &[
             Do::Walk(CreateStep::Workspace),
             Do::Type(CreateRow::Ports, "8080:not-a-port"),
+        ],
+        true,
+    );
+    same_job(
+        none,
+        &[
+            Do::Walk(CreateStep::Workspace),
+            Do::Type(CreateRow::ExtraFolders, "docs:ro"),
         ],
         true,
     );
@@ -1024,10 +1052,42 @@ fn a_bad_field_says_what_is_wrong_under_it_once_left() {
     assert!(!said(&w), "not while it is typed: {:?}", w.drawn);
     assert!(!w.rings.iter().any(|(_, c)| *c == red));
     w.press(KeyCode::Down);
+    settle(&mut w);
     assert!(said(&w), "{:?}", w.drawn);
     assert!(w.rings.iter().any(|(_, c)| *c == red), "the box's edge");
     w.press(KeyCode::Up);
     assert!(said(&w), "and still when the cursor is back on it");
+}
+
+#[test]
+fn the_workspace_step_takes_more_folders_in_a_box_of_its_own() {
+    let mut w = open_form();
+    run(&mut w, &[Do::Walk(CreateStep::Workspace)]);
+    w.frame(Vec::new());
+    let placeholder = "~/docs:ro, ~/libs:/workspace/libs";
+    let at = |w: &Win, text: &str| {
+        (w.drawn_at.iter())
+            .find(|(t, _)| t == text)
+            .map(|(_, r)| r.center())
+            .unwrap_or_else(|| panic!("{text} is drawn: {:?}", w.drawn))
+    };
+    at(&w, "More folders");
+    let gloss = aisbx_core::create::field_gloss(CreateRow::ExtraFolders);
+    assert!(
+        (w.drawn.iter()).any(|t| t.to_lowercase() == gloss.to_lowercase()),
+        "{:?}",
+        w.drawn
+    );
+    let the_box = at(&w, placeholder);
+    click(&mut w, the_box);
+    assert_eq!(
+        focused(&w.app),
+        WizardRow::Field(CreateRow::ExtraFolders),
+        "a click on the box puts the cursor in it"
+    );
+    w.type_text("/srv/docs:ro");
+    assert_eq!(form(&w.app).workspace.extra_folders.value, "/srv/docs:ro");
+    at(&w, "/srv/docs:ro");
 }
 
 #[test]

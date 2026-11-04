@@ -1,0 +1,1 @@
+Built with Docker's maintained shell image; the JDK itself is unchanged, so a rebuild is optional.

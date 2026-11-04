@@ -19,10 +19,10 @@ Pick the kits in the create wizard (`n`, or **New sandbox**). You can add an *ad
 | `claude-litellm` | workload on `claude-code-docker` | Claude Code → a LiteLLM connection |
 | `claude-anthropic` | workload on `claude-code-docker` | Claude Code → Anthropic subscription, via the host-global `/login` |
 | `claude-token` | workload on `claude-code-docker` | Claude Code → Anthropic subscription, via a named setup token |
-| `opencode-litellm` | workload on `opencode-docker` | OpenCode 2.x → a LiteLLM connection |
-| `codex-openai` | workload on `codex-docker` | Codex → your OpenAI account (ChatGPT sign-in or API key, kept on the host) |
+| `opencode-litellm` | workload on `shell-docker-image` | OpenCode 2.x → a LiteLLM connection |
+| `codex-openai` | workload on `shell-docker-image` | Codex → your OpenAI account (ChatGPT sign-in or API key, kept on the host) |
 | `agy` | workload on Docker's community Antigravity image | Antigravity CLI → your Google account, or a Gemini API key |
-| `pi-litellm` | workload on `shell-docker` | Pi → a LiteLLM connection |
+| `pi-litellm` | workload on `shell-docker-image` | Pi → a LiteLLM connection |
 | `jdk25` | stackable mixin, add-able | Temurin JDK 25 |
 | `rust` | stackable mixin | Rust 1.99.1: rustc, cargo, clippy, rustfmt ([Rust projects](addons.md#rust-projects)) |
 | `rtk` | stackable mixin, add-able | the RTK token reducer |

@@ -147,7 +147,7 @@ The tabs that list things show them as tables, under a heading with their count:
 
 | Tab | Shows |
 | --- | --- |
-| *Mounts* | the folders, with their access |
+| *Mounts* | every folder sbx mounts from the host, with its path in the sandbox where that differs, its access, and *Missing* when the host folder is gone |
 | *Ports* | the published ports, with an *Unpublish* on each and *Publish port* on the heading |
 | *Network*, *Filesystem* | the rules under *Blocked* and *Allowed*, each with who put it there (*Kit*, *Added*, *Approved*), and *All sandboxes* on a rule of the host-wide policy; *Check host* on the first heading |
 | *Activity* | the hosts the proxy blocked and allowed, with how often, when last and why |
@@ -170,8 +170,8 @@ The header shows:
 - the folder, as the page's title;
 - a spinner while the window reads the sandboxes;
 - the requests waiting for approval (hover for the list, click to answer them);
-- the host's actions: *Secrets*, *Skills*, *Prune*, *Help*, *Refresh* (F5, Ctrl-R) and, at the right edge and
-  filled, *New sandbox*.
+- the host's actions: *Secrets*, *Skills*, *Host folders*, *Settings*, *Prune*, *Help*, *Refresh* (F5, Ctrl-R) and,
+  at the right edge and filled, *New sandbox*.
 
 Messages pop up at the bottom right, errors in red with a ×. A button that cannot run is greyed out, with the reason.
 Each button is a dashboard key too.

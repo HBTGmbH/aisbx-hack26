@@ -106,6 +106,7 @@ const HELP: &[(&str, &[(&str, &str)])] = &[
                 "F",
                 "host folders: the folders every sandbox mounts, with what each is for",
             ),
+            ("T", "settings: sbx's own, for this host, such as telemetry"),
             (
                 "i",
                 "repo skills: this sandbox's picks from the configured skill repos",

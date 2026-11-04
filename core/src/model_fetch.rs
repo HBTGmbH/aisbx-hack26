@@ -57,8 +57,8 @@ pub fn ensure_kit_in(root: &Path, c: &Connection) -> Result<PathBuf> {
     Ok(kit)
 }
 
-/// A v3 workload on Docker's shell template (it has `curl` and `jq`), allowed the gateway's host
-/// and nothing else. Every value in it was checked by [`litellm::validate`].
+/// A v3 workload on Docker's shell image (it has `curl` and `jq`, and no Docker Engine), allowed
+/// the gateway's host and nothing else. Every value in it was checked by [`litellm::validate`].
 fn descriptor(c: &Connection) -> String {
     let name = c.name.as_str();
     let host = litellm::host(&c.url);
@@ -73,7 +73,7 @@ fn descriptor(c: &Connection) -> String {
          description: \"Reads the model list of the LiteLLM connection {name} for aisbx.\"\n\
          \n\
          build: |\n\
-         \x20 FROM docker/sandbox-templates:shell-docker\n\
+         \x20 FROM docker.io/sbx/shell-image:latest\n\
          \x20 ENV SBX_KIT_AISBX_MODELS=\"1\"\n\
          \x20 LABEL com.docker.sandboxes.flavor=\"{AGENT}\"\n\
          \n\
@@ -216,7 +216,7 @@ mod tests {
         assert!(doc["build"]
             .as_str()
             .unwrap()
-            .starts_with("FROM docker/sandbox-templates:shell-docker\n"));
+            .starts_with("FROM docker.io/sbx/shell-image:latest\n"));
         let caps = crate::kits::capabilities(&doc);
         let net = caps
             .iter()

@@ -1,8 +1,14 @@
 # syntax=docker/dockerfile:1
-# Image of the codex-openai workload: Docker's Codex template, this repo's hooks and Codex's system config.
-FROM docker/sandbox-templates:codex-docker
+# Image of the codex-openai workload: Docker's shell image with Docker Engine, Codex from npm, this
+# repo's hooks and Codex's system config.
+FROM docker.io/sbx/shell-docker-image:latest
 
 COPY --chmod=0755 files/ /usr/local/lib/aisbx/
+
+# Into the agent-owned prefix NPM_CONFIG_PREFIX names, so `codex update` can replace it.
+RUN npm install -g @openai/codex \
+ && npm cache clean --force \
+ && codex --version
 
 # Analytics, the feedback upload and the startup update check, off. Codex has no environment variable
 # for them, and files/codex/seed.sh writes ~/.codex/config.toml, so they go into the system layer below it.

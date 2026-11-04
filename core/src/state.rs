@@ -27,6 +27,11 @@ pub struct Entry {
     /// reports nowhere, so a rebuild can repeat them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub static_mcp: Vec<String>,
+    /// The host folders typed in the create wizard for this sandbox alone, each as `sbx create`
+    /// took it (`PATH[:TARGET][:ro]`). sbx reports the mounts but not where they came from, so a
+    /// rebuild repeats these and plans the others from the host's lists again.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extra_folders: Vec<String>,
     /// Combined hash of the kits present at creation, for drift detection.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kit_hash: Option<String>,
@@ -174,7 +179,8 @@ impl Registry {
     }
 
     /// Where this sandbox's agent opens, relative to its workspace; `None` is the root. A value
-    /// outside the workspace is ignored: the file is editable, and the value becomes `sbx exec -w`.
+    /// outside the workspace is ignored: the file is editable, and the value becomes
+    /// `sbx run --workdir`.
     pub fn start_dir(&self, name: &str) -> Option<PathBuf> {
         let rel = PathBuf::from(self.get(name)?.start_dir.as_deref()?);
         crate::startdir::is_inside(&rel).then_some(rel)
@@ -217,6 +223,20 @@ impl Registry {
         let entry = self.doc.sandboxes.entry(name.to_string()).or_default();
         if entry.static_mcp != servers {
             entry.static_mcp = servers;
+            self.dirty = true;
+        }
+    }
+
+    pub fn extra_folders(&self, name: &str) -> Vec<String> {
+        self.get(name)
+            .map(|e| e.extra_folders.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn set_extra_folders(&mut self, name: &str, specs: Vec<String>) {
+        let entry = self.doc.sandboxes.entry(name.to_string()).or_default();
+        if entry.extra_folders != specs {
+            entry.extra_folders = specs;
             self.dirty = true;
         }
     }
@@ -578,5 +598,29 @@ mod tests {
         assert!(!json.contains("last_litellm"), "{json}");
         let old: Document = serde_json::from_str(r#"{"ui": {"last_token": "t"}}"#).unwrap();
         assert_eq!(old.ui.last_litellm, None);
+    }
+
+    #[test]
+    fn the_folders_typed_for_a_sandbox_round_trip_and_stay_out_of_an_entry_without_them() {
+        let mut reg = Registry::empty();
+        let specs = vec![
+            "/srv/docs:ro".to_string(),
+            "/srv/data:/workspace/data".into(),
+        ];
+        reg.set_extra_folders("a", specs.clone());
+        assert!(reg.dirty);
+        reg.set_display_name("b", Some("B".into()));
+        let json = serde_json::to_string(&reg.doc).unwrap();
+        let back: Document = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.sandboxes["a"].extra_folders, specs);
+        assert!(back.sandboxes["b"].extra_folders.is_empty());
+        assert_eq!(json.matches("extra_folders").count(), 1, "{json}");
+        let reg = Registry {
+            path: PathBuf::from("/nonexistent/registry.json"),
+            doc: back,
+            dirty: false,
+        };
+        assert_eq!(reg.extra_folders("a"), specs);
+        assert!(reg.extra_folders("unknown").is_empty());
     }
 }

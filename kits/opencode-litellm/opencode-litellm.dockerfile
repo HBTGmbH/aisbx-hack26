@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
-# Image of the opencode-litellm workload: Docker's OpenCode template, with OpenCode 2.x in place of
-# its 1.x, and this repo's hooks.
-FROM docker/sandbox-templates:opencode-docker
+# Image of the opencode-litellm workload: Docker's shell image with Docker Engine, OpenCode 2.x from
+# npm, and this repo's hooks.
+FROM docker.io/sbx/shell-docker-image:latest
 
 COPY --chmod=0755 files/ /usr/local/lib/aisbx/
 
@@ -13,8 +13,7 @@ ENV SBX_KIT_OPENCODE_LITELLM=1
 # and the dashboard's pre-start update read it. How to bump it: docs/agents.md, *OpenCode*.
 ENV OPENCODE_LITELLM_VERSION=2
 
-# `--force`: npm refuses to link 2.x's `opencode` over the template's 1.x otherwise.
-RUN npm install -g --force "@opencode/cli@${OPENCODE_LITELLM_VERSION}" \
+RUN npm install -g "@opencode/cli@${OPENCODE_LITELLM_VERSION}" \
  && npm cache clean --force \
  && opencode --version \
  && mkdir -p /home/agent/.config/opencode /home/agent/.local/share/aisbx/skills-store

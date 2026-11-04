@@ -1,5 +1,5 @@
 //! Where the agent opens, when that is not the top of the workspace. The mount does not change;
-//! the session becomes `sbx exec -w <dir>` of the agent binary.
+//! the session becomes `sbx run --name <sandbox> --workdir <dir>`.
 
 use std::path::{Component, Path, PathBuf};
 
@@ -36,7 +36,7 @@ pub fn missing(root: &Path, rel: Option<&Path>) -> bool {
 }
 
 /// Reject anything that would climb out of the workspace, or is not a plain relative path. A user
-/// can edit the registry, and the value ends up as `sbx exec -w`.
+/// can edit the registry, and the value ends up as `sbx run --workdir`.
 pub fn is_inside(rel: &Path) -> bool {
     !rel.as_os_str().is_empty()
         && rel

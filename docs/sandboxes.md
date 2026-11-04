@@ -133,12 +133,12 @@ Use `w` when the workspace holds several projects, to open the agent in one of t
 and session history. Press `w`, pick the folder, and choose **Start here** or **Use, don't start**.
 
 The mount does not change, so the agent can still `cd ..`. The choice survives a rebuild and shows under the label as
-`› <folder>`. A deleted folder falls back to the workspace root. `w` works for Claude Code and OpenCode.
+`› <folder>`. A deleted folder falls back to the workspace root. `w` works for every sandbox with a host folder.
 
 ### How the start folder works
 
-`sbx run` has no working-directory flag, so the dashboard starts the agent with `sbx exec -w <dir>`. Claude Code
-opens the folder without a trust prompt.
+The dashboard starts the agent with `sbx run --name <sandbox> --workdir <dir>`. sbx runs the kit's own launch
+command there, with its flags. Claude Code opens the folder without a trust prompt.
 
 ## Editor and app integrations (VS Code, IntelliJ, Claude Desktop)
 
@@ -165,11 +165,47 @@ Other SSH apps, such as T3 Code and Orca (user `_default_user_`), connect the sa
 first. Each connection creates its own [mountless sandbox](#mountless-sandboxes), not a way into the selected one.
 `sbx setup ssh remove` takes the connections out and keeps the sandboxes.
 
+## The host clipboard (`T`)
+
+sbx keeps sandboxes away from your clipboard. Press `T` (or *Settings* in the window's header) to change that, for
+every sandbox on this host:
+
+- **Clipboard copy** lets a sandbox copy text to your clipboard: a copy in Codex, for example, then reaches the host.
+  While it is on, any process in any sandbox can put text on your clipboard.
+- **Image paste** lets `Ctrl+V` paste a screenshot or another image from your clipboard into an agent such as Claude
+  Code or Codex. While it is on, a process in a sandbox can read the image on your clipboard when you paste. Running
+  sandboxes follow a change within seconds.
+
+Pasting text needs neither setting: the terminal sends it. Without the dashboard:
+
+```console
+$ sbx settings set clipboard.textCopy true     # false turns it off again
+$ sbx settings set clipboard.imagePaste true
+```
+
+## FUSE filesystems (`T`)
+
+sbx gives every new local sandbox `/dev/fuse` and the `SYS_ADMIN` capability, so a process in it can mount FUSE
+filesystems. Press `T` (or *Settings* in the window's header) and turn *FUSE* off to create sandboxes without them.
+Then root in a new sandbox cannot mount anything, also no tmpfs or overlay, and the `host-npm` and `host-pip` addons
+mount no package cache.
+
+The setting reaches only sandboxes created after the change. An existing sandbox keeps what it was created with, also
+after a restart; a rebuild (`R`) creates it again with the current setting. Without the dashboard:
+`sbx settings set sandbox.fuse false`.
+
 ## MCP servers
 
 sbx registers [MCP](https://modelcontextprotocol.io) servers on the host and lends them to sandboxes. The host keeps
 each server's OAuth token. Register a server, then tick it in the create wizard. The set is fixed at creation, and a
 rebuild repeats it. To attach or detach a server on a running sandbox, use `sbx mcp load` / `unload`.
+
+The wizard's *MCP servers* section has three answers:
+
+- **Nothing ticked:** the agent gets tools to find and attach the host's registered servers itself.
+- **Servers ticked:** the agent gets only those servers.
+- **`none` ticked:** the agent gets no server and no tools to find or add one (`sbx create --static-mcp none`). You
+  can still attach a server later with `sbx mcp load`.
 
 ```console
 $ sbx mcp add notion --url https://mcp.notion.com/mcp                      # remote, OAuth discovered
@@ -180,13 +216,18 @@ $ sbx mcp load notion --sandbox my-sandbox                                 # att
 
 ## Host folders (`F`) and `companion.json`
 
-A sandbox can mount more folders beside its workspace, each at its own host path:
+A sandbox can mount more folders beside its workspace, each at its own host path or at a path you choose:
 
 - **The folders the workspace's `companion.json` names**, for a public repo with a private companion repo. The public
   repo is read-write. Each related folder is `read` (the default) or `write`, as `access` says. Paths are relative
   to the workspace.
 - **The host's own list**, for every sandbox. Press `F` to edit it. Give each folder a one-line purpose and choose
   read-only or read-write.
+- **The wizard's *More folders***, for one sandbox. Separate the folders with commas. Add `:ro` for read-only and
+  `:/path` to mount a folder at that path in the sandbox: `~/docs:ro, ~/libs:/workspace/libs:ro`. A rebuild mounts
+  them again.
+
+A `companion.json` looks like this:
 
 ```json
 {"public": "../my-project", "related": [{"path": "../knowledge-base", "purpose": "…", "access": "read"}]}
@@ -195,6 +236,8 @@ A sandbox can mount more folders beside its workspace, each at its own host path
 The agent's instructions file names each folder, its access and its purpose. A change reaches a sandbox at its next
 create or rebuild. Read-only holds also for `sudo` in the sandbox. aisbx never mounts a missing folder, one inside the
 workspace, your home folder or a folder above it, or a folder that holds credentials; the wizard's Review names each.
+A path in the sandbox must start with `/`. It cannot be `/`, the workspace or a path in it, `/run/sandbox/source`
+(where clone mode keeps your repo), or the path of another folder. The wizard refuses such an entry on its step.
 
 **`.git` read-only.** Tick *`.git` read-only* in the create wizard. The agent can read the history but cannot commit,
 check out, or change the hooks or config, so no hook it writes runs on your host. You cannot hide `.git` from the
@@ -244,7 +287,9 @@ build and a Gradle build ran as fast at 4 CPUs and 4 GiB.
 | Prune | `sbx prune --dry-run`, then `sbx prune`; add `--filter until=168h` to keep what stopped in the last week |
 | Connect over SSH | `sbx setup ssh` once, then `ssh <name>.sbx` |
 | Detach an MCP server | `sbx mcp unload notion --sandbox my-sandbox` |
+| Create without MCP servers | `sbx create --static-mcp none …` |
 | Host folders | `aisbx folders add ~/notes --purpose "..."` (`--write` for read-write), `aisbx folders ls`, `aisbx folders rm ~/notes` |
+| A folder at a path of its own | `sbx create ./kits/claude-anthropic . ~/libs:/workspace/libs:ro` |
 | `.git` read-only | `aisbx up --git-readonly` |
 | Clone mode | `sbx run --clone ./kits/claude-anthropic` |
 | CPU and memory | `sbx create --cpus 4 -m 4g ./kits/claude-anthropic .` |

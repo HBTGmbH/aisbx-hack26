@@ -11,8 +11,8 @@ use ratatui::Frame;
 use super::{panel, Hits};
 use crate::app::{
     AccountChoice, App, ApprovalRow, AuthRow, ConnMode, ConnRow, ConnSwitchRow, ConnectRow,
-    CreateForm, CreateRow, Empty, FoldersRow, Hit, KitsRow, Screen, SecretRow, SkillRow,
-    StartDirRow, TargetLaunch, TextInput,
+    CreateForm, CreateRow, Empty, FoldersRow, Hit, KitsRow, Screen, SecretRow, SettingTone,
+    SettingsRow, SkillRow, StartDirRow, TargetLaunch, TextInput,
 };
 use crate::create::account_notes;
 use crate::model::{self, Auth};
@@ -586,7 +586,7 @@ fn kits_rows(
     }
 }
 
-/// Name and folder, Options, Ports, Blocked hosts and the MCP servers.
+/// Name and folders, Options, Ports, Blocked hosts and the MCP servers.
 fn workspace_rows(
     out: &mut Lines<'_>,
     app: &App,
@@ -597,8 +597,8 @@ fn workspace_rows(
     let catalog = &app.catalog;
     // No blank line above this heading either: the step needs every line.
     out.section_with(
-        "Name and folder",
-        "your label, and where the agent opens inside the workspace",
+        "Name and folders",
+        "your label, where the agent opens, and more host folders",
     );
     let mut label = input_spans(&form.workspace.name, focused == Some(CreateRow::Name));
     // The first character typed replaces a generated label (core's `field_key`); the tag says so.
@@ -638,6 +638,20 @@ fn workspace_rows(
             row_index(CreateRow::StartDir),
         );
     }
+
+    out.row(
+        field_row_spans(
+            "more folders",
+            field_spans(
+                &form.workspace.extra_folders,
+                focused == Some(CreateRow::ExtraFolders),
+                false,
+                "(none)",
+            ),
+        ),
+        focused == Some(CreateRow::ExtraFolders),
+        row_index(CreateRow::ExtraFolders),
+    );
 
     // No blank line above this heading either: the step needs every line.
     out.section("Options");
@@ -702,26 +716,37 @@ fn workspace_rows(
         row_index(CreateRow::DenyNetwork),
     );
 
-    if !form.workspace.mcp.is_empty() {
-        out.section_with(
-            "MCP servers",
-            "optional — fixed at creation, credentials stay on the host",
+    out.section_with(
+        "MCP servers",
+        "optional — fixed at creation, credentials stay on the host",
+    );
+    out.row(
+        addon_spans(
+            "none",
+            crate::create::NO_MCP,
+            form.workspace.no_mcp,
+            None,
+            None,
+            0,
+            out.width as usize,
+        ),
+        focused == Some(CreateRow::McpNone),
+        row_index(CreateRow::McpNone),
+    );
+    for (i, server) in form.workspace.mcp.iter().enumerate() {
+        out.row(
+            addon_spans(
+                &server.name,
+                &server.transport,
+                form.workspace.static_mcp[i],
+                (!server.ready()).then_some(Marker::Warn(server.status.as_str())),
+                None,
+                0,
+                out.width as usize,
+            ),
+            focused == Some(CreateRow::Mcp(i)),
+            row_index(CreateRow::Mcp(i)),
         );
-        for (i, server) in form.workspace.mcp.iter().enumerate() {
-            out.row(
-                addon_spans(
-                    &server.name,
-                    &server.transport,
-                    form.workspace.static_mcp[i],
-                    (!server.ready()).then_some(Marker::Warn(server.status.as_str())),
-                    None,
-                    0,
-                    out.width as usize,
-                ),
-                focused == Some(CreateRow::Mcp(i)),
-                row_index(CreateRow::Mcp(i)),
-            );
-        }
     }
 }
 
@@ -1659,6 +1684,82 @@ pub(super) fn render_approvals(frame: &mut Frame, app: &App, area: Rect) -> Hits
         out,
         &buttons,
     )
+}
+
+/// The sbx settings aisbx offers, each with its state and what it means; a change is one job.
+pub(super) fn render_settings(frame: &mut Frame, app: &App, area: Rect) -> Hits {
+    let Screen::Settings(form) = &app.screen else {
+        return Hits::new();
+    };
+    let rows = form.rows();
+    let focus = form.focus.min(rows.len() - 1);
+    let mut out = Lines::new(area);
+    out.section("sbx on this host");
+    for (i, row) in rows.iter().enumerate() {
+        match *row {
+            SettingsRow::Setting(n) => {
+                let spec = &crate::app::SETTINGS[n];
+                let (state, meaning) = form.view(n);
+                let style = match spec.tone(form.value(n)) {
+                    SettingTone::Calm => Style::default().fg(theme::RUNNING),
+                    SettingTone::Warn => theme::warn(),
+                    SettingTone::Plain => Style::default(),
+                    SettingTone::Unknown => theme::muted(),
+                };
+                out.row(
+                    vec![
+                        Span::raw(format!("  {:<16}", spec.label)),
+                        Span::styled(format!("{state:<11}"), style),
+                        Span::styled(meaning, theme::muted()),
+                    ],
+                    focus == i,
+                    i,
+                );
+                out.explain_lines(
+                    focus == i,
+                    spec.label,
+                    &[
+                        "↵ turns it the other way.".to_string(),
+                        spec.note.to_string(),
+                    ],
+                );
+            }
+            SettingsRow::SkillsDefault => {
+                let (state, meaning, tone) = form.skills_view();
+                let style = match tone {
+                    SettingTone::Calm => Style::default().fg(theme::RUNNING),
+                    SettingTone::Warn => theme::warn(),
+                    SettingTone::Plain => Style::default(),
+                    SettingTone::Unknown => theme::muted(),
+                };
+                out.row(
+                    vec![
+                        Span::raw(format!("  {:<16}", crate::app::SKILLS_DEFAULT_LABEL)),
+                        Span::styled(format!("{state:<11}"), style),
+                        Span::styled(meaning, theme::muted()),
+                    ],
+                    focus == i,
+                    i,
+                );
+                out.explain_lines(
+                    focus == i,
+                    crate::app::SKILLS_DEFAULT_LABEL,
+                    &[
+                        "↵ or → picks the next mode, ← the one before.".to_string(),
+                        crate::app::SKILLS_DEFAULT_NOTE.to_string(),
+                    ],
+                );
+            }
+            SettingsRow::Close => out.explain_lines(
+                focus == i,
+                "Close",
+                &[crate::app::SETTINGS_NOTE.to_string()],
+            ),
+        }
+    }
+    let close = rows.len() - 1;
+    let buttons = [("Close", focus == close, Look::Plain, close)];
+    framed(frame, area, "Settings", out, &buttons)
 }
 
 pub(super) fn render_kits(frame: &mut Frame, app: &App, area: Rect) -> Hits {

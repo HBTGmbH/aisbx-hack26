@@ -8,7 +8,7 @@ use aisbx_core::actions::Action;
 use aisbx_core::app::{App, Hit};
 use aisbx_core::input::{KeyCode, KeyEvent};
 use aisbx_core::insight::{self, Kind, Note, PieceKind, SourceTone, Tab};
-use aisbx_core::model::{self, Sandbox};
+use aisbx_core::model::{self, MountKind, Sandbox};
 use aisbx_core::sbx::{LogHost, PolicyRule, Port};
 use eframe::egui::{self, Color32, RichText};
 
@@ -426,14 +426,29 @@ fn mounts(ui: &mut egui::Ui, app: &App, sb: &Sandbox) -> Option<Action> {
     let about = insight::mount_notes(sb);
     let quiet = ui.visuals().weak_text_color();
     let mut clicked = None;
-    let folders: Vec<Row> = (sb.mounts().into_iter().enumerate())
-        .map(|(i, (path, mode))| {
-            let row = Row::new(vec![Cell::mono(model::tilde(path))]);
-            let row = match i {
-                0 => row.badge("Workspace", quiet, "the folder the sandbox is built on"),
-                _ => row,
+    let dark = ui.visuals().dark_mode;
+    let folders: Vec<Row> = (insight::mount_rows(sb).into_iter())
+        .map(|mount| {
+            let row = Row::new(vec![Cell::mono(mount.host)]);
+            let row = match &mount.target {
+                Some(target) => row.sub(format!("at {target} in the sandbox")),
+                None => row,
             };
-            row.badge(tag(mode), quiet, "what the sandbox may do in it")
+            let row = match mount.kind {
+                MountKind::Workspace => {
+                    row.badge("Workspace", quiet, "the folder the sandbox is built on")
+                }
+                MountKind::Skills => row.badge("Skills store", quiet, insight::SKILLS_STORE),
+                MountKind::Added => {
+                    row.badge("Added", quiet, "added with sbx mount after creation")
+                }
+                MountKind::Folder => row,
+            };
+            let row = row.badge(tag(&mount.access), quiet, "what the sandbox may do in it");
+            match mount.missing {
+                true => row.badge("Missing", theme::danger(dark), "gone from this host"),
+                false => row,
+            }
         })
         .collect();
     if !folders.is_empty() {
@@ -441,13 +456,12 @@ fn mounts(ui: &mut egui::Ui, app: &App, sb: &Sandbox) -> Option<Action> {
         table::table(ui, "mounts", &[], &folders, "");
     }
     clicked = clicked.or(captions(ui, app, &about.about));
-    if let Some(skills) = sb.skills {
+    if let Some(text) = insight::skills_row(sb) {
         table::heading(ui, app, "Skills store", "", None, &[]);
-        let row = Row::new(vec![Cell::text(tag(insight::SKILLS_STORE))])
-            .sub(insight::skills_mount_text(skills));
+        let row = Row::new(vec![Cell::text(tag(insight::SKILLS_STORE))]).sub(text);
         table::table(ui, "mounts-skills", &[], &[row], "");
     }
-    if !sb.runtime_mounts.is_empty() {
+    if !sb.runtime_mounts.is_empty() && sb.host_mounts.is_none() {
         let added: Vec<Row> = (sb.runtime_mounts.iter())
             .map(|mount| {
                 let host = model::tilde(Path::new(&mount.host_path));

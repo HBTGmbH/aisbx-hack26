@@ -147,6 +147,9 @@ pub fn exit(args: &[String]) -> ! {
 /// Run one subcommand and hand back the process exit code.
 pub fn main(args: &[String]) -> u8 {
     let (cmd, rest) = args.split_first().expect("dispatched on a subcommand");
+    if runs_sandboxes(cmd) {
+        telemetry_off_by_default();
+    }
     let result = match cmd.as_str() {
         "up" => up(rest),
         "run" => run(rest),
@@ -169,6 +172,21 @@ pub fn main(args: &[String]) -> u8 {
             }
             fail.code
         }
+    }
+}
+
+/// The subcommands that drive sandboxes, before which sbx's telemetry is turned off where nobody
+/// chose a value.
+fn runs_sandboxes(cmd: &str) -> bool {
+    matches!(cmd, "up" | "run" | "status" | "stop" | "rm")
+}
+
+/// [`sbx::disable_telemetry_by_default`], said on stderr; a failure only warns.
+fn telemetry_off_by_default() {
+    match sbx::disable_telemetry_by_default() {
+        Ok(true) => eprintln!("aisbx: {}", crate::app::TELEMETRY_TURNED_OFF_HEADLESS),
+        Ok(false) => {}
+        Err(e) => eprintln!("aisbx: warning: could not turn sbx's telemetry off ({e:#})"),
     }
 }
 
@@ -290,9 +308,11 @@ impl Args {
     }
 }
 
-/// `sbx` without the host SSH agent unless `ssh_agent`: sbx forwards the agent of every client
-/// that creates, starts or joins a sandbox.
+/// `sbx` that never asks ([`sbx::no_input`]: no person answers a headless run), without the host
+/// SSH agent unless `ssh_agent`: sbx forwards the agent of every client that creates, starts or
+/// joins a sandbox.
 fn sbx_command(argv: &[String], ssh_agent: bool) -> Command {
+    let argv = sbx::no_input(argv);
     let (program, args) = argv.split_first().expect("an argv names its program");
     let mut cmd = Command::new(program);
     cmd.args(args);
@@ -300,6 +320,18 @@ fn sbx_command(argv: &[String], ssh_agent: bool) -> Command {
         cmd.env_remove("SSH_AUTH_SOCK");
     }
     cmd
+}
+
+/// The model fetcher's steps ([`crate::model_fetch::steps`]) as a headless fetch runs them: never
+/// asking, like every headless sbx call.
+fn fetch_steps(conn: &litellm::Connection, kit: &Path, exists: bool) -> Vec<crate::job::Step> {
+    crate::model_fetch::steps(conn, kit, exists)
+        .into_iter()
+        .map(|mut step| {
+            step.argv = sbx::no_input(&step.argv);
+            step
+        })
+        .collect()
 }
 
 /// A child's stdout routed to our stderr, so stdout stays what the contract says it is.
@@ -758,8 +790,8 @@ fn warn_about_host(
     }
 }
 
-/// `--mount DIR[:ro]`: a host folder as an extra workspace at its own absolute path (sbx cannot
-/// remap one), read-write unless `:ro`. Refuses home, a folder holding it, and credential folders.
+/// `--mount DIR[:ro]`: a host folder as an extra workspace at its own absolute path, read-write
+/// unless `:ro`. Refuses home, a folder holding it, and credential folders.
 fn mount_arg(raw: &str, home: Option<&Path>) -> Result<String, Fail> {
     let (path, read_only) = match raw.strip_suffix(":ro") {
         Some(p) => (p, true),
@@ -1762,7 +1794,7 @@ fn fetch_models(conn: &litellm::Connection) -> Result<(), Fail> {
     let exists = find(&fetcher)?.is_some();
     let now = state::now_epoch();
     let _ = model_fetch::mark_in(&root, &conn.name, now);
-    for step in model_fetch::steps(conn, &kit, exists) {
+    for step in fetch_steps(conn, &kit, exists) {
         eprintln!("aisbx: {}", step.label);
         if !crate::job::run_quiet(&step) {
             return Err(Fail::sandbox(format!("{} failed", step.label)));
@@ -2497,6 +2529,51 @@ fn sync_args(raw: &[String]) -> Result<(String, bool), Fail> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn telemetry_is_turned_off_before_the_commands_that_drive_sandboxes() {
+        for cmd in ["up", "run", "status", "stop", "rm"] {
+            assert!(runs_sandboxes(cmd), "{cmd}");
+        }
+        for cmd in ["litellm", "folders", "skill-repo", "skill", "nope"] {
+            assert!(!runs_sandboxes(cmd), "{cmd}");
+        }
+    }
+
+    #[test]
+    fn every_headless_sbx_call_never_asks_and_leaves_the_ssh_agent_out() {
+        let agent = vec!["claude".to_string(), "--no-input".to_string()];
+        let launch = sbx::headless_exec_argv("box", None, "/tmp/r", &agent);
+        let cmd = sbx_command(&launch, false);
+        let args: Vec<String> = (cmd.get_args())
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(cmd.get_program(), std::ffi::OsStr::new("sbx"));
+        assert_eq!(args[0], sbx::NO_INPUT);
+        assert_eq!(args[1..], launch[1..], "the agent's own argv is untouched");
+        let sock = std::ffi::OsStr::new("SSH_AUTH_SOCK");
+        assert!(cmd.get_envs().any(|(k, v)| k == sock && v.is_none()));
+        let shared = sbx_command(&launch, true);
+        assert!(!shared.get_envs().any(|(k, _)| k == sock));
+        assert_eq!(
+            shared.get_args().next(),
+            Some(std::ffi::OsStr::new("--no-input"))
+        );
+    }
+
+    #[test]
+    fn a_headless_model_fetch_never_asks() {
+        let conn = crate::testkit::acme();
+        let steps = fetch_steps(&conn, Path::new("/kits/aisbx-models"), false);
+        assert_eq!(steps.len(), 2, "create, then fetch");
+        for step in &steps {
+            assert_eq!(&step.argv[..2], ["sbx", "--no-input"], "{:?}", step.argv);
+        }
+        assert!(
+            steps[1].stdin.is_some(),
+            "the script still goes in on stdin"
+        );
+    }
 
     #[test]
     fn folders_add_ls_and_rm_edit_the_host_list() {

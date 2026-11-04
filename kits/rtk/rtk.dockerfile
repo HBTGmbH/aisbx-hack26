@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 # Image of the rtk mixin: the RTK binary from its official installer in /usr/local/bin, which is on
 # every image's PATH, its activation hook and its environment.
-FROM docker/sandbox-templates:shell-docker AS build
+FROM docker.io/sbx/shell-image:latest AS build
 USER root
 RUN mkdir -p /out/usr/local/bin \
  && curl --proto '=https' --tlsv1.2 -fsSL \

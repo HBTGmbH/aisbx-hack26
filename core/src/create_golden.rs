@@ -20,6 +20,7 @@ const BAD_PORT: &str =
     "“8080:not-a-port” is not a port mapping — use 8080:3000, 3000, or 127.0.0.1:8080:3000/tcp";
 const BAD_HOST: &str =
     "“bad!host” is not a host to deny — use api.example.com, *.example.com or **";
+const NOT_ABSOLUTE: &str = "“docs:ro”: give the host folder as an absolute path or ~/…";
 const BAD_NAME: &str = "name the token in lower-case letters, digits and dashes";
 const TAKEN: &str = "a token of that name exists — pick it in the list";
 const NO_VALUE: &str =
@@ -441,6 +442,7 @@ fn g5_new_token() {
                     "api.anthropic.com",
                     "--placeholder",
                     "sbx-cs-aisbx-tok-personal",
+                    "--value-stdin",
                 ]),
                 true,
             ),
@@ -536,6 +538,35 @@ fn g6_mcp() {
 }
 
 #[test]
+fn g6_no_mcp() {
+    let mut app = new_app();
+    app.mcp = vec![sbx::McpServer {
+        name: "notion".into(),
+        status: "ready".into(),
+        ..sbx::McpServer::default()
+    }];
+    app.open_create();
+    walk_to(&mut app, CreateStep::Workspace);
+    tick(&mut app, CreateRow::Mcp(0));
+    tick(&mut app, CreateRow::McpNone);
+    let job = create_only(&mut app);
+    let argv = &steps(&job)[0].1;
+    let at = argv
+        .iter()
+        .position(|a| a == "--static-mcp")
+        .expect("a fixed set");
+    assert_eq!(argv[at + 1], "none");
+    assert_eq!(
+        argv.iter().filter(|a| *a == "--static-mcp").count(),
+        1,
+        "sbx refuses none beside a server: {argv:?}"
+    );
+    assert!(!argv.contains(&"notion".to_string()), "{argv:?}");
+    let reg = job.post.register.expect("the sandbox is registered");
+    assert_eq!(reg.static_mcp, vec!["none".to_string()]);
+}
+
+#[test]
 fn g7_start_dir() {
     // The picker walks the real tree, so the workspace has to exist: `proj` with one folder.
     let base = std::env::temp_dir().join(format!("aisbx-golden-{}", std::process::id()));
@@ -602,6 +633,54 @@ fn g7_start_dir() {
     let _ = std::fs::remove_dir_all(&base);
 }
 
+/// A host folder for this sandbox alone, typed read-only at a target of its own: sbx gets it after
+/// the workspace, the generated `folders-<sandbox>` kit names it for the agent, and the create
+/// records it for a rebuild.
+#[test]
+fn g7b_more_folders() {
+    let base = std::env::temp_dir().join(format!("aisbx-golden-more-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(base.join("data")).unwrap();
+    let data = std::fs::canonicalize(base.join("data")).unwrap();
+    let spec = format!("{}:/workspace/data:ro", path(&data));
+
+    let mut app = new_app();
+    app.cwd = PathBuf::from("/proj-more");
+    app.open_create();
+    walk_to(&mut app, CreateStep::Workspace);
+    type_into(&mut app, CreateRow::ExtraFolders, &format!(" {spec} ,"));
+    let job = create_only(&mut app);
+    assert_eq!(
+        steps(&job),
+        vec![(
+            "sbx create claude-litellm-proj-more".to_string(),
+            strings(&[
+                "sbx",
+                "create",
+                "--kit",
+                &conn_kit(&app, "claude"),
+                "--kit",
+                &path(&crate::folders::kit_dir("claude-litellm-proj-more")),
+                "--name",
+                "claude-litellm-proj-more",
+                "--skills",
+                "readonly",
+                "--cpus",
+                "4",
+                "-m",
+                "4g",
+                &kit(&app, "claude-litellm"),
+                "/proj-more",
+                &spec,
+            ]),
+            false,
+        )]
+    );
+    let reg = job.post.register.expect("the sandbox is registered");
+    assert_eq!(reg.extra_folders, [spec]);
+    let _ = std::fs::remove_dir_all(&base);
+}
+
 #[test]
 fn g8_refusals() {
     let mut app = new_app();
@@ -615,6 +694,12 @@ fn g8_refusals() {
     walk_to(&mut app, CreateStep::Workspace);
     type_into(&mut app, CreateRow::DenyNetwork, "example.com bad!host");
     refused(&mut app, BAD_HOST);
+
+    let mut app = new_app();
+    app.open_create();
+    walk_to(&mut app, CreateStep::Workspace);
+    type_into(&mut app, CreateRow::ExtraFolders, "docs:ro");
+    refused(&mut app, NOT_ABSOLUTE);
 
     let mut app = new_app();
     app.open_create();
@@ -681,6 +766,7 @@ fn g9_new_connection() {
                 "gw.example.org",
                 "--placeholder",
                 "sbx-cs-aisbx-llm-beta",
+                "--value-stdin",
             ]),
             true,
         )]

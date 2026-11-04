@@ -198,6 +198,52 @@ fn a_tab_key_then_an_action_in_one_frame_act_in_order() {
 }
 
 #[test]
+fn the_mounts_tab_lists_what_sbx_reports() {
+    use aisbx_core::model::{BindMount, MountKind};
+    let mut sb = sandbox(true);
+    let mount = |host: &str, target: &str, read_only: bool, kind: MountKind| BindMount {
+        host: host.into(),
+        target: target.into(),
+        read_only,
+        kind,
+        missing: false,
+    };
+    let workspace = sb.workspace.display().to_string();
+    let mut gone = mount("/data/gone", "/data/gone", false, MountKind::Folder);
+    gone.missing = true;
+    sb.runtime_mounts = vec![aisbx_core::sbx::RuntimeMount {
+        host_path: "/data/set".into(),
+        container_target: "/mnt/set".into(),
+        read_only: true,
+    }];
+    sb.host_mounts = Some(vec![
+        mount(&workspace, &workspace, false, MountKind::Workspace),
+        mount("/data/libs", "/workspace/libs", true, MountKind::Folder),
+        mount("/sbx/agent-skills", "/skills", true, MountKind::Skills),
+        mount("/data/set", "/mnt/set", true, MountKind::Added),
+        gone,
+    ]);
+    let mut w = window(sb);
+    open_tab(&mut w, Tab::Mounts);
+    for text in [
+        "Workspace",
+        "Skills store",
+        "Added",
+        "Missing",
+        "/data/libs",
+        "/data/gone",
+    ] {
+        assert_has(&w, text);
+    }
+    assert_has(&w, "at /workspace/libs in the sandbox");
+    assert!(
+        !w.drawn.iter().any(|d| d == "Added with sbx mount"),
+        "the sbx mount folder is a row of the one list: {:?}",
+        w.drawn
+    );
+}
+
+#[test]
 fn each_tab_draws_cores_pieces_for_the_sample() {
     let sb = sandbox(true);
     let sample = Insight::sample("box");
@@ -451,7 +497,13 @@ fn a_rule_names_its_reach_only_beyond_the_sandbox() {
         "{:?}",
         w.drawn
     );
-    assert_eq!(w.drawn.iter().filter(|d| *d == "All sandboxes").count(), 1);
+    assert_eq!(
+        w.drawn.iter().filter(|d| *d == "All sandboxes").count(),
+        2,
+        "the host-wide deny and the policy's fallback: {:?}",
+        w.drawn
+    );
+    assert_has(&w, "Fallback");
     for heading in ["Blocked", "Allowed"] {
         assert_has(&w, heading);
     }

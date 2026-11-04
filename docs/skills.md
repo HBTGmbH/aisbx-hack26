@@ -35,8 +35,10 @@ Without the dashboard, use `sbx skills import`, `sbx skills add <repo> --skill <
 
 ### Share modes
 
-Choose the mode on the create wizard's *share skills* row. It starts on the host's `skills.defaultMode`. You cannot
-change it after creation; a rebuild keeps it.
+Choose the mode on the create wizard's *share skills* row. It starts on the host's `skills.defaultMode`, which you
+change on the settings screen (`T`, *skills default*) or with `sbx settings set skills.defaultMode <mode>`. The
+default also applies to `aisbx up` and a plain `sbx create` without `--skills`. You cannot change a sandbox's mode
+after creation; a rebuild keeps it.
 
 | Mode | The sandbox |
 | --- | --- |

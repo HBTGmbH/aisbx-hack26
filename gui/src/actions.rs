@@ -13,11 +13,12 @@ use crate::{page, roster, theme};
 
 /// The header's actions: the host's, which no selected sandbox changes. *Approvals* shows as a
 /// count while a request waits (`shell`), and *Other folders* is the list's heading.
-pub const HOST: [Action; 7] = [
+pub const HOST: [Action; 8] = [
     Action::New,
     Action::Secrets,
     Action::Skills,
     Action::Folders,
+    Action::Settings,
     Action::Prune,
     Action::Help,
     Action::Refresh,
@@ -54,11 +55,12 @@ pub const GROUPS: [(&str, &[Action]); 3] = [
 
 /// The host's actions as a row's menu and the help sheet list them under [`HOST_LABEL`]: the
 /// header's, *Approvals* and *Other folders*, the most used first.
-pub const HOST_GROUP: [Action; 9] = [
+pub const HOST_GROUP: [Action; 10] = [
     Action::New,
     Action::Secrets,
     Action::Skills,
     Action::Folders,
+    Action::Settings,
     Action::Approvals,
     Action::Prune,
     Action::ToggleOther,
