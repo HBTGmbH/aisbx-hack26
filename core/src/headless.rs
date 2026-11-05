@@ -44,7 +44,7 @@ HEADLESS USE — the same kits and names as the dashboard, for scripts:
                                never your home folder, a folder holding it, or one with credentials)
         --cpus N, --memory SIZE    resource limits (default: 4 CPUs, 4g; `auto` for sbx's own:
                                every host CPU, half the host's memory)
-        --template REF         refused: every backend is a v3 kit workload, and sbx (0.50.0)
+        --template REF         refused: every backend is a v3 kit workload, and sbx
                                builds no sandbox from a saved template under one
         --tmpfs-volumes        keep the kits' volumes in RAM: nothing of the sandbox stays on
                                disk after `aisbx rm` (sbx keeps a block volume, and no sbx command
@@ -929,7 +929,7 @@ fn template_arg(raw: Option<String>, backend: &str) -> Result<Option<String>, Fa
     match raw {
         None => Ok(None),
         Some(reference) => Err(Fail::usage(format!(
-            "--template {reference:?}: {backend} is a v3 kit workload, and sbx (0.50.0) builds no \
+            "--template {reference:?}: {backend} is a v3 kit workload, and sbx builds no \
              sandbox from a saved template under one (\"saved image carries no kit descriptor\")"
         ))),
     }
@@ -3338,6 +3338,7 @@ mod tests {
             "{}",
             refused.message
         );
+        assert!(!refused.message.contains("0.50"), "{}", refused.message);
     }
 
     #[test]
