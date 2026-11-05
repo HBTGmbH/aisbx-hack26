@@ -148,8 +148,8 @@ $ strings "$(readlink -f "$(command -v claude)")" \
 ## Blocked hosts
 
 Keep one sandbox off hosts that the policy or a kit would open. Type them in the create wizard's *Blocked hosts*
-field, separated by spaces or commas. Wildcards are allowed. A deny beats every allow, also `web`'s `**`, and a
-rebuild keeps it.
+field under *More options*, separated by spaces or commas. Wildcards are allowed. A deny beats every allow, also
+`web`'s `**`, and a rebuild keeps it.
 
 To add or remove one later, use `sbx policy`:
 

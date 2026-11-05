@@ -2,7 +2,7 @@
 //! keys as egui events reach the same confirmation and job as through core's `on_key`. Also the
 //! same-frame cases, the masked fields and the selected row's buttons.
 
-use aisbx_core::app::{App, KitsRow, Modal, Screen};
+use aisbx_core::app::{App, FoldersRow, KitsRow, Modal, Screen};
 use aisbx_core::input::KeyCode;
 use aisbx_core::kits::Catalog;
 use aisbx_core::model::{self, Auth};
@@ -230,6 +230,7 @@ fn with_repo(app: &mut App) {
     let repo = RepoView {
         id: "o-r".into(),
         source: "o/r".into(),
+        git_ref: None,
         commit: Some("0123456789abcdef".into()),
         problem: None,
         skills: vec!["alpha".into(), "beta".into()],
@@ -581,10 +582,7 @@ fn the_notes_of_a_sandbox_with_ram_volumes_say_the_history_goes() {
     }
     let w = Win::new(app);
     let drawn = w.drawn.join("\n");
-    assert!(
-        drawn.contains("but its kit volumes are in RAM, so the session history is lost"),
-        "{drawn}"
-    );
+    assert!(drawn.contains("earlier sessions are lost"), "{drawn}");
 
     let mut form = testkit::auth_form(aisbx_core::app::AccountChoice::New);
     form.ram_volumes = true;
@@ -592,10 +590,7 @@ fn the_notes_of_a_sandbox_with_ram_volumes_say_the_history_goes() {
     app.screen = Screen::AuthEdit(form);
     let w = Win::new(app);
     let drawn = w.drawn.join("\n");
-    assert!(
-        drawn.contains("in RAM, so the session history is lost"),
-        "{drawn}"
-    );
+    assert!(drawn.contains("earlier sessions are lost"), "{drawn}");
 }
 
 /// Also: a ticked kit carries *Adding*, and a click on an item ticks it through core.
@@ -614,7 +609,7 @@ fn the_kits_editor_marks_the_kits_that_can_be_added_later() {
     let mut w = Win::new(app);
     let count = |w: &Win, text: &str| w.drawn.iter().filter(|t| t.as_str() == text).count();
     assert_eq!(count(&w, "Can add later"), later, "{:?}", w.drawn);
-    assert!(!w.drawn.iter().any(|t| t.contains("create-time only")));
+    assert!(!w.drawn.iter().any(|t| t.contains("needs a rebuild")));
     assert_eq!(count(&w, "Adding"), 0);
 
     let jdk = w
@@ -682,7 +677,8 @@ fn a_kit_in_the_kits_editor_says_what_it_costs_under_the_pointer() {
         Screen::Kits(form) => form.help(&app.catalog, KitsRow::Addon(headroom.unwrap())),
         other => panic!("the kits editor is open: {other:?}"),
     };
-    assert!(help.text.starts_with("Create-time only"), "{}", help.text);
+    let cost = aisbx_core::create::ONLY_NOW_NOTE;
+    assert!(help.text.starts_with(cost), "{}", help.text);
     let mut w = Win::new(app);
     let name = w.app.catalog.addons[headroom.unwrap()]
         .kit
@@ -918,10 +914,12 @@ fn the_folders_screen_draws_the_list_and_its_buttons_act_on_their_folder() {
         "the click selects the folder"
     );
     let drawn = w.drawn.join("\n");
-    assert!(
-        !drawn.contains("Edit puts it in the fields below"),
-        "{drawn}"
-    );
+    let Screen::Folders(f) = &w.app.screen else {
+        panic!("the folders screen is open")
+    };
+    let help = f.help(FoldersRow::Folder(0)).text;
+    assert!(help.starts_with("Read-write: "), "{help}");
+    assert!(!w.drawn.contains(&help), "{drawn}");
     // Edit puts it in the fields, and the bar's button says it saves the change.
     let pos = drawn_at(&mut w, "Edit");
     click(&mut w, pos);

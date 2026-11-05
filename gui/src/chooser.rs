@@ -88,7 +88,7 @@ pub fn show(ctx: &egui::Context, app: &mut App, ch: &mut Chooser, covered: bool)
         }
         ui.set_width(560.0);
         ui.heading("Show a folder's sandboxes");
-        let gist = "Its sandboxes come first; the others stay under Other folders.";
+        let gist = "Its sandboxes come first, then the sandboxes in other folders.";
         ui.label(RichText::new(gist).weak());
 
         ui.add_space(10.0);

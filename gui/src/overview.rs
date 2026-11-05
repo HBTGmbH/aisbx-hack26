@@ -5,7 +5,7 @@
 use aisbx_core::actions::Action;
 use aisbx_core::app::App;
 use aisbx_core::model::{self, Auth, FolderRelation, Hue, Lifecycle, Sandbox, Skills};
-use aisbx_core::sbx::{self, SkillsMode};
+use aisbx_core::sbx;
 use aisbx_core::state;
 use eframe::egui::{self, Color32, RichText};
 
@@ -156,13 +156,12 @@ pub fn rows(app: &App, sb: &Sandbox) -> Vec<Row> {
 /// skills, secrets, MCP servers — and a credential it needs that is not stored.
 fn agent_rows(app: &App, sb: &Sandbox) -> Vec<Row> {
     let mut out = vec![match app.backend_of(sb) {
-        Some(b) => glossed(
+        Some(b) => row(
             "Harness",
             vec![part(
                 Tone::Hue(model::agent_hue(&b.agent)),
                 &b.kit.display_name,
             )],
-            weak(b.setup_hint()),
         ),
         None => {
             let agent = vec![warn(format!("{} (not from this repo's kits)", sb.agent))];
@@ -175,7 +174,7 @@ fn agent_rows(app: &App, sb: &Sandbox) -> Vec<Row> {
     if let Some(conn) = &sb.litellm {
         let mut value = vec![plain(conn)];
         if app.litellm_key_missing(conn) {
-            let fix = "⚠ key missing — aisbx litellm add <file> --key-stdin --replace";
+            let fix = "⚠ key missing — add it in Secrets";
             value.push(danger(fix));
         }
         out.push(row("Connection", value));
@@ -198,17 +197,11 @@ fn agent_rows(app: &App, sb: &Sandbox) -> Vec<Row> {
     }
     if let Some(skills) = sb.skills {
         let (value, gloss) = match skills {
-            Skills::Known(SkillsMode::Readonly) => {
-                ("read-only", "the host store, which it cannot change")
-            }
-            Skills::Known(SkillsMode::Readwrite) => (
-                "read-write",
-                "the host store, and it can rewrite what other sandboxes load",
+            Skills::Known(mode) => (
+                aisbx_core::create::skills_mode_name(mode),
+                aisbx_core::create::skills_gloss(mode),
             ),
-            Skills::Known(SkillsMode::Off) => {
-                ("not shared", "created with --skills=off; fixed at creation")
-            }
-            Skills::Unrecorded => ("shared", "mode not recorded — created outside aisbx"),
+            Skills::Unrecorded => ("shared", "created outside aisbx"),
         };
         out.push(glossed("Skills", vec![plain(value)], weak(gloss)));
     }
@@ -221,19 +214,16 @@ fn agent_rows(app: &App, sb: &Sandbox) -> Vec<Row> {
                 Some(name) => format!("{name} ({source})"),
             })
             .collect();
-        let gloss = weak("values stay on the host");
-        out.push(glossed("Secrets", vec![weak(list.join("  "))], gloss));
+        out.push(row("Secrets", vec![weak(list.join("  "))]));
     }
     if sb.mcp_gateway {
         let servers = app.registry.static_mcp(&sb.name);
-        let mut value = vec![weak("gateway enabled")];
-        if let Some(set) = aisbx_core::create::mcp_set(&servers) {
-            value.push(weak(set));
-        }
-        out.push(row("MCP", value));
+        let set = aisbx_core::create::mcp_set(&servers);
+        let set = set.unwrap_or_else(|| aisbx_core::create::HOST_MCP.to_string());
+        out.push(row("MCP", vec![weak(set)]));
     }
     for service in app.missing_credentials(sb) {
-        let text = format!("{service} is not stored — run  sbx secret set {service}");
+        let text = format!("{service} is missing — store it with  sbx secret set {service}");
         out.push(row("⚠ secret", vec![danger(text)]));
     }
     out
@@ -254,25 +244,16 @@ fn workspace_rows(app: &App, sb: &Sandbox) -> Vec<Row> {
         let dir = dir.display().to_string();
         out.push(match sb.start_dir_missing() {
             true => glossed(
-                "Opens in",
+                "Starts in",
                 vec![warn(dir)],
-                warn("⚠ gone — the agent starts in the folder above instead"),
+                warn("⚠ not found — the agent starts in the folder instead"),
             )
             .acting(Action::StartDir, "Pick another"),
-            false => glossed(
-                "Opens in",
-                vec![plain(dir)],
-                weak("the agent's working directory, inside the folder above"),
-            ),
+            false => row("Starts in", vec![plain(dir)]),
         });
     }
     out.push(match app.ssh_ready {
-        true => glossed(
-            "SSH",
-            vec![plain(sbx::ssh_host(&sb.name))],
-            weak("an editor or a shell connects to it"),
-        )
-        .acting(Action::Connect, "Connect"),
+        true => row("SSH", vec![plain(sbx::ssh_host(&sb.name))]).acting(Action::Connect, "Connect"),
         false => glossed(
             "SSH",
             vec![plain(sbx::ssh_host(&sb.name))],
@@ -289,18 +270,16 @@ fn lifecycle_rows(sb: &Sandbox) -> Vec<Row> {
     let mut out = Vec::new();
     match sb.lifecycle() {
         Some(Lifecycle::KeepsRunning) => out.push(
-            glossed(
+            row(
                 "Lifecycle",
                 vec![plain("keeps running after its sessions end")],
-                weak("detached mode, until it is stopped; going back is a rebuild"),
             )
             .acting(Action::KeepRunning, "Auto-stop"),
         ),
         Some(Lifecycle::StopsWithPorts) => out.push(
-            glossed(
+            row(
                 "Lifecycle",
-                vec![plain("stops itself after its last session")],
-                weak("and its ports stop answering"),
+                vec![plain("stops after its last session, and its ports with it")],
             )
             .acting(Action::KeepRunning, "Keep running"),
         ),
@@ -343,8 +322,7 @@ fn build_rows(app: &App, sb: &Sandbox) -> Vec<Row> {
         if let Some(memory) = &sb.memory {
             parts.push(format!("{memory} memory"));
         }
-        let gloss = weak("recorded at creation; a rebuild keeps them");
-        out.push(glossed("Limits", vec![plain(parts.join(" · "))], gloss));
+        out.push(row("Limits", vec![plain(parts.join(" · "))]));
     }
     if let Some((value, gloss)) = sb.volumes_note() {
         out.push(glossed("Volumes", vec![plain(value)], weak(gloss)));
@@ -354,31 +332,24 @@ fn build_rows(app: &App, sb: &Sandbox) -> Vec<Row> {
         value.extend(sb.short_digest().map(weak));
         out.push(row("Image", value));
     }
-    if !sb.auth_mode.is_empty() {
-        out.push(row("sbx auth", vec![weak(&sb.auth_mode)]));
-    }
-    out.push(row("Location", vec![weak(sb.location())]));
     out
 }
 
 /// Which Anthropic account, and — where it is not the one you would think — what to do about it.
 fn account(auth: &Auth, users: usize) -> Row {
     let (value, gloss) = match auth {
-        Auth::Login => (
-            plain("/login (OAuth)"),
-            weak("host-global — shared with every other /login sandbox"),
-        ),
+        Auth::Login => (plain("/login"), weak("shared with every /login sandbox")),
         Auth::Token {
             name,
             stored: false,
             ..
         } => (
             danger(format!("setup token “{name}” — not stored")),
-            danger("it cannot authenticate until one is stored"),
+            danger("it cannot sign in until one is stored"),
         ),
         Auth::Token { name, .. } => {
             let others = match users {
-                0 | 1 => "no other sandbox uses it yet".to_string(),
+                0 | 1 => "no other sandbox uses it".to_string(),
                 n => format!(
                     "{} uses it too",
                     plural(n - 1, "other sandbox", "other sandboxes")
@@ -386,7 +357,7 @@ fn account(auth: &Auth, users: usize) -> Row {
             };
             (
                 part(Tone::Running, format!("setup token “{name}”")),
-                weak(format!("independent of the /login; {others}")),
+                weak(others),
             )
         }
     };
@@ -551,9 +522,9 @@ mod tests {
             drawn,
             [
                 "Agent: Harness, Connection, Models, Skills, Secrets, MCP",
-                "Workspace: Folder, Opens in, SSH",
+                "Workspace: Folder, Starts in, SSH",
                 "Lifecycle: Lifecycle, Created, Last used",
-                "Build: sbx name, Kits, ⚠ Kits, ⟳ Update, Limits, Volumes, Image, sbx auth, Location",
+                "Build: sbx name, Kits, ⚠ Kits, ⟳ Update, Limits, Volumes, Image",
             ]
         );
         let rows = rows(&app, &sb);

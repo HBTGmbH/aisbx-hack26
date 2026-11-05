@@ -58,7 +58,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
         }
         page::heading(ui, "Folders", "");
         if folders.folders.is_empty() {
-            page::paragraph(ui, "None yet: add one below.", weak);
+            page::paragraph(ui, "None yet.", weak);
         } else {
             let labels: Vec<(&str, Look)> = ROW_ACTIONS.iter().map(|(l, _, k)| (*l, *k)).collect();
             let reserve = page::actions_width(ui, &labels);
@@ -154,10 +154,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                         let item = controls::Item {
                             mark: Mark::Radio,
                             title: &wizard::sentence(value.label()),
-                            detail: match value {
-                                Access::Read => "nothing in the sandbox can change it",
-                                Access::Write => "the agent can change and delete what is in it",
-                            },
+                            detail: value.meaning(),
                             badges: Vec::new(),
                             color: theme::accent(dark),
                             checked: folders.access == value,

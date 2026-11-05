@@ -62,7 +62,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
         "Settings",
         "sbx's own settings for this host",
         |ui| {
-            page::heading(ui, "sbx on this host", "");
+            page::heading(ui, "sbx on this computer", "");
             page::group(ui, |ui| {
                 for (n, spec) in SETTINGS.iter().enumerate() {
                     let Some(i) = form::index_of(&rows, SettingsRow::Setting(n)) else {

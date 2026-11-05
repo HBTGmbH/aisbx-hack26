@@ -120,7 +120,7 @@ skips only the update. `x` skips all four steps.
 
 Use this to start the agent in `~/repo/api` but mount all of `~/repo`.
 
-1. In the create wizard, press `↵` on the *Opens in* row.
+1. In the create wizard, press `↵` on the *Starts in* row.
 2. Choose `..`: *mount `~/repo` instead*.
 3. Go back into `api` and choose **Use**.
 
@@ -153,7 +153,8 @@ SSH now*.
 | IntelliJ IDEA / JetBrains | prints what to enter in JetBrains Gateway → *New connection → SSH*: host `<name>.sbx`, user `agent`, the project path |
 | Claude Desktop | prints what to enter under *environment drop-down → + Add SSH connection*: **SSH Host** `<name>.sbx`, port and identity file empty |
 
-- Open the workspace path that `o` prints. An editor may open `/home/agent` instead.
+- VS Code and Cursor open the workspace by its host path. In JetBrains Gateway and Claude Desktop, open the folder
+  that the row's steps name: their folder picker may start in `/home/agent`.
 - Under `deny-all`, add the `remote-dev` kit, at creation or with a rebuild. The editor downloads its server into the
   sandbox, and the kit allows only those download hosts (`kits/remote-dev/remote-dev.yaml`).
 
@@ -200,12 +201,12 @@ sbx registers [MCP](https://modelcontextprotocol.io) servers on the host and len
 each server's OAuth token. Register a server, then tick it in the create wizard. The set is fixed at creation, and a
 rebuild repeats it. To attach or detach a server on a running sandbox, use `sbx mcp load` / `unload`.
 
-The wizard's *MCP servers* section has three answers:
+The wizard's *MCP servers*, under *More options*, has three answers:
 
 - **Nothing ticked:** the agent gets tools to find and attach the host's registered servers itself.
 - **Servers ticked:** the agent gets only those servers.
-- **`none` ticked:** the agent gets no server and no tools to find or add one (`sbx create --static-mcp none`). You
-  can still attach a server later with `sbx mcp load`.
+- **No MCP servers ticked:** the agent gets no server and no tools to find or add one
+  (`sbx create --static-mcp none`). You can still attach a server later with `sbx mcp load`.
 
 ```console
 $ sbx mcp add notion --url https://mcp.notion.com/mcp                      # remote, OAuth discovered
@@ -216,16 +217,15 @@ $ sbx mcp load notion --sandbox my-sandbox                                 # att
 
 ## Host folders (`F`) and `companion.json`
 
-A sandbox can mount more folders beside its workspace, each at its own host path or at a path you choose:
+A sandbox can mount more folders beside its workspace, each at its own host path:
 
 - **The folders the workspace's `companion.json` names**, for a public repo with a private companion repo. The public
   repo is read-write. Each related folder is `read` (the default) or `write`, as `access` says. Paths are relative
   to the workspace.
 - **The host's own list**, for every sandbox. Press `F` to edit it. Give each folder a one-line purpose and choose
   read-only or read-write.
-- **The wizard's *More folders***, for one sandbox. Separate the folders with commas. Add `:ro` for read-only and
-  `:/path` to mount a folder at that path in the sandbox: `~/docs:ro, ~/libs:/workspace/libs:ro`. A rebuild mounts
-  them again.
+- **The wizard's *Mount a folder…***, for one sandbox. Pick each folder in the folder picker. A picked folder is
+  read-only until you pick read-write on its row. A rebuild mounts them again.
 
 A `companion.json` looks like this:
 
@@ -235,9 +235,8 @@ A `companion.json` looks like this:
 
 The agent's instructions file names each folder, its access and its purpose. A change reaches a sandbox at its next
 create or rebuild. Read-only holds also for `sudo` in the sandbox. aisbx never mounts a missing folder, one inside the
-workspace, your home folder or a folder above it, or a folder that holds credentials; the wizard's Review names each.
-A path in the sandbox must start with `/`. It cannot be `/`, the workspace or a path in it, `/run/sandbox/source`
-(where clone mode keeps your repo), or the path of another folder. The wizard refuses such an entry on its step.
+workspace, your home folder or a folder above it, or a folder that holds credentials. The folder picker refuses such
+a folder and says why, and the wizard's Review names each one from the lists.
 
 **`.git` read-only.** Tick *`.git` read-only* in the create wizard. The agent can read the history but cannot commit,
 check out, or change the hooks or config, so no hook it writes runs on your host. You cannot hide `.git` from the

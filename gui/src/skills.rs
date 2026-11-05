@@ -145,19 +145,13 @@ pub fn show_repo(ui: &mut egui::Ui, app: &mut App) {
         RepoScope::Global => "Repo skills · all sandboxes".to_string(),
         RepoScope::Sandbox(name) => format!("Repo skills · {}", view.sandbox_label(name)),
     };
-    page::body(ui, "repo-skills", &title, "", |ui| {
-        if let Some(why) = &repo.error {
-            form::warn(ui, &format!("The selection cannot be read: {why}"));
-            form::warn(
-                ui,
-                "Nothing can be saved until the file is fixed or removed; it is left as it is.",
-            );
+    page::body(ui, "repo-skills", &title, repo.intro(), |ui| {
+        if repo.error.is_some() {
+            for line in repo.error_lines() {
+                form::warn(ui, &line);
+            }
         } else if repo.repos.is_empty() {
-            form::para(
-                ui,
-                "No skill repo is configured. Add one with `aisbx skill-repo add SOURCE`, then \
-                 `aisbx skill-repo fetch`.",
-            );
+            form::para(ui, aisbx_core::repo_skills_ui::NO_REPOS);
         }
         let mut shown: Option<&str> = None;
         for (i, row) in rows.iter().enumerate() {
@@ -168,11 +162,8 @@ pub fn show_repo(ui: &mut egui::Ui, app: &mut App) {
             if id != shown {
                 footer(ui, repo, shown);
                 if let Some(r) = id.and_then(|id| repo.repos.iter().find(|r| r.id == id)) {
-                    let commit = match &r.commit {
-                        Some(c) => format!("at {}", &c[..c.len().min(12)]),
-                        None => "not fetched".to_string(),
-                    };
-                    form::section(ui, &r.id, &format!("{}  ·  {commit}", r.source));
+                    let (source, meta) = r.heading();
+                    form::section(ui, &source, &meta);
                 }
                 shown = id;
             }
@@ -185,7 +176,7 @@ pub fn show_repo(ui: &mut egui::Ui, app: &mut App) {
                     ui,
                     "▸ Sync now",
                     Some(crate::theme::accent(dark)),
-                    "else it applies at the next start",
+                    "otherwise at the next start",
                 ),
                 // In the bottom panel.
                 RepoSkillRow::Save | RepoSkillRow::Close => continue,
@@ -223,15 +214,12 @@ fn tick_row(
     )
 }
 
-/// Under a repo's rows: why it has no cache and the folders it skipped.
+/// Under a repo's rows: why it has no readable copy, and the folders it does not offer.
 fn footer(ui: &mut egui::Ui, repo: &RepoSkillsForm, id: Option<&str>) {
     let Some(r) = id.and_then(|id| repo.repos.iter().find(|r| r.id == id)) else {
         return;
     };
-    if let Some(problem) = &r.problem {
-        form::para(ui, problem);
-    }
-    for (name, why) in &r.skipped {
-        form::para(ui, &format!("☐ {}   skipped: {why}", name.escape_debug()));
+    for line in r.footer() {
+        form::para(ui, &line);
     }
 }

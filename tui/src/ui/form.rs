@@ -542,10 +542,7 @@ fn kits_rows(
         .unwrap_or(0);
     for (n, &i) in order.iter().enumerate() {
         if n == 0 && host_rows > 0 {
-            out.section_with(
-                "Host caches",
-                "read-only, from this host — greyed where none is found",
-            );
+            out.section_with("Host caches", "read-only, from this computer");
         }
         if n == host_rows {
             out.section("Additional kits");
@@ -586,7 +583,8 @@ fn kits_rows(
     }
 }
 
-/// Name and folders, Options, Ports, Blocked hosts and the MCP servers.
+/// Name and folders, the options, and the options seldom needed under their fold: the ports,
+/// the blocked hosts and the MCP servers.
 fn workspace_rows(
     out: &mut Lines<'_>,
     app: &App,
@@ -595,11 +593,6 @@ fn workspace_rows(
     row_index: &dyn Fn(CreateRow) -> usize,
 ) {
     let catalog = &app.catalog;
-    // No blank line above this heading either: the step needs every line.
-    out.section_with(
-        "Name and folders",
-        "your label, where the agent opens, and more host folders",
-    );
     let mut label = input_spans(&form.workspace.name, focused == Some(CreateRow::Name));
     // The first character typed replaces a generated label (core's `field_key`); the tag says so.
     if !form.workspace.name_touched {
@@ -613,23 +606,17 @@ fn workspace_rows(
     );
 
     if form.start_dir_offered(catalog) {
+        let root = form.workspace_root(&app.cwd);
         out.row(
             field_row_spans(
-                "opens in",
+                "starts in",
                 vec![
                     Span::styled(
-                        crate::startdir::describe(&app.cwd, form.workspace.start_dir.as_deref()),
+                        crate::startdir::describe(&root, form.workspace.start_dir.as_deref()),
                         Style::default().bold(),
                     ),
                     Span::styled(
-                        format!(
-                            "   {} {}",
-                            theme::key_name("↵", theme::caps()),
-                            match form.workspace.start_dir.is_some() {
-                                true => "change",
-                                false => "pick a subfolder",
-                            }
-                        ),
+                        format!("   {} change", theme::key_name("↵", theme::caps())),
                         theme::muted(),
                     ),
                 ],
@@ -639,18 +626,48 @@ fn workspace_rows(
         );
     }
 
+    let folders = &form.workspace.extra_folders;
+    for (i, spec) in folders.iter().enumerate() {
+        let row = CreateRow::Folder(i);
+        let (host, read_only) = crate::folders::spec_host(spec);
+        let access = match read_only {
+            true => "‹ read-only ›",
+            false => "‹ read-write ›",
+        };
+        out.row(
+            field_row_spans(
+                if i == 0 { "also mounts" } else { "" },
+                vec![
+                    Span::styled(
+                        model::tilde(std::path::Path::new(host)),
+                        Style::default().bold(),
+                    ),
+                    Span::styled(format!("   {access}"), Style::default().fg(theme::ACCENT)),
+                ],
+            ),
+            focused == Some(row),
+            row_index(row),
+        );
+    }
+    let mut add = vec![Span::styled(
+        "+ mount a folder…",
+        Style::default().fg(theme::ACCENT).bold(),
+    )];
+    if folders.is_empty() {
+        let gloss = crate::create::field_gloss(CreateRow::FolderAdd);
+        add.push(Span::styled(format!("   {gloss}"), theme::muted()));
+    }
     out.row(
         field_row_spans(
-            "more folders",
-            field_spans(
-                &form.workspace.extra_folders,
-                focused == Some(CreateRow::ExtraFolders),
-                false,
-                "(none)",
-            ),
+            if folders.is_empty() {
+                "also mounts"
+            } else {
+                ""
+            },
+            add,
         ),
-        focused == Some(CreateRow::ExtraFolders),
-        row_index(CreateRow::ExtraFolders),
+        focused == Some(CreateRow::FolderAdd),
+        row_index(CreateRow::FolderAdd),
     );
 
     // No blank line above this heading either: the step needs every line.
@@ -686,48 +703,40 @@ fn workspace_rows(
         );
     }
 
-    out.section_with("Network", "optional, space- or comma-separated");
+    let open = form.wizard.advanced_open;
+    out.row(
+        wizard::fold_spans(app, form, CreateRow::AdvancedFold, "more options", open),
+        focused == Some(CreateRow::AdvancedFold),
+        row_index(CreateRow::AdvancedFold),
+    );
+    if !open {
+        return;
+    }
     // "(none)", not "(auto)": an empty ports field publishes nothing.
-    out.row(
-        field_row_spans(
-            "ports",
-            field_spans(
-                &form.workspace.ports,
-                focused == Some(CreateRow::Ports),
-                false,
-                "(none)",
-            ),
-        ),
-        focused == Some(CreateRow::Ports),
-        row_index(CreateRow::Ports),
-    );
-
-    out.row(
-        field_row_spans(
+    for (row, label, input) in [
+        (CreateRow::Ports, "ports", &form.workspace.ports),
+        (
+            CreateRow::DenyNetwork,
             "blocked hosts",
-            field_spans(
-                &form.workspace.deny_network,
-                focused == Some(CreateRow::DenyNetwork),
-                false,
-                "(none)",
-            ),
+            &form.workspace.deny_network,
         ),
-        focused == Some(CreateRow::DenyNetwork),
-        row_index(CreateRow::DenyNetwork),
-    );
-
-    out.section_with(
-        "MCP servers",
-        "optional — fixed at creation, credentials stay on the host",
-    );
+    ] {
+        let mut spans = field_spans(input, focused == Some(row), false, "(none)");
+        if input.value.is_empty() && focused != Some(row) {
+            let gloss = crate::create::field_gloss(row);
+            spans.push(Span::styled(format!("   {gloss}"), theme::muted()));
+        }
+        out.row(
+            field_row_spans(label, spans),
+            focused == Some(row),
+            row_index(row),
+        );
+    }
     out.row(
-        addon_spans(
-            "none",
-            crate::create::NO_MCP,
+        option_spans(
             form.workspace.no_mcp,
-            None,
-            None,
-            0,
+            crate::create::NO_MCP,
+            "",
             out.width as usize,
         ),
         focused == Some(CreateRow::McpNone),
@@ -737,7 +746,7 @@ fn workspace_rows(
         out.row(
             addon_spans(
                 &server.name,
-                &server.transport,
+                "MCP server",
                 form.workspace.static_mcp[i],
                 (!server.ready()).then_some(Marker::Warn(server.status.as_str())),
                 None,
@@ -776,7 +785,7 @@ pub(super) fn render_connect(frame: &mut Frame, app: &App, area: Rect) -> Hits {
     };
 
     let mut out = Lines::new(area);
-    out.section("SSH endpoint");
+    out.section("SSH host");
     out.row(
         vec![
             Span::raw("   "),
@@ -786,9 +795,6 @@ pub(super) fn render_connect(frame: &mut Frame, app: &App, area: Rect) -> Hits {
         false,
         usize::MAX,
     );
-    for line in &view.workspace {
-        out.note(format!("     {line}"));
-    }
 
     if view.ssh_missing {
         out.blank();
@@ -813,10 +819,9 @@ pub(super) fn render_connect(frame: &mut Frame, app: &App, area: Rect) -> Hits {
     out.section("Connect with");
     for target in &view.targets {
         let missing = matches!(target.launch, TargetLaunch::NotOnPath(_));
-        let spans = vec![
-            Span::raw("   "),
-            Span::raw(target.title.to_string()),
-            Span::styled(
+        let mut spans = vec![Span::raw("   "), Span::raw(target.title.to_string())];
+        if !target.status.is_empty() {
+            spans.push(Span::styled(
                 match missing {
                     true => format!("   ⚠ {}", target.status),
                     false => format!("   {}", target.status),
@@ -826,8 +831,8 @@ pub(super) fn render_connect(frame: &mut Frame, app: &App, area: Rect) -> Hits {
                 } else {
                     theme::muted()
                 },
-            ),
-        ];
+            ));
+        }
         out.row(spans, focused == target.row, row_index(target.row));
         let mut text: Vec<(String, Style)> = target
             .steps
@@ -865,7 +870,7 @@ pub(super) fn render_start_dir(frame: &mut Frame, app: &App, area: Rect) -> Hits
             .find(|s| s.name == *name)
             .and_then(|s| s.start_dir.clone()),
         crate::app::StartDirTarget::New(create) => create.workspace.start_dir.clone(),
-        crate::app::StartDirTarget::HostFolder(_) => {
+        crate::app::StartDirTarget::HostFolder(_) | crate::app::StartDirTarget::Folder(_) => {
             return render_host_folder_pick(frame, form, area)
         }
     };
@@ -876,34 +881,16 @@ pub(super) fn render_start_dir(frame: &mut Frame, app: &App, area: Rect) -> Hits
     let chosen = form.chosen();
 
     let mut out = Lines::new(area);
-    out.section_with("Mounted", "the whole folder — this screen never changes it");
+    out.section("Project folder");
     out.note(format!("     {}", model::tilde(&form.root)));
-    out.para(
-        "     Every project under it stays in the sandbox and reachable by path, whichever \
-         folder is picked below.",
-    );
-
     out.blank();
-    out.section_with(
-        "Opens in",
-        "the agent's working directory, and its project root",
-    );
+    out.section("Agent starts in");
     out.note(format!(
         "     {}",
         crate::startdir::describe(&form.root, chosen.as_deref())
     ));
-    out.para(match chosen.is_some() {
-        true => {
-            "     Claude Code / OpenCode starts here and reads this as the project it was \
-                 opened in — its CLAUDE.md, its settings, its session history."
-        }
-        false => {
-            "     The workspace root — where sbx starts an agent by default. Pick a folder \
-                  below to open somewhere inside it instead."
-        }
-    });
     if form.unchanged(current.as_deref()) && current.is_some() {
-        out.note("     Already this sandbox's start folder.");
+        out.note("     already its start folder");
     }
 
     out.blank();
@@ -917,21 +904,14 @@ pub(super) fn render_start_dir(frame: &mut Frame, app: &App, area: Rect) -> Hits
         (
             StartDirRow::Start,
             "Start here",
-            "Stores it and hands the terminal over now. Nothing is rebuilt — a start folder is an \
-             argument to the command that opens the session, not something baked into the \
-             container.",
+            "Saves the folder and starts the agent in it now.",
         ),
         (
             StartDirRow::Use,
             "Use, don't start",
-            "Stores it and stays here. ↵ and x on the sandbox open there from now on, until this \
-             screen says otherwise.",
+            "Saves the folder: the agent starts there from now on.",
         ),
-        (
-            StartDirRow::Cancel,
-            "Cancel",
-            "Leaves the sandbox exactly as it is.",
-        ),
+        (StartDirRow::Cancel, "Cancel", ""),
     ];
     for (row, label, text) in buttons {
         out.explain_lines(focused == row, label, &[text.to_string()]);
@@ -1025,39 +1005,45 @@ fn browse_rows(out: &mut Lines, form: &crate::app::StartDirForm, at_root: &str) 
         );
         // Where the folder is, whole: a long name is cut on its row.
         let path = match form.target {
-            crate::app::StartDirTarget::HostFolder(_) => model::tilde(&form.here().join(name)),
+            crate::app::StartDirTarget::HostFolder(_) | crate::app::StartDirTarget::Folder(_) => {
+                model::tilde(&form.here().join(name))
+            }
             _ => crate::startdir::describe(&form.root, Some(form.rel.join(name).as_path())),
         };
         out.explain_lines(focused == StartDirRow::Dir(i), name.clone(), &[path]);
     }
 }
 
-/// The host folders screen's picker: any folder on the host, for its folder field.
+/// The picker for any folder on the host: the host folders screen's, for its folder field, and
+/// the create wizard's, for one more folder of the sandbox.
 fn render_host_folder_pick(frame: &mut Frame, form: &crate::app::StartDirForm, area: Rect) -> Hits {
     let rows = form.rows();
     let focused = form.focused();
     let row_index = |row: StartDirRow| rows.iter().position(|r| *r == row).unwrap_or(0);
+    let wizard = matches!(form.target, crate::app::StartDirTarget::Folder(_));
     let mut out = Lines::new(area);
-    out.section_with("Folder", "what Use puts in the field");
+    out.section("Folder");
     out.note(format!("     {}", model::tilde(&form.here())));
-    out.para(
-        "     Never your home folder itself, a folder above it or one that holds credentials. \
-         Hidden folders are not listed: type their path instead.",
-    );
+    if !wizard {
+        out.para("     Hidden folders are not listed: type their path in the field instead.");
+    }
     out.blank();
     browse_rows(&mut out, form, "     (no subfolders)");
-    let buttons = [
-        (
-            StartDirRow::Use,
+    let (title, use_label, use_help) = match wizard {
+        true => (
+            "Pick a folder to mount",
+            "Mount it",
+            "Adds this folder to the sandbox, read-only.",
+        ),
+        false => (
+            "Pick a host folder",
             "Use",
-            "Puts this folder in the folder field of the host folders screen. Nothing is \
-             saved until Save there.",
+            "Puts this folder in the folder field. Save there keeps it.",
         ),
-        (
-            StartDirRow::Cancel,
-            "Cancel",
-            "Back to the host folders screen, the field as it was.",
-        ),
+    };
+    let buttons = [
+        (StartDirRow::Use, use_label, use_help),
+        (StartDirRow::Cancel, "Cancel", ""),
     ];
     for (row, label, text) in buttons {
         out.explain_lines(focused == row, label, &[text.to_string()]);
@@ -1066,7 +1052,7 @@ fn render_host_folder_pick(frame: &mut Frame, form: &crate::app::StartDirForm, a
         .iter()
         .map(|(row, label, _)| (*label, focused == *row, false, row_index(*row)))
         .collect();
-    framed(frame, area, "Pick a host folder", out, &looks(&buttons))
+    framed(frame, area, title, out, &looks(&buttons))
 }
 
 /// Where a row of buttons landed, so each one gets its own click box.
@@ -1302,15 +1288,7 @@ pub(super) fn render_skills(frame: &mut Frame, app: &App, area: Rect) -> Hits {
         Some(store) => out.note(format!("Store: {}", model::tilde(&store))),
         None => out.note("Store: not reported by sbx"),
     }
-    out.note(format!(
-        "Mounted into every sandbox that shares it ({}), so a skill added, replaced",
-        match app.skills_sharers() {
-            0 => "none here yet".to_string(),
-            1 => "1 here".to_string(),
-            n => format!("{n} here"),
-        }
-    ));
-    out.note("or removed here is what each of them loads at its next agent session.");
+    out.note(crate::app::skills_shared_line(app.skills_sharers()));
     for line in app.skills_trust_lines() {
         out.note(line);
     }
@@ -1397,25 +1375,15 @@ pub(super) fn render_repo_skills(frame: &mut Frame, app: &App, area: Rect) -> Hi
     };
 
     let mut out = Lines::new(area);
-    match &form.scope {
-        RepoScope::Global => out.para(
-            "Ticked skills go into every sandbox, existing and new. Existing sandboxes get a \
-             change at their next start, new ones at their first.",
-        ),
-        RepoScope::Sandbox(name) => out.para(format!(
-            "Skills for {name} alone, on top of the global ones (locked here — change them in \
-             K → Repo skills for all sandboxes). A save applies at its next start, or now with \
-             Sync now."
-        )),
-    }
-    if let Some(why) = &form.error {
+    out.para(form.intro());
+    if form.error.is_some() {
         out.blank();
-        out.warn(format!("The selection cannot be read: {why}"));
-        out.warn("Nothing can be saved until the file is fixed or removed; it is left as it is.");
+        for line in form.error_lines() {
+            out.warn(line);
+        }
     } else if form.repos.is_empty() {
         out.blank();
-        out.note("No skill repo is configured. Add one with `aisbx skill-repo add SOURCE`,");
-        out.note("then `aisbx skill-repo fetch`.");
+        out.para(crate::repo_skills_ui::NO_REPOS);
     }
 
     let mut buttons: Vec<(&str, bool, bool, usize)> = Vec::new();
@@ -1433,14 +1401,15 @@ pub(super) fn render_repo_skills(frame: &mut Frame, app: &App, area: Rect) -> Hi
             }
             if let Some(repo) = find(repo_id) {
                 out.blank();
-                let commit = match &repo.commit {
-                    Some(c) => format!("at {}", &c[..c.len().min(12)]),
-                    None => "not fetched".to_string(),
-                };
-                out.lines.push(Line::from(vec![
-                    Span::styled(repo.id.clone(), theme::muted().add_modifier(Modifier::BOLD)),
-                    Span::styled(format!("   {}  ·  {commit}", repo.source), theme::muted()),
-                ]));
+                let (source, meta) = repo.heading();
+                let mut heading = vec![Span::styled(
+                    source,
+                    theme::muted().add_modifier(Modifier::BOLD),
+                )];
+                if !meta.is_empty() {
+                    heading.push(Span::styled(format!("   {meta}"), theme::muted()));
+                }
+                out.lines.push(Line::from(heading));
             } else {
                 out.blank();
             }
@@ -1467,13 +1436,10 @@ pub(super) fn render_repo_skills(frame: &mut Frame, app: &App, area: Rect) -> Hi
     framed(frame, area, &title, out, &looks(&buttons))
 }
 
-/// Under a repo's rows: why it has no cache (with the fetch hint) and the folders it skipped.
+/// Under a repo's rows: why it has no readable copy, and the folders it does not offer.
 fn repo_footer(out: &mut Lines<'_>, repo: &crate::repo_skills_ui::RepoView) {
-    if let Some(problem) = &repo.problem {
-        out.note(format!("     {problem}"));
-    }
-    for (name, why) in &repo.skipped {
-        out.note(format!(" [-] {}   skipped: {why}", name.escape_debug()));
+    for line in repo.footer() {
+        out.note(format!("     {line}"));
     }
 }
 
@@ -1493,7 +1459,7 @@ fn repo_skill_spans(
                     "Sync now".to_string(),
                     Style::default().add_modifier(Modifier::BOLD),
                 ),
-                Span::styled("   else it applies at the next start", theme::muted()),
+                Span::styled("   otherwise at the next start", theme::muted()),
             ];
         }
         RepoSkillRow::Save | RepoSkillRow::Close => return Vec::new(),
@@ -1536,10 +1502,7 @@ pub(super) fn render_secrets(frame: &mut Frame, app: &App, area: Rect) -> Hits {
     let known = app.secrets.is_some();
 
     let mut out = Lines::new(area);
-    out.para(
-        "Values live in the host keychain and are shown masked, exactly as sbx prints them. A \
-         sandbox only ever sees a sentinel or a placeholder — the proxy swaps in the rest.",
-    );
+    out.para(crate::app::SECRETS_NOTE);
     if !known {
         out.blank();
         out.note("reading `sbx secret ls`…");
@@ -1568,7 +1531,7 @@ pub(super) fn render_secrets(frame: &mut Frame, app: &App, area: Rect) -> Hits {
     let foreign = app.foreign_secret_lines();
     if !foreign.is_empty() {
         out.blank();
-        out.section("Other custom secrets — not aisbx's");
+        out.section("Other secrets");
         for line in foreign {
             out.note(format!("  {line}"));
         }
@@ -1660,7 +1623,7 @@ pub(super) fn render_approvals(frame: &mut Frame, app: &App, area: Rect) -> Hits
                             format!("{:<TITLE$}", super::clip(&request.title, TITLE)),
                             Style::default().add_modifier(Modifier::BOLD),
                         ),
-                        Span::styled(request.reason(), theme::muted()),
+                        Span::styled(crate::app::approval_reason(request), theme::muted()),
                     ],
                     focus == i,
                     i,
@@ -1694,7 +1657,7 @@ pub(super) fn render_settings(frame: &mut Frame, app: &App, area: Rect) -> Hits 
     let rows = form.rows();
     let focus = form.focus.min(rows.len() - 1);
     let mut out = Lines::new(area);
-    out.section("sbx on this host");
+    out.section("sbx on this computer");
     for (i, row) in rows.iter().enumerate() {
         match *row {
             SettingsRow::Setting(n) => {
@@ -1820,7 +1783,7 @@ pub(super) fn render_kits(frame: &mut Frame, app: &App, area: Rect) -> Hits {
             out.section_with("Host caches", HOST_CACHES_GLOSS);
         }
         if n == hosts {
-            out.section_with("Additional kits", KITS_GLOSS);
+            out.section("Additional kits");
         }
         let addon = &catalog.addons[i];
         let was = form.original[i];
@@ -1871,11 +1834,12 @@ pub(super) fn render_kits(frame: &mut Frame, app: &App, area: Rect) -> Hits {
             &mut out,
             ModelList {
                 title: "Claude models",
-                gloss: "optional — this gateway may not serve Claude Code's own defaults",
+                gloss: "optional",
                 slots: &Slot::ALL,
                 models: &catalog.models,
                 offered: &all,
                 source: Some(&catalog.models_source),
+                indent: 0,
             },
             &form.models,
             form.model_pick,
@@ -1928,6 +1892,8 @@ struct ModelList<'a> {
     offered: &'a [usize],
     /// Where the list came from, said after the title; `None` where a row above already says it.
     source: Option<&'a crate::models::Source>,
+    /// Columns the rows are set in: under a fold of the create wizard, three.
+    indent: usize,
 }
 
 /// The model slots section, with the open slot's model list expanded under it. The create form
@@ -1966,11 +1932,18 @@ fn model_section<R: Copy + PartialEq>(
         .max()
         .unwrap_or(0)
         + 2;
+    let pad = " ".repeat(list.indent);
+    let indented = |mut spans: Vec<Span<'static>>| {
+        if let Some(first) = spans.first_mut() {
+            first.content = format!("{pad}{}", first.content).into();
+        }
+        spans
+    };
     for slot in list.slots.iter().copied() {
         let open_here = open == Some(slot);
         let mut spans = vec![
             Span::styled(
-                format!(" {} ", if open_here { "▾" } else { "▸" }),
+                format!(" {pad}{} ", if open_here { "▾" } else { "▸" }),
                 theme::muted(),
             ),
             Span::styled(format!("{:<width$}", slot.label()), Style::default().bold()),
@@ -1984,7 +1957,7 @@ fn model_section<R: Copy + PartialEq>(
             continue;
         }
         out.row(
-            model_spans(over.get(slot).is_none(), slot.unset(), ""),
+            indented(model_spans(over.get(slot).is_none(), slot.unset(), "")),
             focused == default(slot),
             index(default(slot)),
         );
@@ -1993,11 +1966,11 @@ fn model_section<R: Copy + PartialEq>(
                 continue;
             };
             out.row(
-                model_spans(
+                indented(model_spans(
                     over.get(slot) == Some(model.id.as_str()),
                     &model.name,
                     &model.id,
-                ),
+                )),
                 focused == pick(slot, i),
                 index(pick(slot, i)),
             );
@@ -2333,12 +2306,11 @@ fn host_cache_spans(
 
 /// The kits editor's marker for a kit `sbx kit add` cannot add, and the gloss on its heading that
 /// says what the marker costs.
-const CREATE_TIME: &str = "create-time only";
-const KITS_GLOSS: &str = "adding a create-time only kit rebuilds the sandbox";
+const CREATE_TIME: &str = "needs a rebuild";
 /// Beside the kits editor's `agent` line: the one thing about a sandbox the editor cannot change.
-const AGENT_FIXED: &str = "fixed — create a new sandbox to change it";
+const AGENT_FIXED: &str = "a new sandbox can run another agent";
 /// The kits editor's *Host caches* gloss: the wizard's, less the greying the editor does not do.
-const HOST_CACHES_GLOSS: &str = "read-only, from this host — adding one rebuilds the sandbox";
+const HOST_CACHES_GLOSS: &str = "read-only, from this computer";
 
 /// What a kit row (or an MCP server row) says after its display text.
 #[derive(Debug, Clone, Copy)]
@@ -2607,7 +2579,7 @@ pub(super) fn render_folders(frame: &mut Frame, app: &App, area: Rect) -> Hits {
         out.warn(error);
     }
     out.blank();
-    out.section_with("Folders", "↵ edit below · d delete");
+    out.section("Folders");
     if form.folders.is_empty() {
         out.note("     (none yet)");
     }
@@ -2651,11 +2623,7 @@ pub(super) fn render_folders(frame: &mut Frame, app: &App, area: Rect) -> Hits {
     );
     help(&mut out, FoldersRow::Path);
     out.row(
-        vec![
-            Span::raw(format!("{:>12}  ", "")),
-            Span::raw("[ Browse… ]"),
-            Span::styled("  pick the folder on the host", theme::muted()),
-        ],
+        vec![Span::raw(format!("{:>12}  ", "")), Span::raw("[ Browse… ]")],
         focused == FoldersRow::Browse,
         row_index(FoldersRow::Browse),
     );
@@ -2955,11 +2923,11 @@ mod tests {
             form.addons[jdk.unwrap()] = true;
         }
         let shown = crate::ui::tests_support::render_at(&mut app, 110, 44);
+        assert!(shown.contains("earlier sessions are lost"), "{shown}");
         assert!(
-            shown.contains("but its kit volumes are in RAM, so"),
+            !shown.contains("sessions and what you installed stay"),
             "{shown}"
         );
-        assert!(!shown.contains("session history, the workspace"), "{shown}");
     }
 
     #[test]
@@ -2985,13 +2953,19 @@ mod tests {
             .iter()
             .map(|a| (a.label, a.value.clone()))
             .collect();
-        lines.push(("sbx name", review.sbx_name.clone()));
-        lines.push(("Mounts", review.mounts[0].clone()));
+        lines.push(("Folders", review.mounts[0].clone()));
         for (label, value) in lines {
             let line = format!(" {label:<15}{value}");
             let found = shown[at..].find(&line);
             assert!(found.is_some(), "{line:?} after byte {at} in\n{shown}");
             at += found.unwrap() + line.len();
         }
+        let body = shown.lines().skip(2);
+        assert!(!body.clone().any(|l| l.contains("sbx name")), "{shown}");
+        assert_eq!(
+            shown.matches(review.sbx_name.as_str()).count(),
+            1,
+            "named once, in the title: {shown}"
+        );
     }
 }

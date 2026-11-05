@@ -4,8 +4,8 @@
 
 use super::*;
 use crate::create::{
-    connection_hint, connection_label, harness_hint, provider_harnesses, ConnChoice, CreateStep,
-    Help, Review, WizardRow, LOGIN_TAG,
+    connection_hint, connection_label, harness_blurb, provider_blurb, ConnChoice, CreateStep, Help,
+    Review, WizardRow, LOGIN_TAG,
 };
 
 pub(super) fn render(frame: &mut Frame, app: &App, area: Rect) -> Hits {
@@ -35,7 +35,7 @@ pub(super) fn render(frame: &mut Frame, app: &App, area: Rect) -> Hits {
         CreateStep::Models => models_step(&mut out, app, form, focused, &index),
         CreateStep::Kits => kits_rows(&mut out, app, form, field, &field_index),
         CreateStep::Workspace => workspace_rows(&mut out, app, form, field, &field_index),
-        CreateStep::Review => review_step(&mut out, app, form, &mut links),
+        CreateStep::Review => review_step(&mut out, app, form, focused, &index, &mut links),
     }
     mark_problems(&mut out, app, form, &rows);
 
@@ -393,7 +393,8 @@ fn button_label(row: WizardRow) -> &'static str {
         WizardRow::Provider(_)
         | WizardRow::Agent(_)
         | WizardRow::Connection(_)
-        | WizardRow::Field(_) => "",
+        | WizardRow::Field(_)
+        | WizardRow::Edit(_) => "",
     }
 }
 
@@ -434,7 +435,7 @@ fn radio(
     spans
 }
 
-/// Step 1: one radio per provider, with the harnesses it runs beside it.
+/// Step 1: one radio per provider, with what it serves beside it.
 fn provider_step(
     out: &mut Lines<'_>,
     app: &App,
@@ -445,13 +446,12 @@ fn provider_step(
     let catalog = &app.catalog;
     let picked = form.selected_provider_index(catalog);
     for (p, provider) in form.providers(catalog).into_iter().enumerate() {
-        let harnesses = provider_harnesses(catalog, provider).join(" · ");
         let spans = radio(
             picked == Some(p),
             theme::ACCENT,
             provider.label(),
             None,
-            &harnesses,
+            provider_blurb(provider),
             out.width as usize,
         );
         let row = WizardRow::Provider(p);
@@ -477,15 +477,12 @@ fn harness_step(
     let field_index = |row: CreateRow| index(WizardRow::Field(row));
     let picked = form.selected_harness(catalog);
     for (h, harness) in form.harnesses(catalog).iter().enumerate() {
-        let hint = (harness.backends.first())
-            .map(|b| harness_hint(&catalog.backends[*b]))
-            .unwrap_or_default();
         let spans = radio(
             picked == Some(h),
             theme::agent_color(&harness.agent),
             &harness.label,
             None,
-            &hint,
+            harness_blurb(&harness.agent),
             out.width as usize,
         );
         let row = WizardRow::Agent(h);
@@ -523,9 +520,9 @@ fn harness_step(
     }
 }
 
-/// Step 3, on a LiteLLM connection: the refresh row, the agent's slots with the offered models
-/// under the open one, the config files the answers make, then every model of the connection,
-/// ticked where the agent is offered it.
+/// Step 4, on a LiteLLM connection: the refresh row, then two folds of optional answers: the
+/// agent's slots with the offered models under the open one and every model of the connection,
+/// ticked where the agent is offered it; and the config files the answers make.
 fn models_step(
     out: &mut Lines<'_>,
     app: &App,
@@ -547,36 +544,126 @@ fn models_step(
         ),
     ];
     out.row(spans, focused == refresh, index(refresh));
-    let offered = form.enabled_models(catalog);
     if form.models_offered(catalog) {
-        out.blank();
-        model_section(
+        let open = form.wizard.models_open;
+        fold_row(
             out,
-            ModelList {
-                title: "Starts on",
-                gloss: "nothing picked leaves it to the agent",
-                slots: Slot::of(agent),
-                models: &catalog.models,
-                offered: &offered,
-                // The refresh row above says where the list came from.
-                source: None,
-            },
-            &form.connection.models,
-            form.connection.model_pick,
+            app,
+            form,
+            CreateRow::ModelsFold,
+            "pick models",
+            open,
             focused,
             index,
-            model_row,
-            model_default_row,
-            model_pick_row,
-            false,
         );
+        if open {
+            models_picks(out, form, catalog, agent, focused, index);
+        }
     }
-    config_files(out, app, focused, index);
-    if !form.models_offered(catalog) {
-        return;
+    if app.config_file_row(0).is_some() {
+        let open = form.wizard.files_open;
+        fold_row(
+            out,
+            app,
+            form,
+            CreateRow::FilesFold,
+            "config files",
+            open,
+            focused,
+            index,
+        );
+        if open {
+            config_files(out, app, focused, index);
+        }
     }
-    out.blank();
-    let heading = format!("Offered · {} of {}", offered.len(), catalog.models.len());
+}
+
+/// A fold's row: its triangle, its title and `optional`, then what is set under it, or the
+/// fold's own gloss while nothing is.
+#[allow(clippy::too_many_arguments)]
+fn fold_row(
+    out: &mut Lines<'_>,
+    app: &App,
+    form: &CreateForm,
+    row: CreateRow,
+    title: &str,
+    open: bool,
+    focused: WizardRow,
+    index: &dyn Fn(WizardRow) -> usize,
+) {
+    let spans = fold_spans(app, form, row, title, open);
+    let at = WizardRow::Field(row);
+    out.row(spans, focused == at, index(at));
+}
+
+/// The spans of [`fold_row`], in the columns of a tick box's row.
+pub(super) fn fold_spans(
+    app: &App,
+    form: &CreateForm,
+    row: CreateRow,
+    title: &str,
+    open: bool,
+) -> Vec<Span<'static>> {
+    let summary = form.fold_summary(app, row);
+    let gloss = crate::create::field_gloss(row);
+    let mut spans = vec![
+        Span::styled(
+            if open { " ▾  " } else { " ▸  " },
+            Style::default().fg(theme::ACCENT),
+        ),
+        Span::styled(format!("{title:<14}"), Style::default().bold()),
+        Span::styled("optional", theme::muted()),
+    ];
+    match summary {
+        Some(set) => spans.push(Span::styled(
+            format!("   {set}"),
+            Style::default().fg(theme::ACCENT),
+        )),
+        None if !gloss.is_empty() => {
+            spans.push(Span::styled(format!(" · {gloss}"), theme::muted()))
+        }
+        None => {}
+    }
+    spans
+}
+
+/// The Models step's picks: the agent's slots with the offered models under the open one, then
+/// every model of the connection, ticked where the agent is offered it.
+fn models_picks(
+    out: &mut Lines<'_>,
+    form: &CreateForm,
+    catalog: &crate::kits::Catalog,
+    agent: aisbx_core::litellm::Agent,
+    focused: WizardRow,
+    index: &dyn Fn(WizardRow) -> usize,
+) {
+    let offered = form.enabled_models(catalog);
+    model_section(
+        out,
+        ModelList {
+            title: "    Starts on",
+            gloss: "the agent picks where nothing is picked",
+            slots: Slot::of(agent),
+            models: &catalog.models,
+            offered: &offered,
+            // The refresh row above says where the list came from.
+            source: None,
+            indent: 3,
+        },
+        &form.connection.models,
+        form.connection.model_pick,
+        focused,
+        index,
+        model_row,
+        model_default_row,
+        model_pick_row,
+        false,
+    );
+    let heading = format!(
+        "    Offered · {} of {}",
+        offered.len(),
+        catalog.models.len()
+    );
     out.lines.push(Line::from(Span::styled(
         heading,
         theme::muted().add_modifier(Modifier::BOLD),
@@ -586,7 +673,7 @@ fn models_step(
         let row = WizardRow::Field(CreateRow::ModelOn(i));
         let mut spans = vec![
             Span::styled(
-                if on { " [x] " } else { " [ ] " },
+                if on { "    [x] " } else { "    [ ] " },
                 Style::default().fg(theme::ACCENT),
             ),
             Span::styled(
@@ -619,8 +706,6 @@ fn config_files(
     if rows.is_empty() {
         return;
     }
-    out.blank();
-    out.section_with("Config files", "↵ edit · del reset");
     for (i, file, state) in rows {
         let row = WizardRow::Field(CreateRow::ConfigFile(i));
         let (mark, style) = match state {
@@ -629,7 +714,7 @@ fn config_files(
             FileState::Invalid(_) => ("edited, not valid JSON", theme::warn()),
         };
         let spans = vec![
-            Span::raw("   "),
+            Span::raw("      "),
             Span::styled(file, Style::default().bold()),
             Span::styled(format!("   {mark}"), style),
         ];
@@ -652,24 +737,47 @@ fn model_pick_row(slot: Slot, i: usize) -> WizardRow {
 
 /// One line of the review: the step's number (on its first line), the label and the answer. A
 /// changed answer is bold and a default one muted, so changes stand out without colour too.
-fn answer(out: &mut Lines<'_>, number: Option<usize>, label: &str, value: String, default: bool) {
+fn answer_spans(
+    number: Option<usize>,
+    label: &str,
+    value: String,
+    default: bool,
+) -> Vec<Span<'static>> {
     let number = number.map(|n| n.to_string()).unwrap_or_default();
-    out.lines.push(Line::from(vec![
+    vec![
         Span::styled(format!(" {number:>1} "), theme::key()),
         Span::styled(format!("{label:<15}"), theme::muted()),
         match default {
             true => Span::styled(value, theme::muted()),
             false => Span::styled(value, Style::default().bold()),
         },
-    ]));
+    ]
 }
 
-/// Step 5: one line per answer, each a way back to its step, then what sbx will be told: the
-/// name and the mounts. The lines are core's (`CreateForm::review`).
+/// A line under the cursor's row that belongs to it, drawn on its band: the Review's further
+/// answers of the step under the cursor.
+fn on_band(out: &mut Lines<'_>, spans: Vec<Span<'static>>) {
+    let mut spans: Vec<Span<'static>> = (super::fit_row(spans, out.width as usize).into_iter())
+        .map(|span| {
+            let style = theme::on_selection(span.style);
+            span.style(style)
+        })
+        .collect();
+    let used = Line::from(spans.clone()).width() as u16;
+    if used < out.width {
+        spans.push(Span::raw(" ".repeat((out.width - used) as usize)));
+    }
+    out.lines.push(Line::from(spans).style(theme::selected()));
+}
+
+/// Step 7: the answers of each step, all of a step's lines one row that ↵ (or a click) goes back
+/// to, then the folders the sandbox sees. The lines are core's (`CreateForm::review`).
 fn review_step(
     out: &mut Lines<'_>,
     app: &App,
     form: &CreateForm,
+    focused: WizardRow,
+    index: &dyn Fn(WizardRow) -> usize,
     links: &mut Vec<(usize, CreateStep)>,
 ) {
     let review = form.review(app);
@@ -679,27 +787,34 @@ fn review_step(
             crate::sbx::POLICY_INIT_HINT
         ));
     }
-    let mut last = None;
-    for a in review.answers {
-        links.push((out.lines.len(), a.step));
-        let number = (last != Some(a.step)).then(|| a.step.number());
-        last = Some(a.step);
-        answer(out, number, a.label, a.value, a.default);
+    for step in CreateStep::ALL {
+        let row = WizardRow::Edit(step);
+        let on = focused == row;
+        let answers = review.answers.iter().filter(|a| a.step == step);
+        for (n, a) in answers.enumerate() {
+            links.push((out.lines.len(), a.step));
+            let number = (n == 0).then(|| a.step.number());
+            let spans = answer_spans(number, a.label, a.value.clone(), a.default);
+            match (n, on) {
+                (0, _) => out.row(spans, on, index(row)),
+                (_, true) => on_band(out, spans),
+                (_, false) => out.lines.push(Line::from(spans)),
+            }
+        }
     }
 
     out.blank();
-    let plain = |out: &mut Lines<'_>, label: &str, value: String| {
+    let mut folders = review.mounts.into_iter();
+    out.lines.push(Line::from(vec![
+        Span::raw("   "),
+        Span::styled(format!("{:<15}", "Folders"), theme::muted()),
+        Span::raw(folders.next().unwrap_or_default()),
+    ]));
+    for folder in folders {
         out.lines.push(Line::from(vec![
-            Span::raw("   "),
-            Span::styled(format!("{label:<15}"), theme::muted()),
-            Span::raw(value),
+            Span::raw(format!("   {:<15}", "")),
+            Span::raw(folder),
         ]));
-    };
-    plain(out, "sbx name", review.sbx_name);
-    let mut mounts = review.mounts.into_iter();
-    plain(out, "Mounts", mounts.next().unwrap_or_default());
-    for mount in mounts {
-        plain(out, "", mount);
     }
     for note in review.notes {
         out.warn(format!("     ⚠ {note}"));

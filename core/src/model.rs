@@ -231,20 +231,14 @@ pub struct Sandbox {
     /// Injected secrets as (name, source) — never the values, which stay on the host.
     pub secrets: Vec<(String, String)>,
     pub mcp_gateway: bool,
-    pub daemon_version: String,
-    /// The sbx release that created the sandbox, as `sbx inspect` reports it; empty when it does
-    /// not.
-    pub created_version: String,
 }
 
 impl Sandbox {
     /// The overview's `volumes` row - value and gloss - for a sandbox whose kit volumes are in
     /// RAM (`aisbx up --tmpfs-volumes`); `None` for volumes on disk, every other sandbox's case.
     pub fn volumes_note(&self) -> Option<(&'static str, &'static str)> {
-        self.tmpfs_volumes.then_some((
-            "in RAM (tmpfs)",
-            "aisbx up --tmpfs-volumes: emptied at every stop, nothing left after a delete, R keeps them in RAM",
-        ))
+        self.tmpfs_volumes
+            .then_some(("in RAM", "emptied at every stop"))
     }
 
     /// Managed by this repo — the only sandboxes whose kits the TUI may edit.
@@ -342,19 +336,6 @@ impl Sandbox {
         } else {
             "stopped"
         }
-    }
-
-    /// Where the sandbox lives: always this machine, plus the daemon version and the sbx release
-    /// that created the sandbox, each when sbx reports it.
-    pub fn location(&self) -> String {
-        let mut out = String::from("local");
-        if !self.daemon_version.is_empty() {
-            out.push_str(&format!("  ·  sandboxd {}", self.daemon_version));
-        }
-        if !self.created_version.is_empty() {
-            out.push_str(&format!("  ·  created by sbx {}", self.created_version));
-        }
-        out
     }
 
     /// Everything mounted from the host, primary workspace first, as (path, mode).
@@ -887,8 +868,6 @@ pub fn resolve(snapshot: &Snapshot, catalog: &Catalog, registry: &mut Registry) 
                 .map(|s| (s.name, s.source))
                 .collect(),
             mcp_gateway: inspect.mcp_gateway,
-            daemon_version: inspect.daemon_version,
-            created_version: inspect.created_version,
             name,
         });
     }
@@ -1202,12 +1181,22 @@ fn trim_name(s: &str, max: usize) -> String {
     }
 }
 
-/// Default label for a new sandbox, e.g. "OpenCode (RTK, JDK25)".
-pub fn auto_label(catalog: &Catalog, backend: &str, addons: &[String]) -> String {
-    let base = catalog
+/// Default label for a new sandbox: its agent, its provider and how it signs in there (`account`,
+/// [`label_account`]), then its kits, e.g. "Claude Code · Anthropic /login (RTK, JDK25)" or
+/// "OpenCode · LiteLLM acme".
+pub fn auto_label(
+    catalog: &Catalog,
+    backend: &str,
+    account: Option<&str>,
+    addons: &[String],
+) -> String {
+    let mut base = catalog
         .backend(backend)
         .map(|b| b.base_label())
         .unwrap_or_else(|| backend.to_string());
+    if let Some(account) = account.map(str::trim).filter(|a| !a.is_empty()) {
+        base = format!("{base} {account}");
+    }
     if addons.is_empty() {
         return base;
     }
@@ -1218,6 +1207,30 @@ pub fn auto_label(catalog: &Catalog, backend: &str, addons: &[String]) -> String
         .map(|a| a.short())
         .collect();
     format!("{base} ({})", list.join(", "))
+}
+
+/// How a sandbox on `backend` signs in, as its generated label names it after the provider: the
+/// `/login`, the setup token `token` by name, or the LiteLLM connection `connection`. `None` for a
+/// backend with one way only.
+pub fn label_account(
+    backend: &crate::kits::Backend,
+    token: Option<&str>,
+    connection: Option<&str>,
+) -> Option<String> {
+    match backend.account() {
+        Some(crate::kits::Account::Login) => Some("/login".into()),
+        Some(crate::kits::Account::Token) => Some(match named(token) {
+            Some(name) => format!("token {name}"),
+            None => "token".into(),
+        }),
+        None if backend.litellm_agent().is_some() => named(connection).map(str::to_string),
+        None => None,
+    }
+}
+
+/// `name` trimmed, `None` where nothing is left.
+fn named(name: Option<&str>) -> Option<&str> {
+    name.map(str::trim).filter(|n| !n.is_empty())
 }
 
 /// The addons that link host Gradle and Maven folders, in the order their mounts are listed.
@@ -1611,14 +1624,59 @@ pub fn sample(name: &str, backend: Option<&str>, addons: &[&str]) -> Sandbox {
         policy_scope: "global".into(),
         secrets: Vec::new(),
         mcp_gateway: false,
-        daemon_version: "v0.51.0".into(),
-        created_version: String::new(),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The label a new sandbox gets names its agent, its provider and how it signs in there, so
+    /// the list tells two sandboxes of one agent apart; the kits follow in brackets.
+    #[test]
+    fn a_generated_label_names_the_agent_its_provider_and_how_it_signs_in() {
+        let catalog = Catalog::load().unwrap();
+        let label = |name: &str, token: Option<&str>, conn: Option<&str>, addons: &[&str]| {
+            let backend = catalog.backend(name).expect("the checkout ships it");
+            let account = label_account(backend, token, conn);
+            let addons: Vec<String> = addons.iter().map(|a| a.to_string()).collect();
+            auto_label(&catalog, name, account.as_deref(), &addons)
+        };
+        let cases = [
+            (
+                label("claude-anthropic", None, None, &[]),
+                "Claude Code · Anthropic /login",
+            ),
+            (
+                label("claude-token", Some("work"), None, &[]),
+                "Claude Code · Anthropic token work",
+            ),
+            (
+                label("claude-token", Some(" "), None, &[]),
+                "Claude Code · Anthropic token",
+            ),
+            (
+                label("claude-litellm", None, Some("acme"), &["rtk"]),
+                "Claude Code · LiteLLM acme (RTK)",
+            ),
+            (
+                label("opencode-litellm", None, None, &[]),
+                "OpenCode · LiteLLM",
+            ),
+            (
+                label("pi-litellm", None, Some("beta"), &[]),
+                "Pi · LiteLLM beta",
+            ),
+            (
+                label("codex-openai", Some("x"), Some("y"), &[]),
+                "Codex · OpenAI",
+            ),
+            (label("agy", None, None, &[]), "Antigravity · Google"),
+        ];
+        for (got, want) in cases {
+            assert_eq!(got, want);
+        }
+    }
 
     #[test]
     fn bind_mounts_are_named_by_what_they_are_and_checked_on_the_host() {
@@ -1702,19 +1760,6 @@ mod tests {
         snap.sandboxes[0].ls = ls;
         let sb = resolve(&snap, &catalog, &mut Registry::empty()).remove(0);
         assert!(sb.workspace_missing, "a gone workspace still says so");
-    }
-
-    #[test]
-    fn the_location_names_the_release_that_created_the_sandbox_when_sbx_does() {
-        let mut sb = sample("s", Some("claude-litellm"), &[]);
-        assert_eq!(sb.location(), "local  ·  sandboxd v0.51.0");
-        sb.created_version = "v0.51.0".into();
-        assert_eq!(
-            sb.location(),
-            "local  ·  sandboxd v0.51.0  ·  created by sbx v0.51.0"
-        );
-        sb.daemon_version.clear();
-        assert_eq!(sb.location(), "local  ·  created by sbx v0.51.0");
     }
 
     /// The badges and the ids name the same kits in one order, a kit of no catalog marked `?`

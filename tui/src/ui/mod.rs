@@ -182,10 +182,7 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect, caps: theme::Caps) ->
             if !app.approvals.is_empty() {
                 hints.push(("y", "approvals", KeyCode::Char('y')));
             }
-            hints.extend([
-                ("S", "secrets", KeyCode::Char('S')),
-                ("K", "skills", KeyCode::Char('K')),
-            ]);
+            hints.extend(HOST_HINTS);
             if app.can_prune() {
                 hints.push(("P", "prune", KeyCode::Char('P')));
             }
@@ -220,11 +217,8 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect, caps: theme::Caps) ->
                 };
                 hints.push(("A", label, KeyCode::Char('A')));
             }
-            hints.extend([
-                ("i", "repo skills", KeyCode::Char('i')),
-                ("S", "secrets", KeyCode::Char('S')),
-                ("K", "skills", KeyCode::Char('K')),
-            ]);
+            hints.push(("i", "repo skills", KeyCode::Char('i')));
+            hints.extend(HOST_HINTS);
             if app.can_prune() {
                 hints.push(("P", "prune", KeyCode::Char('P')));
             }
@@ -264,7 +258,38 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect, caps: theme::Caps) ->
                     ("←→", "pick", KeyCode::Left),
                     ("↵", "activate", KeyCode::Enter),
                 ],
-                // The skills mode and the LiteLLM connection: one of several named values.
+                Some(WizardRow::Field(CreateRow::LitellmConn)) => vec![
+                    ("↑↓", "move", KeyCode::Down),
+                    ("←→", "pick", KeyCode::Right),
+                    ("↵", "next", KeyCode::Enter),
+                ],
+                Some(WizardRow::Field(CreateRow::Folder(_))) => vec![
+                    ("↑↓", "move", KeyCode::Down),
+                    ("←→", "pick", KeyCode::Right),
+                    ("del", "remove", KeyCode::Delete),
+                ],
+                Some(WizardRow::Field(
+                    fold @ (CreateRow::ModelsFold | CreateRow::FilesFold | CreateRow::AdvancedFold),
+                )) => vec![
+                    ("↑↓", "move", KeyCode::Down),
+                    (
+                        "↵",
+                        if form.fold_open(*fold) {
+                            "hide"
+                        } else {
+                            "show"
+                        },
+                        KeyCode::Enter,
+                    ),
+                ],
+                Some(WizardRow::Field(CreateRow::FolderAdd)) => vec![
+                    ("↑↓", "move", KeyCode::Down),
+                    ("↵", "pick a folder", KeyCode::Enter),
+                ],
+                Some(WizardRow::Edit(_)) => vec![
+                    ("↑↓", "move", KeyCode::Down),
+                    ("↵", "change", KeyCode::Enter),
+                ],
                 _ if app.on_create_choice_row() => vec![
                     ("↑↓", "move", KeyCode::Down),
                     ("←→", "pick", KeyCode::Right),
@@ -527,10 +552,19 @@ fn draw_hints(
     hits
 }
 
+/// The host-wide screens, on the list's footer whatever row the cursor is on.
+const HOST_HINTS: [(&str, &str, KeyCode); 4] = [
+    ("S", "secrets", KeyCode::Char('S')),
+    ("K", "skills", KeyCode::Char('K')),
+    ("F", "folders", KeyCode::Char('F')),
+    ("T", "settings", KeyCode::Char('T')),
+];
+
 /// The list's hints in the order they give way on a narrow footer: host-wide and rare keys first,
 /// the session keys last. `↵`, `y` and `?` are not in it, so they always show.
 const LIST_DROP: &[&str] = &[
-    "q", "a", "/", "r", "P", "K", "S", "i", "b", "p", "w", "A", "o", "R", "e", "d", "s", "n", "x",
+    "q", "a", "/", "F", "r", "P", "K", "S", "T", "i", "b", "p", "w", "A", "o", "R", "e", "d", "s",
+    "n", "x",
 ];
 
 /// `hints` without whole hints, taken in `drop` order, until the footer's line fits `width`: a
@@ -561,10 +595,14 @@ fn fit_hints<'a>(
 }
 
 fn render_list(frame: &mut Frame, app: &mut App, area: Rect) -> Hits {
+    if app.selected().is_none() {
+        return roster::render(frame, app, area);
+    }
     if app.detail_full {
         return detail::render(frame, app, area);
     }
-    let detail_height = detail_height(area.height, roster::wanted_height(app));
+    let need = detail::wanted_height(app, area.width);
+    let detail_height = detail_height(area.height, roster::wanted_height(app), need);
     let [grid_area, detail_area] =
         Layout::vertical([Constraint::Fill(1), Constraint::Length(detail_height)]).areas(area);
 
@@ -573,11 +611,12 @@ fn render_list(frame: &mut Frame, app: &mut App, area: Rect) -> Hits {
     hits
 }
 
-/// How many lines of `height` the details pane gets under a list that wants `list` lines: half,
-/// from 6 to 16, plus every line the list leaves empty.
-fn detail_height(height: u16, list: u16) -> u16 {
+/// How many lines of `height` the details pane gets under a list that wants `list` lines: what
+/// its content `need`s, at most half, from 6 to 16 lines, or every line the list leaves empty.
+fn detail_height(height: u16, list: u16, need: u16) -> u16 {
     let half = (height / 2).clamp(6, 16);
-    half.max(height.saturating_sub(list)).min(height)
+    let most = half.max(height.saturating_sub(list)).min(height);
+    need.min(most)
 }
 
 /// Shorten to `width` display columns, marking the cut with an ellipsis.
@@ -1039,6 +1078,76 @@ pub(crate) mod tests_support {
         out.push(("Publish a port".to_string(), render(&mut app)));
         app.modal = Some(Modal::Help);
         out.push(("Help".to_string(), render(&mut app)));
+        app.modal = None;
+
+        use crate::folders::{Access, Entry};
+        app.screen = Screen::Folders(crate::app::FoldersForm {
+            folders: vec![
+                Entry {
+                    path: "/srv/kb".into(),
+                    access: Access::Read,
+                    purpose: "the team's notes".into(),
+                },
+                Entry {
+                    path: "/srv/out".into(),
+                    access: Access::Write,
+                    purpose: "reports the agent writes".into(),
+                },
+            ],
+            ..Default::default()
+        });
+        out.push(("Host folders".to_string(), render(&mut app)));
+
+        use crate::repo_skills_ui::{RepoScope, RepoSkillsForm, RepoView};
+        use aisbx_core::skill_select::{Pick, Selection, Skills};
+        let repos = vec![
+            RepoView {
+                id: "github-com-team-skills-0123abcd".into(),
+                source: "https://github.com/team/skills".into(),
+                git_ref: None,
+                commit: Some("0123456789abcdef".into()),
+                problem: None,
+                skills: vec!["review".into(), "pdf".into()],
+                skipped: vec![("Draft_1".into(), "bad-name")],
+            },
+            RepoView {
+                id: "github-com-team-extra-89abcdef".into(),
+                source: "https://github.com/team/extra".into(),
+                git_ref: Some("v2".into()),
+                commit: None,
+                problem: Some("no cache".into()),
+                skills: Vec::new(),
+                skipped: Vec::new(),
+            },
+        ];
+        let mut selection = Selection {
+            global: vec![Pick {
+                repo: "github-com-team-skills-0123abcd".into(),
+                skills: Skills::Named(vec!["review".into()]),
+            }],
+            ..Selection::default()
+        };
+        selection.sandboxes.insert(
+            "claude-anthropic-proj".into(),
+            vec![Pick {
+                repo: "github-com-team-skills-0123abcd".into(),
+                skills: Skills::Named(vec!["pdf".into()]),
+            }],
+        );
+        for (title, scope) in [
+            (
+                "one sandbox",
+                RepoScope::Sandbox("claude-anthropic-proj".into()),
+            ),
+            ("all sandboxes", RepoScope::Global),
+        ] {
+            app.screen = Screen::RepoSkills(RepoSkillsForm::from_parts(
+                scope,
+                repos.clone(),
+                Ok(selection.clone()),
+            ));
+            out.push((format!("Repo skills — {title}"), render(&mut app)));
+        }
         out
     }
 
@@ -1248,8 +1357,12 @@ mod tests {
             assert!(screen.contains(text), "{text:?}: {screen}");
         }
         assert!(
-            screen.contains("A running daemon follows"),
+            screen.contains("takes effect after `sbx daemon"),
             "what a change needs: {screen}"
+        );
+        assert!(
+            screen.contains("When on,") && screen.contains("Otherwise,"),
+            "what on and off do: {screen}"
         );
         assert!(screen.contains("change"), "the footer names ↵: {screen}");
         for &(w, h) in SIZES {
@@ -1340,52 +1453,83 @@ mod tests {
     }
 
     #[test]
-    fn the_details_pane_takes_what_the_list_leaves() {
-        assert_eq!(detail_height(32, 12), 20, "a short list gives up its slack");
-        assert_eq!(detail_height(32, 40), 16, "a long list keeps the old split");
-        assert_eq!(detail_height(12, 20), 6);
-        assert_eq!(detail_height(12, 4), 8);
-        assert_eq!(detail_height(5, 2), 5, "never more than there is");
+    fn the_details_pane_is_as_tall_as_its_content_needs() {
+        assert_eq!(
+            detail_height(32, 12, 14),
+            14,
+            "a short list keeps its slack"
+        );
+        assert_eq!(
+            detail_height(32, 12, 40),
+            20,
+            "at most what the list leaves"
+        );
+        assert_eq!(
+            detail_height(32, 40, 30),
+            16,
+            "a long list keeps the old split"
+        );
+        assert_eq!(detail_height(12, 20, 30), 6);
+        assert_eq!(detail_height(12, 4, 30), 8);
+        assert_eq!(detail_height(5, 2, 30), 5, "never more than there is");
     }
 
-    /// The y of the details pane's top border: the second panel's, under the list's — its tabs
-    /// on a sandbox, *New sandbox* on the New row.
-    fn details_top(screen: &str) -> usize {
+    /// The y of the details pane's top border, under the list's panel; `None` without the pane.
+    fn details_top(screen: &str) -> Option<usize> {
         let tops = screen.lines().enumerate().filter(|(_, l)| {
             let l = l.trim_start_matches('"');
-            l.starts_with("━━ 1 Overview") || l.starts_with(" New sandbox ━")
+            l.starts_with("━━ 1 Overview")
         });
         let tops: Vec<usize> = tops.map(|(y, _)| y).collect();
-        assert_eq!(tops.len(), 1, "one details pane:\n{screen}");
-        tops[0]
+        assert!(tops.len() <= 1, "one details pane at most:\n{screen}");
+        tops.first().copied()
     }
 
     #[test]
-    fn a_short_list_leaves_the_details_room_and_the_split_never_moves() {
+    fn the_details_pane_fits_its_overview_and_the_split_stays_put() {
         let mut app = app_with(populated());
         app.insight = crate::insight::Insight::sample("claude-anthropic-proj");
-        let screen = super::tests_support::render_at(&mut app, 110, 34);
-        let top = details_top(&screen);
-        // The list takes what it wants and no more: the header line, then its panel.
-        assert_eq!(top, 1 + roster::wanted_height(&app) as usize, "{screen}");
-        assert!(top < 1 + 16, "more than the old half: {screen}");
+        let tall = super::tests_support::render_at(&mut app, 110, 60);
+        let need = detail::wanted_height(&app, 110) as usize;
+        let top = details_top(&tall).expect("a sandbox is selected");
+        assert_eq!(top, 60 - 1 - need, "{tall}");
+        assert!(
+            top > 1 + roster::wanted_height(&app) as usize,
+            "the list keeps its slack:\n{tall}"
+        );
+        let (width, height) = (110, 34);
+        let screen = super::tests_support::render_at(&mut app, width, height);
+        let top = details_top(&screen).expect("a sandbox is selected");
+        let body = height - 2;
+        let pane = detail_height(body, roster::wanted_height(&app), need as u16);
+        assert_eq!(top, 1 + (body - pane) as usize, "{screen}");
         assert!(
             !screen.contains("more  ctrl-↑↓ scroll"),
             "the Overview fits:\n{screen}"
         );
         for _ in 0..app.cells.len() {
             app.on_key(KeyEvent::from(KeyCode::Down));
-            let screen = super::tests_support::render_at(&mut app, 110, 34);
-            assert_eq!(details_top(&screen), top, "{screen}");
+            let screen = super::tests_support::render_at(&mut app, width, height);
+            match app.selected() {
+                Some(_) => assert_eq!(details_top(&screen), Some(top), "{screen}"),
+                None => {
+                    assert_eq!(details_top(&screen), None, "no pane on the New row");
+                    let lines: Vec<&str> = screen.lines().map(|l| l.trim_matches('"')).collect();
+                    assert!(
+                        lines[height as usize - 2].starts_with('─'),
+                        "the list takes the whole body on the New row:\n{screen}"
+                    );
+                }
+            }
         }
         app.cursor = 0;
         app.approvals = vec![super::tests_support::held(
             "ts-lab",
             "registry.npmjs.org:443",
         )];
-        let screen = super::tests_support::render_at(&mut app, 110, 34);
+        let screen = super::tests_support::render_at(&mut app, width, height);
         assert!(screen.contains("to approve"), "{screen}");
-        assert_eq!(details_top(&screen), top, "{screen}");
+        assert_eq!(details_top(&screen), Some(top), "{screen}");
     }
 
     #[test]
@@ -1410,29 +1554,39 @@ mod tests {
     }
 
     #[test]
-    fn the_create_form_offers_blocked_hosts_and_mcp_servers_where_there_are_any() {
+    fn the_seldom_used_options_wait_under_their_fold() {
         let mut app = app_with(populated());
         app.open_create();
         show_step(&mut app, CreateStep::Workspace);
 
-        // No MCP servers registered: the section holds only `none`, which takes the tools away.
         let screen = super::tests_support::render_at(&mut app, 110, 40);
-        assert!(screen.contains("blocked hosts"), "{screen}");
-        assert!(screen.contains("MCP servers"), "{screen}");
-        assert!(screen.contains(crate::create::NO_MCP), "{screen}");
+        assert!(screen.contains("more options"), "{screen}");
+        let gloss = crate::create::field_gloss(CreateRow::AdvancedFold);
+        assert!(screen.contains(gloss), "{screen}");
+        assert!(!screen.contains("blocked hosts (none)"), "{screen}");
+        assert!(!screen.contains(crate::create::NO_MCP), "{screen}");
         assert!(
             screen.contains("[ Next ]"),
             "the step still reaches its buttons: {screen}"
         );
+        focus_row(&mut app, CreateRow::AdvancedFold);
+        app.on_key(KeyEvent::from(KeyCode::Enter));
+        let screen = super::tests_support::render_at(&mut app, 110, 40);
+        assert!(screen.contains("blocked hosts (none)"), "{screen}");
+        assert!(screen.contains(crate::create::NO_MCP), "{screen}");
 
-        // The note is drawn while the field holds focus, and says which way the rule goes.
         focus_row(&mut app, CreateRow::DenyNetwork);
         let screen = super::tests_support::render_at(&mut app, 80, 24);
-        assert!(screen.contains("may not reach"), "{screen}");
-        assert!(
-            screen.contains("beats every allow"),
-            "why a kit cannot undo it: {screen}"
-        );
+        let strip = strip_text(&screen);
+        assert!(strip.contains("cannot reach these hosts"), "{screen}");
+        assert!(strip.contains("Otherwise,"), "{screen}");
+
+        if let Screen::Create(form) = &mut app.screen {
+            form.workspace.ports = TextInput::new("8080:3000");
+            form.wizard.advanced_open = false;
+        }
+        let screen = super::tests_support::render_at(&mut app, 110, 40);
+        assert!(screen.contains("ports 8080:3000"), "{screen}");
 
         // With servers registered, each is a checkbox and `--static-mcp` picks them up.
         app.mcp = vec![
@@ -1450,9 +1604,8 @@ mod tests {
             },
         ];
         app.open_create();
-        show_step(&mut app, CreateStep::Workspace);
+        focus_row(&mut app, CreateRow::McpNone);
         let screen = super::tests_support::render_at(&mut app, 110, 44);
-        assert!(screen.contains("MCP servers"), "{screen}");
         assert!(
             screen.contains("notion") && screen.contains("gh"),
             "{screen}"
@@ -1532,10 +1685,11 @@ mod tests {
         let mut app = app_with(populated());
         app.open_create();
 
-        // Unfocused, it is a field of its own, under its own heading, with a marker and a value.
         show_step(&mut app, CreateStep::Workspace);
+        if let Screen::Create(form) = &mut app.screen {
+            form.wizard.advanced_open = true;
+        }
         let screen = super::tests_support::render_at(&mut app, 110, 40);
-        assert!(screen.contains("Network"), "{screen}");
         assert!(screen.contains("ports"), "{screen}");
         assert!(
             screen.contains("(none)"),
@@ -1543,7 +1697,7 @@ mod tests {
         );
         assert!(screen.contains("[ Next ]"), "{screen}");
         assert!(
-            screen.contains("opens in"),
+            screen.contains("starts in"),
             "where the agent starts is on the form without being hunted for: {screen}"
         );
         show_step(&mut app, CreateStep::Kits);
@@ -1558,9 +1712,12 @@ mod tests {
         focus_row(&mut app, CreateRow::Ports);
         let screen = super::tests_support::render_at(&mut app, 80, 24);
         let strip = strip_text(&screen);
-        assert!(strip.contains("8080:3000 binds host port 8080"), "{screen}");
+        assert!(
+            strip.contains("8080:3000 opens sandbox port 3000"),
+            "{screen}"
+        );
         // The end of the sentence, not just the part that fitted the terminal it was written for.
-        assert!(strip.ends_with("not 127.0.0.1."), "{screen}");
+        assert!(strip.ends_with("listen on 0.0.0.0."), "{screen}");
     }
 
     #[test]
@@ -1644,10 +1801,8 @@ mod tests {
         app.on_key(KeyEvent::from(KeyCode::Char('y')));
         let screen = super::tests_support::render(&mut app);
         assert!(screen.contains("registry.npmjs.org:443"), "{screen}");
-        assert!(
-            screen.contains("no matching allow rule (default deny)"),
-            "{screen}"
-        );
+        assert!(screen.contains(crate::app::NO_RULE_YET), "{screen}");
+        assert!(!screen.contains("default deny"), "sbx's words: {screen}");
         assert!(
             screen.contains("My private Claude Code"),
             "grouped under its label: {screen}"
@@ -1777,11 +1932,12 @@ mod tests {
             "{screen_tall}"
         );
         // What the rows hide below is counted on the strip's rule.
-        assert!(screen.contains("more"), "{screen}");
+        let short = super::tests_support::render_at(&mut app, 110, 24);
+        assert!(short.contains("more"), "{short}");
         // Somebody else's custom secret is shown, and labelled as not ours.
         let screen = super::tests_support::render_at(&mut app, 110, 50);
         assert!(screen.contains("someone-elses-secret"), "{screen}");
-        assert!(screen.contains("not aisbx's"), "{screen}");
+        assert!(screen.contains("Other secrets"), "{screen}");
 
         // A host with nothing stored says which credentials are missing rather than listing none.
         let mut empty = app_with(Vec::new());
@@ -1813,7 +1969,7 @@ mod tests {
         assert!(screen.contains("sk-l********"), "{screen}");
         assert!(screen.contains("no connection.json names it"), "{screen}");
         assert!(
-            strip_text(&screen).contains("Edit changes its URL or key, Delete removes both"),
+            strip_text(&screen).contains("Edit changes its address or key, Delete removes both"),
             "{screen}"
         );
         assert!(screen.contains("n new connection"), "{screen}");
@@ -1895,7 +2051,7 @@ mod tests {
         }
         show_step(&mut app, CreateStep::Harness);
         let gateway = super::tests_support::render(&mut app);
-        assert!(!gateway.contains("/login (OAuth)"), "{gateway}");
+        assert!(!gateway.contains("/login"), "{gateway}");
 
         let subscription = app
             .catalog
@@ -1911,24 +2067,17 @@ mod tests {
         let auth = super::tests_support::render(&mut app);
         for screen in [&create, &auth] {
             assert!(screen.contains("recommended"), "{screen}");
-            assert!(
-                screen.contains("one global login, reused by every sandbox"),
-                "{screen}"
-            );
-            assert!(
-                screen.contains("independent Anthropic subscription"),
-                "{screen}"
-            );
+            assert!(screen.contains(crate::create::LOGIN_HINT), "{screen}");
+            assert!(screen.contains("for a second Claude account"), "{screen}");
             // The pick list is hidden until the token radio is chosen, so nothing may point at it.
-            assert!(!screen.contains("pick one below"), "{screen}");
+            assert!(!screen.contains("pick one,"), "{screen}");
         }
-        // …and on a token, that the name is the account.
         app.screen = Screen::AuthEdit(super::tests_support::auth_form(AccountChoice::Named(
             "work".into(),
         )));
         let screen = super::tests_support::render(&mut app);
-        assert!(screen.contains("uses that one account"), "{screen}");
-        assert!(screen.contains("pick one below"), "{screen}");
+        assert!(screen.contains("share its account"), "{screen}");
+        assert!(screen.contains("pick one, or add a new one"), "{screen}");
     }
 
     #[test]
@@ -2278,7 +2427,7 @@ mod tests {
             "work".into(),
         )));
         let screen = super::tests_support::render(&mut app);
-        assert!(screen.contains("nothing to paste"), "{screen}");
+        assert!(screen.contains("Stored on this computer"), "{screen}");
 
         // A real token is longer than the row: while it is typed, the caret stays on screen and
         // the start of the dots gives way behind a `…`.
@@ -2393,11 +2542,14 @@ mod tests {
         click(&mut app, Hit::NewCard);
         let screen = super::tests_support::render_at(&mut app, 110, 40);
         assert!(screen.contains(&trail(CreateStep::Provider)), "{screen}");
-        assert!(screen.contains("Who serves the model"), "{screen}");
+        assert!(screen.contains("Choose the AI provider"), "{screen}");
         assert!(
-            screen.contains("›◉ LiteLLM              Claude Code · OpenCode · Pi"),
+            screen.contains("›◉ LiteLLM              the models of your LiteLLM gateway"),
             "the cursor opens on the picked provider: {screen}"
         );
+        for word in ["OpenCode", "/login", "setup token"] {
+            assert!(!screen.contains(word), "{word}: {screen}");
+        }
     }
 
     #[test]
@@ -2480,7 +2632,7 @@ mod tests {
             !body.contains("claude-anthropic-proj"),
             "the running one is never a candidate: {body}"
         );
-        assert!(body.contains("Workspace files are untouched"), "{body}");
+        assert!(body.contains("Your files stay"), "{body}");
         assert_eq!(confirm.job.steps.len(), 1);
         assert!(
             confirm.job.steps[0].argv.contains(&"--force".to_string()),
@@ -2665,7 +2817,10 @@ mod tests {
         );
         assert!(screen.contains("[-] host-gradle"), "greyed: {screen}");
         assert!(screen.contains("no ~/.gradle/caches"), "{screen}");
-        assert!(strip_text(&screen).contains("cannot be ticked"), "{screen}");
+        assert!(
+            strip_text(&screen).contains("Not found on this computer"),
+            "{screen}"
+        );
         assert!(screen.contains("[ ] host-maven"), "tickable: {screen}");
         assert!(
             screen.contains("· found "),
@@ -2763,13 +2918,13 @@ mod tests {
     #[test]
     fn the_list_and_the_overview_keep_the_mount_and_the_start_folder_apart() {
         // Left on the fixture's own `/proj`, which is the cwd these tests run in — a sandbox
-        // whose workspace is elsewhere sits under "Other folders" and is not the selected row.
+        // whose workspace is elsewhere sits under "Sandboxes in other folders" and is not the selected row.
         let mut sb = model::sample("claude-litellm-proj", Some("claude-litellm"), &[]);
         let mut app = app_with(vec![sb.clone()]);
         let screen = super::tests_support::render(&mut app);
         assert!(screen.contains("/proj"), "{screen}");
         assert!(
-            !screen.contains("opens in"),
+            !screen.contains("starts in"),
             "a sandbox with no start folder has one answer and does not say it twice: {screen}"
         );
 
@@ -2780,7 +2935,7 @@ mod tests {
             screen.contains("This folder  /proj") && screen.contains("› notes"),
             "the heading carries the mount, the row the start folder: {screen}"
         );
-        assert!(screen.contains("opens in"), "{screen}");
+        assert!(screen.contains("starts in"), "{screen}");
         // The mount is still stated in full, unqualified — narrowing where the agent opens must
         // never read as narrowing what the sandbox can see.
         assert!(
@@ -2793,7 +2948,7 @@ mod tests {
         sb.start_dir = Some(std::path::PathBuf::from("gone-away"));
         let mut app = app_with(vec![sb]);
         let screen = super::tests_support::render(&mut app);
-        assert!(screen.contains("gone"), "{screen}");
+        assert!(screen.contains("not found"), "{screen}");
     }
 
     #[test]
@@ -2833,12 +2988,12 @@ mod tests {
     fn the_overview_says_when_the_volumes_are_in_ram() {
         let mut sb = model::sample("claude-anthropic-proj", Some("claude-anthropic"), &[]);
         let mut app = app_with(vec![sb.clone()]);
-        assert!(!super::tests_support::render(&mut app).contains("in RAM (tmpfs)"));
+        assert!(!super::tests_support::render(&mut app).contains("in RAM"));
         sb.tmpfs_volumes = true;
         let mut app = app_with(vec![sb]);
         let screen = super::tests_support::render(&mut app);
         assert!(
-            screen.contains("volumes") && screen.contains("in RAM (tmpfs)"),
+            screen.contains("volumes") && screen.contains("in RAM"),
             "{screen}"
         );
     }
@@ -2852,7 +3007,11 @@ mod tests {
         // The refresh row says it; the heading under it does not say it again.
         assert!(screen.contains("Refresh the list   gateway, "), "{screen}");
         assert_eq!(screen.matches("gateway, ").count(), 1, "{screen}");
-        assert!(screen.contains("leaves it to the agent"), "{screen}");
+        let gloss = crate::create::field_gloss(CreateRow::ModelsFold);
+        assert!(
+            screen.contains(gloss),
+            "the picks wait under their fold: {screen}"
+        );
 
         let catalog = std::sync::Arc::make_mut(&mut app.catalog);
         catalog.models_source = crate::models::Source::Gateway {
@@ -2873,13 +3032,20 @@ mod tests {
         let mut app = app_with(Vec::new());
         app.open_create();
         show_step(&mut app, CreateStep::Models);
+        let screen = super::tests_support::render(&mut app);
+        assert!(!screen.contains("Starts on"), "folded at first: {screen}");
+        focus_row(&mut app, CreateRow::ModelsFold);
+        app.on_key(KeyEvent::from(KeyCode::Enter));
 
         let screen = super::tests_support::render(&mut app);
         assert!(screen.contains("Starts on"), "{screen}");
         assert!(screen.contains("opus"), "{screen}");
         // An unpinned alias reads as what it is, and the heading says what that means.
         assert!(screen.contains("(default)"), "{screen}");
-        assert!(screen.contains("leaves it to the agent"), "{screen}");
+        assert!(
+            screen.contains("the agent picks where nothing is picked"),
+            "{screen}"
+        );
         // Each model is listed once, as offered, until a slot's list is opened.
         let first = app
             .catalog
@@ -3245,6 +3411,11 @@ mod tests {
                 })
                 .collect();
             open_wizard(&mut app, step);
+            if let Screen::Create(form) = &mut app.screen {
+                form.wizard.models_open = true;
+                form.wizard.files_open = true;
+                form.wizard.advanced_open = true;
+            }
             cases.push((step.title(), app));
         }
         let mut gateway = app_with(Vec::new());
@@ -3378,6 +3549,9 @@ mod tests {
             })
             .collect();
         open_wizard(&mut app, CreateStep::Workspace);
+        if let Screen::Create(form) = &mut app.screen {
+            form.wizard.advanced_open = true;
+        }
         let last = WizardRow::Field(CreateRow::Mcp(29));
         let at = wizard_rows(&app).iter().position(|r| *r == last).unwrap();
         for _ in 0..at {
@@ -3532,14 +3706,13 @@ mod tests {
         }
         let screen = super::tests_support::render_at(&mut app, 110, 40);
         assert!(screen.contains(&trail(CreateStep::Review)), "{screen}");
-        assert!(screen.contains("sbx name"), "{screen}");
-        assert!(screen.contains("claude-token-proj"), "{screen}");
-        assert!(screen.contains("Mounts"), "{screen}");
-        assert!(screen.contains("/proj"), "{screen}");
         assert!(
-            screen.contains("setup token · new, named personal"),
-            "{screen}"
+            screen.contains("claude-token-proj"),
+            "the title names it: {screen}"
         );
+        assert!(screen.contains("Folders"), "{screen}");
+        assert!(screen.contains("/proj"), "{screen}");
+        assert!(screen.contains("new setup token personal"), "{screen}");
         assert!(
             !screen.contains(value),
             "the token value is never drawn: {screen}"
@@ -3661,10 +3834,10 @@ mod tests {
             open_wizard(&mut app, CreateStep::Workspace);
             let labels = [
                 "label  ",
-                "opens in",
+                "starts in",
                 "clone mode",
                 "share skills",
-                "blocked hosts",
+                "more options",
             ];
             let first = rows_at(&buffer_at(&mut app, width, height), &labels);
             assert!(first.iter().all(Option::is_some), "{width}: {first:?}");
@@ -3786,10 +3959,9 @@ mod tests {
             " 2 Connection     ",
             " 3 Harness        ",
             " 4 Models         ",
-            "   Offered        ",
             " 5 Kits           ",
             " 6 Label          ",
-            "   Opens in       ",
+            "   Starts in      ",
         ] {
             assert!(screen.contains(line), "{line}: {screen}");
         }
@@ -3881,9 +4053,9 @@ mod tests {
             .addons
             .iter()
             .find(|a| a.kit.name == "host-gradle");
-        let reason = first.and_then(|a| a.create_time_reason()).unwrap();
-        let note = crate::create::only_now_note(reason);
-        assert!(strip_text(&screen).contains(&note), "{screen}");
+        assert!(first.and_then(|a| a.create_time_reason()).is_some());
+        let note = crate::create::ONLY_NOW_NOTE;
+        assert!(strip_text(&screen).contains(note), "{screen}");
     }
 
     #[test]
@@ -3910,8 +4082,8 @@ mod tests {
             .chain(lines_with(&buffer, "›[x] jdk25"))
             .next()
             .expect("the cursor is on jdk25");
-        assert!(column_of(&buffer, cursor, "create-time only").is_none());
-        let marked: Vec<(u16, u16)> = lines_with(&buffer, "create-time only")
+        assert!(column_of(&buffer, cursor, "needs a rebuild").is_none());
+        let marked: Vec<(u16, u16)> = lines_with(&buffer, "needs a rebuild")
             .into_iter()
             .filter(|(_, y)| column_of(&buffer, *y, "] ").is_some())
             .collect();
@@ -3943,7 +4115,7 @@ mod tests {
                 theme::agent_color(&sb.agent),
                 "{width}"
             );
-            let fixed = "fixed — create a new sandbox to change it";
+            let fixed = "a new sandbox can run another agent";
             let (_, at) = lines_with(&buffer, fixed)
                 .first()
                 .copied()
@@ -4034,7 +4206,10 @@ mod tests {
             lines[2].starts_with("  3 Harness     Claude Code"),
             "{lines:?}"
         );
-        assert!(lines[3].starts_with("  4 Models      default"), "{lines:?}");
+        assert!(
+            lines[3].starts_with("  4 Models      the agent picks"),
+            "{lines:?}"
+        );
         assert!(lines[4].starts_with("  5 Kits        none"), "{lines:?}");
         assert!(lines[5].starts_with("  6 Label       "), "{lines:?}");
         assert!(
@@ -4141,6 +4316,9 @@ mod tests {
         for (step, row) in rows {
             wizard_at(&mut app, step, 0);
             if let Screen::Create(form) = &mut app.screen {
+                if let WizardRow::Field(field) = row {
+                    form.reveal(field);
+                }
                 assert!(form.focus_wizard_row(&app.catalog, row), "{row:?}");
             }
             for width in [60, 80, 110] {
@@ -4188,6 +4366,8 @@ mod tests {
                     "repo skills",
                     "secrets",
                     "skills",
+                    "folders",
+                    "settings",
                     "prune",
                     "port",
                     "keep running",
@@ -4214,6 +4394,7 @@ mod tests {
         let screen = super::tests_support::render_at(&mut app, 240, 30);
         assert!(screen.lines().last().unwrap().contains("q quit"));
         assert!(screen.lines().last().unwrap().contains("/ find"));
+        assert!(screen.lines().last().unwrap().contains("T settings"));
     }
 
     fn type_keys(app: &mut App, text: &str) {
@@ -4458,8 +4639,8 @@ mod tests {
         focus_row(&mut app, CreateRow::Name);
         let screen = super::tests_support::render_at(&mut app, 110, 40);
         assert!(
-            screen.contains("label         Claude Code LiteLLM   generated"),
-            "{screen}"
+            screen.contains("label         Claude Code · LiteLLM acme   generated"),
+            "the agent, its provider and how it signs in: {screen}"
         );
         for c in "api".chars() {
             app.on_key(KeyEvent::from(KeyCode::Char(c)));
@@ -4479,7 +4660,7 @@ mod tests {
             buffer[(x + 16, y)].fg
         };
         assert_eq!(value("Kits"), theme::MUTED, "nothing ticked");
-        assert_eq!(value("Ports"), theme::MUTED, "nothing typed");
+        assert_eq!(value("Clone mode"), theme::MUTED, "left off");
         assert_ne!(value("Harness"), theme::MUTED, "what the sandbox is");
         assert_ne!(value("Label"), theme::MUTED, "what the sandbox is called");
 
@@ -4489,6 +4670,31 @@ mod tests {
             panic!("the wizard is open")
         };
         assert_eq!(form.wizard_step(), CreateStep::Kits);
+
+        open_wizard(&mut app, CreateStep::Review);
+        let at = |app: &App| match &app.screen {
+            Screen::Create(form) => form.wizard_rows(&app.catalog)[form.wizard_focus()],
+            _ => unreachable!("the wizard is open"),
+        };
+        assert_eq!(at(&app), WizardRow::CreateStart);
+        app.on_key(KeyEvent::from(KeyCode::Up));
+        assert_eq!(at(&app), WizardRow::Edit(CreateStep::Workspace));
+        let buffer = buffer_at(&mut app, 110, 40);
+        for label in ["Label", "Starts in", "Clone mode"] {
+            let (_, y) = lines_with(&buffer, &format!(" {label:<15}"))[0];
+            assert_eq!(buffer[(30, y)].bg, theme::selected().bg.unwrap(), "{label}");
+        }
+        let (_, y) = lines_with(&buffer, " Kits           ")[0];
+        assert_ne!(
+            buffer[(30, y)].bg,
+            theme::selected().bg.unwrap(),
+            "another step"
+        );
+        app.on_key(KeyEvent::from(KeyCode::Enter));
+        let Screen::Create(form) = &app.screen else {
+            panic!("the wizard is open")
+        };
+        assert_eq!(form.wizard_step(), CreateStep::Workspace);
     }
 
     #[test]
@@ -4520,6 +4726,7 @@ mod tests {
             RepoView {
                 id: r.into(),
                 source: "o/r".into(),
+                git_ref: None,
                 commit: Some("0123456789abcdef".into()),
                 problem: None,
                 skills: vec!["alpha".into(), "beta".into()],
@@ -4528,6 +4735,7 @@ mod tests {
             RepoView {
                 id: s.into(),
                 source: "o/s".into(),
+                git_ref: None,
                 commit: None,
                 problem: Some(format!(
                     "{s} has no cache git can read; run `aisbx skill-repo fetch {s}`"
@@ -4563,9 +4771,13 @@ mod tests {
         assert!(screen.contains("Repo skills · box"), "{screen}");
         assert!(line_of(&screen, "[x] alpha").contains("global"), "{screen}");
         assert!(!line_of(&screen, "[x] beta").contains("global"), "{screen}");
-        assert!(line_of(&screen, s).contains("not fetched"), "{screen}");
+        assert!(line_of(&screen, "o/s").contains("not fetched"), "{screen}");
+        assert!(!screen.contains(s), "no cache id: {screen}");
         assert!(screen.contains("aisbx skill-repo fetch"), "{screen}");
-        assert!(screen.contains("skipped: bad-name"), "{screen}");
+        assert!(
+            screen.contains("Bad_x is not offered: its name is not a valid skill name"),
+            "{screen}"
+        );
         for text in ["Sync now", "Save", "Close", "space tick"] {
             assert!(screen.contains(text), "{text}:\n{screen}");
         }
@@ -4577,7 +4789,10 @@ mod tests {
         ));
         let screen = super::tests_support::render_at(&mut app, 110, 40);
         assert!(screen.contains("Repo skills · all sandboxes"), "{screen}");
-        assert!(screen.contains("existing and new"), "{screen}");
+        assert!(
+            screen.contains("every sandbox, at its next start"),
+            "{screen}"
+        );
         assert!(
             !line_of(&screen, "[x] alpha").contains("global"),
             "{screen}"
@@ -4657,24 +4872,24 @@ mod connect_render {
 
     const SSH_MISSING: &str = "\
 Connect to box
- SSH endpoint
-    box.sbx   stopped — connecting starts it
-      Workspace inside the sandbox: /proj
-      — its host path, not ~/workspace. Point the app's folder picker there.
+ SSH host
+    box.sbx   stopped: connecting starts it
 
-      ⚠ `sbx setup ssh` has not written its block to ~/.ssh/config yet, so
-        nothing below can connect.
+      ⚠ SSH is not set up yet, so no app can connect.
  › Set up SSH now
 
  Connect with
-    Terminal (ssh)   ↵ launches it
-    VS Code   ↵ launches it
-    Cursor   ↵ launches it
-    IntelliJ IDEA / JetBrains   set up inside the app — steps below
-    Claude Desktop   set up inside the app — steps below
+    Terminal (ssh)
+    VS Code
+    Cursor
+    IntelliJ IDEA / JetBrains   set up in the app
+    Claude Desktop   set up in the app
  ─ Set up SSH now ─────────────────────────────────────────────────────────────────────────────────────────
- Adds one managed `Host *.sbx` block. Idempotent, and needs no SSH key —
- the connection rides the daemon's socket and your Docker login.
+ Adds the sandboxes to your SSH settings (~/.ssh/config), once for all.
+ You need no SSH key.
+
+
+
 
 
 
@@ -4686,23 +4901,23 @@ Connect to box
 
     const VS_CODE_FOCUSED: &str = "\
 Connect to box
- SSH endpoint
+ SSH host
     box.sbx   running
-      Workspace inside the sandbox: /proj
-      — its host path, not ~/workspace. Point the app's folder picker there.
 
  Connect with
-    Terminal (ssh)   ↵ launches it
- ›  VS Code   ↵ launches it
-    Cursor   ↵ launches it
-    IntelliJ IDEA / JetBrains   set up inside the app — steps below
-    Claude Desktop   set up inside the app — steps below
+    Terminal (ssh)
+ ›  VS Code
+    Cursor
+    IntelliJ IDEA / JetBrains   set up in the app
+    Claude Desktop   set up in the app
  ─ VS Code ────────────────────────────────────────────────────────────────────────────────────────────────
- Needs the Remote - SSH extension (ms-vscode-remote.remote-ssh).
- Runs:  code --remote ssh-remote+box.sbx /proj
- The first connect downloads the VS Code server inside the sandbox.
- ⚠ this sandbox has no remote-dev kit, so the server download is blocked by the network policy. Add it with
- e, then try again.
+ Opens /proj in VS Code. Needs its Remote - SSH extension.
+ The first time, VS Code installs its server in the sandbox.
+ ⚠ This sandbox has no remote-dev kit, so the editor cannot install its server. Add the kit with Edit kits
+ (e), then try again.
+
+
+
 
 
 
@@ -4715,21 +4930,21 @@ Connect to box
 
     const MOUNTLESS: &str = "\
 Connect to bare
- SSH endpoint
-    bare.sbx   stopped — connecting starts it
-      Workspace inside the sandbox: /home/agent/workspace
-      — the image's own working directory: nothing from the host is mounted.
+ SSH host
+    bare.sbx   stopped: connecting starts it
 
  Connect with
- ›  Terminal (ssh)   ↵ launches it
-    VS Code   ↵ launches it
-    Cursor   ↵ launches it
-    IntelliJ IDEA / JetBrains   set up inside the app — steps below
-    Claude Desktop   set up inside the app — steps below
+ ›  Terminal (ssh)
+    VS Code
+    Cursor
+    IntelliJ IDEA / JetBrains   set up in the app
+    Claude Desktop   set up in the app
  ─ Terminal (ssh) ─────────────────────────────────────────────────────────────────────────────────────────
- Runs `ssh bare.sbx` in a terminal, starting in the workspace.
- The workspace is at /home/agent/workspace.
- Also usable as `sftp bare.sbx` and `scp file bare.sbx:/home/agent/workspace`.
+ Opens a shell in the sandbox, in /home/agent/workspace.
+ Or run `ssh bare.sbx` yourself; `scp` and `sftp` work too.
+
+
+
 
 
 

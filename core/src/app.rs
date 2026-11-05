@@ -68,9 +68,8 @@ fn host_home() -> Option<PathBuf> {
 }
 
 /// Why a sandbox whose folder is gone is not rebuilt — see [`App::rebuild_blocker`].
-const WORKSPACE_GONE: &str = "its workspace folder no longer exists on this host, and sbx will \
-     not rebuild a sandbox onto a missing folder — a rebuild removes the old one first, so \
-     restore the folder (or delete the sandbox with d)";
+const WORKSPACE_GONE: &str = "its folder no longer exists on this computer, so it cannot be \
+     rebuilt: restore the folder, or delete the sandbox with d";
 
 const AUTO_REFRESH: Duration = Duration::from_secs(5);
 /// How long the poll runs before the header shows it as a refresh: longer than its interval.
@@ -358,7 +357,6 @@ impl CreateRow {
             CreateRow::Name
                 | CreateRow::TokenName
                 | CreateRow::Token
-                | CreateRow::ExtraFolders
                 | CreateRow::Ports
                 | CreateRow::DenyNetwork
                 | CreateRow::LitellmName
@@ -370,6 +368,22 @@ impl CreateRow {
     /// Does this row hold a secret, drawn masked and passed on stdin only?
     pub fn masked(self) -> bool {
         matches!(self, CreateRow::Token | CreateRow::LitellmKey)
+    }
+
+    /// The fold row this row stands under, if any: the model picks, the config files and the
+    /// options seldom needed are optional, and folded away until asked for.
+    pub fn fold(self) -> Option<CreateRow> {
+        match self {
+            CreateRow::Model(_)
+            | CreateRow::ModelDefault(_)
+            | CreateRow::ModelPick(..)
+            | CreateRow::ModelOn(_) => Some(CreateRow::ModelsFold),
+            CreateRow::ConfigFile(_) => Some(CreateRow::FilesFold),
+            CreateRow::Ports | CreateRow::DenyNetwork | CreateRow::McpNone | CreateRow::Mcp(_) => {
+                Some(CreateRow::AdvancedFold)
+            }
+            _ => None,
+        }
     }
 }
 
@@ -396,6 +410,9 @@ pub enum CreateRow {
     Token,
     /// Fetch the connection's model list again, through its fetcher sandbox.
     ModelsRefresh,
+    /// Shows or hides the optional model picks under it: the agent's slots and the models it is
+    /// offered ([`WizardState::models_open`]).
+    ModelsFold,
     /// One of the agent's model slots ([`Slot::of`]) — the row that opens the list of models
     /// below it.
     Model(Slot),
@@ -405,6 +422,8 @@ pub enum CreateRow {
     ModelPick(Slot, usize),
     /// One of the gateway's models, by index into the catalog: ticked, the agent is offered it.
     ModelOn(usize),
+    /// Shows or hides the config files under it ([`WizardState::files_open`]).
+    FilesFold,
     /// One of the config files the connection writes for the agent
     /// ([`crate::litellm::config_file_names`]): ↵ opens it in an editor.
     ConfigFile(usize),
@@ -412,15 +431,20 @@ pub enum CreateRow {
     Name,
     /// Which folder inside the workspace the agent opens in. Opens the same picker `w` does.
     StartDir,
-    /// More host folders for this sandbox alone, comma-separated, each as sbx takes an extra
-    /// workspace: `PATH[:TARGET][:ro]` ([`crate::folders::extras`]).
-    ExtraFolders,
+    /// One more host folder for this sandbox alone, by index into
+    /// [`WorkspaceAnswers::extra_folders`]: read-only or read-write.
+    Folder(usize),
+    /// Opens a picker for one more host folder ([`CreateRow::Folder`]).
+    FolderAdd,
     Clone,
     /// Mount the workspace's `.git` folder read-only. Only where it has one and clone mode is off.
     GitGuard,
     /// How the host's shared agent-skills store is mounted (`--skills`). Only where sbx mounts it
     /// for the backend's base agent.
     Skills,
+    /// Shows or hides the options seldom needed under it: ports, blocked hosts and the MCP
+    /// servers ([`WizardState::advanced_open`]).
+    AdvancedFold,
     /// Ports to publish while the container is built (`-p`).
     Ports,
     /// Hosts to deny this one sandbox (`--deny-network`).
@@ -498,7 +522,7 @@ impl CreateForm {
                 git_guard: false,
                 git_offered: false,
                 folders: Default::default(),
-                extra_folders: TextInput::default(),
+                extra_folders: Vec::new(),
                 skills: skills_default,
                 ports: TextInput::default(),
                 deny_network: TextInput::default(),
@@ -651,6 +675,7 @@ impl CreateForm {
         if let Some(agent) = self.models_agent(catalog) {
             rows.push(CreateRow::ModelsRefresh);
             if self.models_offered(catalog) {
+                rows.push(CreateRow::ModelsFold);
                 rows.extend(model_rows(
                     Slot::of(agent),
                     self.connection.model_pick,
@@ -659,20 +684,22 @@ impl CreateForm {
                     CreateRow::ModelDefault,
                     CreateRow::ModelPick,
                 ));
+                rows.extend((0..catalog.models.len()).map(CreateRow::ModelOn));
             }
             let conn = self.connection.litellm.as_deref().unwrap_or_default();
             let files = crate::litellm::config_file_names(conn, agent).len();
-            rows.extend((0..files).map(CreateRow::ConfigFile));
-            if self.models_offered(catalog) {
-                rows.extend((0..catalog.models.len()).map(CreateRow::ModelOn));
+            if files > 0 {
+                rows.push(CreateRow::FilesFold);
             }
+            rows.extend((0..files).map(CreateRow::ConfigFile));
         }
         rows.extend(self.addon_order(catalog).into_iter().map(CreateRow::Addon));
         rows.push(CreateRow::Name);
         if self.start_dir_offered(catalog) {
             rows.push(CreateRow::StartDir);
         }
-        rows.push(CreateRow::ExtraFolders);
+        rows.extend((0..self.workspace.extra_folders.len()).map(CreateRow::Folder));
+        rows.push(CreateRow::FolderAdd);
         rows.push(CreateRow::Clone);
         if self.git_guard_offered() {
             rows.push(CreateRow::GitGuard);
@@ -680,11 +707,46 @@ impl CreateForm {
         if self.skills_offered(catalog) {
             rows.push(CreateRow::Skills);
         }
+        rows.push(CreateRow::AdvancedFold);
         rows.push(CreateRow::Ports);
         rows.push(CreateRow::DenyNetwork);
         rows.push(CreateRow::McpNone);
         rows.extend((0..self.workspace.mcp.len()).map(CreateRow::Mcp));
         rows
+    }
+
+    /// Is `row` on screen, or folded away under [`CreateRow::ModelsFold`], [`CreateRow::FilesFold`]
+    /// or [`CreateRow::AdvancedFold`]? A folded row still holds its answer, and is still checked.
+    pub fn row_shown(&self, row: CreateRow) -> bool {
+        row.fold().is_none_or(|fold| self.fold_open(fold))
+    }
+
+    /// Whether the fold row `fold` shows the rows under it.
+    pub fn fold_open(&self, fold: CreateRow) -> bool {
+        match fold {
+            CreateRow::ModelsFold => self.wizard.models_open,
+            CreateRow::FilesFold => self.wizard.files_open,
+            CreateRow::AdvancedFold => self.wizard.advanced_open,
+            _ => true,
+        }
+    }
+
+    /// Show or hide the rows under the fold row `fold`.
+    pub(crate) fn set_fold(&mut self, fold: CreateRow, open: bool) {
+        let wizard = &mut self.wizard;
+        match fold {
+            CreateRow::ModelsFold => wizard.models_open = open,
+            CreateRow::FilesFold => wizard.files_open = open,
+            CreateRow::AdvancedFold => wizard.advanced_open = open,
+            _ => {}
+        }
+    }
+
+    /// Open the fold that hides `row`, if one does: a refused answer must be on screen.
+    pub fn reveal(&mut self, row: CreateRow) {
+        if let Some(fold) = row.fold() {
+            self.set_fold(fold, true);
+        }
     }
 
     /// The order the addon rows are offered in: the host-cache kits first (the form's *Host
@@ -775,8 +837,29 @@ impl CreateForm {
             return;
         };
         let backend = backend.kit.name.clone();
-        let label = model::auto_label(catalog, &backend, &self.selected_addons(catalog));
-        self.workspace.name.set(label);
+        let account = self.label_account(catalog);
+        let addons = self.selected_addons(catalog);
+        let label = model::auto_label(catalog, &backend, account.as_deref(), &addons);
+        if label != self.workspace.name.value {
+            self.workspace.name.set(label);
+        }
+    }
+
+    /// How the sandbox signs in, as its generated label names it ([`model::label_account`]): the
+    /// `/login`, the token picked or named, or the connection picked or typed.
+    pub fn label_account(&self, catalog: &Catalog) -> Option<String> {
+        let backend = self.effective_backend(catalog)?;
+        let token = match &self.connection.account {
+            AccountChoice::Named(name) => Some(name.as_str()),
+            AccountChoice::New => Some(self.connection.token_name.value.as_str()),
+            AccountChoice::Login => None,
+        };
+        let typed = self.connection.new_conn.name.value.trim();
+        let connection = match self.connection.litellm.as_deref() {
+            Some(name) => Some(name),
+            None => crate::litellm::valid_name(typed).then_some(typed),
+        };
+        model::label_account(backend, token, connection)
     }
 }
 
@@ -877,26 +960,26 @@ pub struct AuthForm {
 
 /// What `sbx rm` leaves of a v3 sandbox: its kit volumes, keyed on the sandbox's name and kit
 /// folder.
-const VOLUMES_STAY: &str = "The agent's session history stays in sbx's kit volumes and comes back \
-     to a sandbox created under this name from the same kit; no sbx command deletes them.";
+const VOLUMES_STAY: &str =
+    "The agent's earlier sessions stay, and come back to a new sandbox of the \
+     same name and kit.";
 
 /// What `sbx rm` leaves of a sandbox whose kit volumes are in RAM (`aisbx up --tmpfs-volumes`,
 /// [`crate::tmpfs`]): nothing, since a tmpfs volume never was on disk.
-const VOLUMES_IN_RAM: &str = "Its kit volumes are in RAM (aisbx up --tmpfs-volumes): the agent's \
-     session history goes with it, and nothing of it stays on disk.";
+const VOLUMES_IN_RAM: &str = "The agent's earlier sessions go with it: its volumes are in RAM.";
 
 /// Where the session history goes when an account change rebuilds a sandbox whose kit volumes are
 /// in RAM (`aisbx up --tmpfs-volumes`): nowhere, and the rebuild keeps the volumes in RAM.
-const SWITCH_IN_RAM: &str = "Its kit volumes are in RAM, so the session history is lost; the new \
-     container's volumes are in RAM again.";
+const SWITCH_IN_RAM: &str = "The agent's earlier sessions are lost: its volumes are in RAM.";
 
 /// What a rebuild onto the other account's kit costs, besides the container's contents.
-const SWITCH_KIT_LOSES: &str = "Everything installed inside the container is lost.";
+const SWITCH_KIT_LOSES: &str = "What you installed in the sandbox is lost.";
 
 /// Where the session history goes when an account change swaps the workload. sbx keys a kit
 /// volume on the sandbox's name and the kit folder.
-const SWITCH_KIT_HISTORY: &str = "The session history stays in the old kit's volumes: the other \
-     kit starts without it, and gets it back if the sandbox is switched back.";
+const SWITCH_KIT_HISTORY: &str =
+    "The agent's earlier sessions stay with the old account, and come \
+     back if you switch back.";
 
 impl AuthForm {
     /// Apply and Cancel, drawn as one line of buttons: the block ←→ moves within and ↑↓ step
@@ -974,44 +1057,42 @@ impl AuthForm {
         if self.needs_recreate() {
             return match (self.account.on_token(), self.current.on_token(), self.ram_volumes) {
                 (true, false, false) => &[
-                    "Applying this rebuilds the sandbox on the claude-token kit, which declares no",
-                    "credential — that is what lets the token reach Anthropic. The session history",
-                    "stays with the /login kit's volumes; the workspace is untouched.",
+                    "Applying this rebuilds the sandbox. Your files stay; the agent's earlier",
+                    "sessions stay with /login and come back if you switch back.",
                 ],
-                (true, false, true) => &[
-                    "Applying this rebuilds the sandbox on the claude-token kit, which declares no",
-                    "credential - that is what lets the token reach Anthropic. Its kit volumes are",
-                    "in RAM, so the session history is lost; the workspace is untouched.",
+                (true, false, true) | (false, _, true) | (true, true, true) => &[
+                    "Applying this rebuilds the sandbox. Your files stay; the agent's earlier",
+                    "sessions are lost.",
                 ],
                 (false, _, false) => &[
-                    "Applying this rebuilds the sandbox on the claude-anthropic kit and drops its token",
-                    "wiring. It then shares the host-global /login with every other such sandbox.",
-                    "The session history stays with the token kit's volumes; the workspace is untouched.",
-                ],
-                (false, _, true) => &[
-                    "Applying this rebuilds the sandbox on the claude-anthropic kit and drops its token",
-                    "wiring. It then shares the host-global /login with every other such sandbox.",
-                    "Its kit volumes are in RAM, so the session history is lost; the workspace is",
-                    "untouched.",
+                    "Applying this rebuilds the sandbox on /login, which every /login sandbox shares.",
+                    "Your files stay; the agent's earlier sessions stay with the token.",
                 ],
                 (true, true, false) => &[
-                    "The placeholder a container sends is baked in when sbx builds it, so moving this",
-                    "sandbox to another token rebuilds it. The session history stays in its volumes;",
-                    "the workspace is untouched.",
-                ],
-                (true, true, true) => &[
-                    "The placeholder a container sends is baked in when sbx builds it, so moving this",
-                    "sandbox to another token rebuilds it. Its kit volumes are in RAM, so the session",
-                    "history is lost; the workspace is untouched.",
+                    "Applying this rebuilds the sandbox on the other token. Your files and the agent's",
+                    "earlier sessions stay.",
                 ],
             };
         }
-        &[
-            "Applying this stores the token against the placeholder the container already carries,",
-            "so it takes effect on the next request — nothing is rebuilt and no history is lost.",
-        ]
+        &["Applying this stores the token. It works at once; nothing is rebuilt."]
     }
 }
+
+/// The skills screen's line on who gets its changes: the sandboxes that share the store.
+pub fn skills_shared_line(sharers: usize) -> String {
+    match sharers {
+        0 => "Shared with every new sandbox that gets the skills; none here yet.".into(),
+        1 => "Shared with 1 sandbox here: it gets a change at its next session.".into(),
+        n => format!("Shared with {n} sandboxes here: they get a change at their next session."),
+    }
+}
+
+/// The secrets screen's heading over the MCP servers' own secrets, which no sandbox sees.
+pub const MCP_SECRETS: &str = "MCP servers' secrets";
+
+/// The secrets screen's line over its rows: where the values are, and who sees them.
+pub const SECRETS_NOTE: &str =
+    "Stored on this computer and shown masked. A sandbox never sees them: sbx puts them into its      requests on the way out.";
 
 /// A focusable line on the secrets screen — one stored credential, or the button that closes it.
 /// Derived from `sbx secret ls` and the kit catalog on every render, not held in the form.
@@ -1216,55 +1297,45 @@ impl FoldersForm {
         rows[self.focus.min(rows.len() - 1)]
     }
 
-    /// What `row` is about, for the TUI's help strip and the GUI's tooltip.
+    /// What `row` is about, for the TUI's help strip and the GUI's tooltip; no text where the
+    /// row's label says it.
     pub fn help(&self, row: FoldersRow) -> crate::create::Help {
         use crate::create::Help;
+        use crate::folders::Access;
+        let said = |access: Access| {
+            let mut label = access.label().to_string();
+            label[..1].make_ascii_uppercase();
+            format!("{label}: {}.", access.meaning())
+        };
         match row {
             FoldersRow::Folder(i) => match self.folders.get(i) {
-                Some(f) => Help::new(
-                    f.path.display().to_string(),
-                    format!(
-                        "Mounted {} in every sandbox from its next create or rebuild. Edit puts \
-                         it in the fields below; Delete drops it from the list.",
-                        f.access.label()
-                    ),
-                ),
+                Some(f) => Help::new(f.path.display().to_string(), said(f.access)),
                 None => Help::new("", ""),
             },
             FoldersRow::Path => Help::new(
                 "folder",
-                "An absolute host path; ~ is your home folder. Never your home folder itself, a \
-                 folder above it or one that holds credentials.",
+                "A folder on this computer, such as ~/notes. Not your home folder, a folder above \
+                 it, or a folder with credentials.",
             ),
-            FoldersRow::Browse => Help::new(
-                "browse",
-                "Pick the folder on the host instead of typing it: ↵ or → goes into a folder, \
-                 ← comes back out, Use puts it in the field above.",
-            ),
+            FoldersRow::Browse => Help::new("browse", "Pick the folder instead of typing it."),
             FoldersRow::Access => Help::new(
                 "access",
-                "Read-only: nothing in the sandbox can change it, not even with sudo. \
-                 Read-write: the agent can change and delete what is in it.",
+                format!("{} {}", said(Access::Read), said(Access::Write)),
             ),
             FoldersRow::Purpose => Help::new(
                 "purpose",
-                "What the folder is for, in one line. The agent's instructions list it with the \
-                 folder's path, so the agent knows where to look.",
+                "One line on what the folder holds. The agent reads it, so it knows where to \
+                 look.",
             ),
-            FoldersRow::Save => Help::new(
-                "Save",
-                "Adds the folder, or changes the one being edited. Running sandboxes get it at \
-                 their next rebuild.",
-            ),
-            FoldersRow::Close => Help::new("Close", "Back to the list of sandboxes."),
+            FoldersRow::Save => Help::new("Save", ""),
+            FoldersRow::Close => Help::new("Close", ""),
         }
     }
 }
 
 /// What the host folders screen says under its title.
-pub const FOLDERS_NOTE: &str = "Every sandbox mounts these folders beside its workspace, from its \
-     next create or rebuild, as it mounts the repos its workspace's companion.json names. The \
-     agent's instructions list each with its purpose.";
+pub const FOLDERS_NOTE: &str = "Every sandbox mounts these folders too, from its next create or \
+     rebuild. The agent learns what each folder is for.";
 
 /// A focusable line in the `A` form of a LiteLLM sandbox.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1449,12 +1520,11 @@ pub const SETTINGS: [SettingSpec; 4] = [
         label: "telemetry",
         words: ["off", "on"],
         meanings: [
-            "sbx's CLI and daemon send no usage data to Docker; set on this host",
-            "sbx's CLI and daemon send usage data to Docker; sbx's default",
+            "sbx sends no usage data to Docker",
+            "sbx sends usage data to Docker; sbx's default",
         ],
-        note: "Stored with `sbx settings set telemetry.disabled true|false`. A running daemon follows \
-               after `sbx daemon restart`. `SBX_NO_TELEMETRY=1` in sbx's environment turns it off as \
-               well.",
+        note: "When on, sbx sends usage data to Docker. Otherwise, it sends none. A change takes \
+               effect after `sbx daemon restart`.",
         cautious: Some(true),
     },
     SettingSpec {
@@ -1462,12 +1532,12 @@ pub const SETTINGS: [SettingSpec; 4] = [
         label: "clipboard copy",
         words: ["on", "off"],
         meanings: [
-            "any process in a sandbox may copy text to the host clipboard",
-            "nothing in a sandbox writes to the host clipboard; sbx's default",
+            "a sandbox can copy text to your clipboard",
+            "a sandbox cannot copy to your clipboard; sbx's default",
         ],
-        note: "Stored with `sbx settings set clipboard.textCopy true|false`, for every sandbox on this \
-               host. On, an agent's copy reaches your clipboard, and so does anything else a sandbox \
-               copies.",
+        note:
+            "When on, the agent can copy text to your clipboard, and so can anything else in any \
+               sandbox. Otherwise, nothing in a sandbox reaches your clipboard.",
         cautious: Some(false),
     },
     SettingSpec {
@@ -1475,12 +1545,12 @@ pub const SETTINGS: [SettingSpec; 4] = [
         label: "image paste",
         words: ["on", "off"],
         meanings: [
-            "Ctrl+V pastes images from the host clipboard into the agent",
-            "agents read no images from the host clipboard; sbx's default",
+            "Ctrl+V pastes images from your clipboard into the agent",
+            "the agent cannot read images from your clipboard; sbx's default",
         ],
-        note: "Stored with `sbx settings set clipboard.imagePaste true|false`, for every sandbox on this \
-               host; running sandboxes follow within seconds. On, a process in a sandbox can read the \
-               image on your clipboard when you paste.",
+        note:
+            "When on, Ctrl+V pastes the image on your clipboard into the agent, in every sandbox. \
+               Otherwise, no sandbox can read the images on your clipboard.",
         cautious: Some(false),
     },
     SettingSpec {
@@ -1488,13 +1558,13 @@ pub const SETTINGS: [SettingSpec; 4] = [
         label: "FUSE",
         words: ["on", "off"],
         meanings: [
-            "new sandboxes can mount FUSE (/dev/fuse, SYS_ADMIN); sbx's default",
-            "new sandboxes get no /dev/fuse, and root in them cannot mount",
+            "new sandboxes can mount FUSE file systems; sbx's default",
+            "new sandboxes cannot mount file systems",
         ],
-        note: "Stored with `sbx settings set sandbox.fuse true|false`. It reaches only sandboxes \
-               created after the change: an existing one keeps what it was created with, also after a \
-               restart, until a rebuild creates it again. Off, the host-npm and host-pip addons cannot \
-               mount the host's package caches in a new sandbox.",
+        note:
+            "When on, new sandboxes can mount FUSE file systems. Otherwise, they cannot, and the \
+               host-npm and host-pip kits cannot use your package caches. It applies to sandboxes \
+               created after the change.",
         cautious: None,
     },
 ];
@@ -1627,8 +1697,7 @@ impl SettingsForm {
 }
 
 /// Under *Close*: what the settings are.
-pub const SETTINGS_NOTE: &str =
-    "These are sbx's own settings for this host: every sandbox follows them.";
+pub const SETTINGS_NOTE: &str = "sbx's settings for this computer: every sandbox follows them.";
 
 /// The secrets screen holds nothing but the cursor: every row on it is read from the host.
 #[derive(Debug, Clone, Default)]
@@ -1773,12 +1842,9 @@ impl KitsForm {
                     return Help::new("", "");
                 };
                 let cost = match (self.original.get(i), addon.create_time_reason()) {
-                    (Some(true), _) => "On this sandbox now; removing a kit rebuilds it.".into(),
-                    (_, Some(reason)) => format!(
-                        "Create-time only: sbx adds no kit with {reason} to an existing sandbox, \
-                         so adding it rebuilds this one."
-                    ),
-                    (_, None) => "sbx kit add adds it to this sandbox in place.".into(),
+                    (Some(true), _) => "On this sandbox now. Removing it rebuilds the sandbox.",
+                    (_, Some(_)) => crate::create::ONLY_NOW_NOTE,
+                    (_, None) => "It is added without a rebuild.",
                 };
                 let text = format!("{cost} {}", addon.kit.first_sentence());
                 Help::new(addon.kit.name.clone(), text.trim())
@@ -1786,10 +1852,8 @@ impl KitsForm {
             KitsRow::Model(slot) => crate::create::alias_help(slot),
             KitsRow::ModelDefault(slot) => crate::create::default_model_help(slot),
             KitsRow::ModelPick(slot, i) => crate::create::model_pick_help(catalog, slot, i),
-            KitsRow::Apply => Help::new("Apply", "Makes the changes, as the note above says."),
-            KitsRow::Cancel => {
-                Help::new("Cancel", "Closes the editor; the sandbox stays as it is.")
-            }
+            KitsRow::Apply => Help::new("Apply", ""),
+            KitsRow::Cancel => Help::new("Cancel", ""),
         }
     }
 
@@ -1853,9 +1917,8 @@ impl History {
     /// What a rebuild does to it, as one line of a note.
     fn after_rebuild(self) -> &'static str {
         match self {
-            History::Volumes => "The session history stays in its volumes.",
-            History::Ram => "Its kit volumes are in RAM, so the session history is lost.",
-            History::Container => "The agent's session history is lost.",
+            History::Volumes => "The agent's earlier sessions stay.",
+            History::Ram | History::Container => "The agent's earlier sessions are lost.",
         }
     }
 }
@@ -1870,48 +1933,29 @@ impl KitsEffect {
             out
         };
         match self {
-            KitsEffect::Rebuild(RebuildCause::Models) => rebuild(&[
-                "Applying this rebuilds the sandbox: sbx bakes a kit's environment variables",
-                "into the container as it builds it, so changing which models the aliases",
-                "resolve to cannot be done in place.",
-            ]),
+            KitsEffect::Rebuild(RebuildCause::Models) => {
+                rebuild(&["Applying this rebuilds the sandbox: other models need a rebuild."])
+            }
             KitsEffect::Rebuild(RebuildCause::Kits) => rebuild(&[
-                "Applying this rebuilds the sandbox - sbx cannot detach a kit, and the",
-                "read-only cache mounts are fixed at creation. What was installed in the",
-                "container is lost.",
+                "Applying this rebuilds the sandbox, and what you installed in it is lost.",
             ]),
             KitsEffect::Rebuild(RebuildCause::OtherCheckout) => rebuild(&[
                 "Applying this rebuilds the sandbox: its kits come from another checkout.",
             ]),
-            KitsEffect::KitAddRefused(field) => vec![
-                format!(
-                    "Applying this tries `sbx kit add` first. sbx adds no kit with {field} \
-                     to a live sandbox"
-                ),
-                "(network rules only after a terminal prompt), so expect it to fail and offer"
+            KitsEffect::KitAddRefused(_) => vec![
+                "Applying this tries to add the kits without a rebuild. That will likely fail and"
                     .into(),
-                match history {
-                    History::Volumes => "a rebuild - the session history stays in its volumes.",
-                    History::Ram => {
-                        "a rebuild, which loses the session history: its kit volumes are in RAM."
-                    }
-                    History::Container => "a rebuild, which loses the session history.",
-                }
-                .into(),
+                "offer a rebuild instead.".into(),
+                history.after_rebuild().into(),
             ],
             KitsEffect::KitAdd => match history {
                 History::Ram => vec![
-                    "Applying this runs `sbx kit add`, which recreates the container in place: the"
-                        .into(),
-                    "workspace and what was installed survive, but its kit volumes are in RAM, so"
-                        .into(),
-                    "the session history is lost.".into(),
+                    "Applying this adds the kits without a rebuild. Your files and what you".into(),
+                    "installed stay; the agent's earlier sessions are lost.".into(),
                 ],
                 _ => vec![
-                    "Applying this runs `sbx kit add`, which recreates the container in place:"
-                        .into(),
-                    "kit volumes, session history, the workspace and what was installed survive."
-                        .into(),
+                    "Applying this adds the kits without a rebuild. Your files, the agent's".into(),
+                    "sessions and what you installed stay.".into(),
                 ],
             },
             KitsEffect::NoChanges => vec!["No changes.".into()],
@@ -2028,10 +2072,8 @@ pub struct ConnectView {
     pub label: String,
     /// The SSH host ([`sbx::ssh_host`]).
     pub host: String,
-    /// *running*, or *stopped — connecting starts it*.
+    /// *running*, or *stopped: connecting starts it*.
     pub state: &'static str,
-    /// Where the workspace is inside the sandbox, then what that path is.
-    pub workspace: [String; 2],
     /// `sbx setup ssh` has not written its block yet: the warning and the setup row's note say so.
     pub ssh_missing: bool,
     pub ssh_warning: Vec<String>,
@@ -2039,6 +2081,18 @@ pub struct ConnectView {
     /// One per [`crate::remote::Target::ALL`] entry, in that order.
     pub targets: Vec<TargetView>,
 }
+
+/// Why a request waits, as the approvals screens say it: sbx's default deny in words, an
+/// organization's reason as sbx gives it.
+pub fn approval_reason(request: &sbx::Approval) -> String {
+    match request.default_deny() {
+        true => NO_RULE_YET.to_string(),
+        false => request.reason(),
+    }
+}
+
+/// What a request held by sbx's default deny says.
+pub const NO_RULE_YET: &str = "no rule allows it yet";
 
 /// A row on the start-folder picker.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2083,6 +2137,9 @@ pub enum StartDirTarget {
     /// The host folders screen, whose Path field takes the pick. The form travels inside, as
     /// for `New`.
     HostFolder(Box<FoldersForm>),
+    /// One more host folder for the create form ([`CreateRow::Folder`]), which travels inside,
+    /// as for `New`.
+    Folder(Box<CreateForm>),
 }
 
 impl StartDirForm {
@@ -2091,7 +2148,7 @@ impl StartDirForm {
     pub fn buttons(&self) -> usize {
         match self.target {
             StartDirTarget::Sandbox(_) => 3,
-            StartDirTarget::New(_) | StartDirTarget::HostFolder(_) => 2,
+            StartDirTarget::New(_) | StartDirTarget::HostFolder(_) | StartDirTarget::Folder(_) => 2,
         }
     }
 
@@ -2367,11 +2424,11 @@ pub struct Registered {
     pub clone: bool,
     /// How the shared agent-skills store is mounted. `None` on a backend that mounts no store.
     pub skills: Option<crate::sbx::SkillsMode>,
-    /// Where the agent opens, relative to the workspace; `None` is its root.
+    /// Where the agent starts, relative to the workspace; `None` is its root.
     pub start_dir: Option<PathBuf>,
     /// The MCP servers the sandbox was created with (`--static-mcp`).
     pub static_mcp: Vec<String>,
-    /// The host folders typed for this sandbox alone, as `sbx create` took them
+    /// The host folders picked for this sandbox alone, as `sbx create` took them
     /// ([`folders::Folder::sbx_spec`]).
     pub extra_folders: Vec<String>,
 }
@@ -2867,7 +2924,9 @@ impl App {
         let refused = CreateStep::ALL
             .into_iter()
             .find(|step| form.step_problem(*step, &catalog).is_some());
+        form.wizard.prefilled = true;
         form.wizard_set_step(&catalog, refused.unwrap_or(CreateStep::Review));
+        self.set_info(crate::create::PREFILLED);
     }
 
     /// Put the models of a connection on offer for pinning — the list a sandbox on it harvested
@@ -3799,7 +3858,9 @@ impl App {
         let focus = form.wizard_focus().min(rows.len().saturating_sub(1));
         matches!(
             rows.get(focus),
-            Some(WizardRow::Field(CreateRow::Skills | CreateRow::LitellmConn))
+            Some(WizardRow::Field(
+                CreateRow::Skills | CreateRow::LitellmConn | CreateRow::Folder(_)
+            ))
         )
     }
 
@@ -4249,54 +4310,46 @@ impl App {
         let note = |text: &str| vec![text.to_string()];
         match row {
             SecretRow::Connection(_) => vec![
-                "A LiteLLM gateway: its URL in connection.json, the key here. Every sandbox on it \
-                 reads the models itself and sends only a placeholder, which the proxy swaps."
+                "A LiteLLM gateway: its address and its key. Every sandbox on it reads the \
+                 gateway's models itself; none sees the key."
                     .into(),
-                "Edit changes its URL or key, Delete removes both; New connection adds another — \
-                 or `aisbx litellm add` / `rm`."
+                "Edit changes its address or key, Delete removes both; New connection adds \
+                 another."
                     .into(),
             ],
             SecretRow::LitellmOrphan(_) => note(
-                "A LiteLLM key with no connection: stored for a new connection whose file was \
-                 never written, or removed by hand. Delete removes it.",
+                "A LiteLLM key with no connection: its connection was never saved, or was removed \
+                 by hand. Delete removes it.",
             ),
             SecretRow::Oauth => note(
-                "One account for the whole machine: sbx keeps it on the host and seeds every \
-                 /login sandbox from it. It cannot be stored here — sign in with /login inside a \
-                 sandbox. Deleting it signs out, and whichever account signs in next is theirs.",
+                "One account for every /login sandbox. Sign in with /login inside a sandbox; it \
+                 cannot be stored here. Delete signs every /login sandbox out.",
             ),
             SecretRow::AgyLogin => note(
-                "One Google account for the whole machine: sbx keeps it on the host and every agy \
-                 sandbox starts signed in from it. It cannot be stored here — sign in inside an \
-                 agy sandbox (the first interactive start asks to bind the credential). Deleting \
-                 it signs out, and whichever account signs in next is theirs. sbx does not list \
-                 it: this row reads it off the agy sandboxes' auth mode. A sandbox built before \
-                 this needs a rebuild (R) to share it.",
+                "One Google account for every agy sandbox. Sign in inside an agy sandbox; it cannot \
+                 be stored here. Delete signs every agy sandbox out. A sandbox made before needs \
+                 a rebuild (R) to share it.",
             ),
             SecretRow::Token(token) => vec![format!(
-                "Stored once for this host. Every sandbox carrying the token-{token} kit \
-                 authenticates as it. Replace rotates the value for all of them at once, with \
-                 nothing rebuilt; Delete removes the account itself and leaves them with \
-                 “⚠ no token”."
+                "Every sandbox on the token “{token}” signs in with it. Replace changes it for all \
+                 of them, with nothing rebuilt; Delete leaves them with no token."
             )],
             // The MCP gateway's, never injected.
             SecretRow::Service { name, .. } if sbx::mcp_secret(name).is_some() => {
                 let mcp = sbx::mcp_secret(name).expect("matched above");
-                let own = format!(
-                    "The MCP gateway's own credential for the “{}” server, used on the host and \
-                     never injected into a sandbox.",
-                    mcp.server
-                );
                 vec![
-                    format!("{own} Store or Replace writes it; Delete removes it."),
-                    "Restart the sandbox (or sandboxd) after a change: an existing gateway \
-                     connection keeps the value it started with."
+                    format!(
+                        "The secret of the MCP server “{}”. No sandbox sees it. Store or Replace \
+                         writes it; Delete removes it.",
+                        mcp.server
+                    ),
+                    "Restart the sandbox after a change: it keeps the value it started with."
                         .into(),
                 ]
             }
             SecretRow::Service { name, scope: None } => vec![format!(
-                "Store or Replace writes it; Delete removes it. The change reaches sandboxes that \
-                 already use it on their next request — {}.",
+                "Store or Replace writes it; Delete removes it. A sandbox that uses it gets the \
+                 change at once — {}.",
                 match self.service_users(name) {
                     0 => "no sandbox here does yet".to_string(),
                     n => format!("{n} here, with nothing rebuilt"),
@@ -4306,8 +4359,8 @@ impl App {
                 scope: Some(sandbox),
                 ..
             } => vec![format!(
-                "Stored for {sandbox} alone, so it shadows the global secret of the same name \
-                 for that one sandbox. Replace and Delete apply on its next request."
+                "Stored for {sandbox} alone: it replaces the secret of the same name for that one \
+                 sandbox. Replace and Delete apply at once."
             )],
             SecretRow::Close => Vec::new(),
         }
@@ -4319,10 +4372,8 @@ impl App {
             SecretRow::Oauth | SecretRow::Token(_) => Some("Anthropic subscription"),
             SecretRow::AgyLogin => Some("Antigravity (agy) — Google account"),
             SecretRow::Connection(_) | SecretRow::LitellmOrphan(_) => Some("LiteLLM connections"),
-            SecretRow::Service { name, .. } if sbx::mcp_secret(name).is_some() => {
-                Some("MCP gateway — held on the host, never injected")
-            }
-            SecretRow::Service { .. } => Some("Service tokens — the kits' `credentials:`"),
+            SecretRow::Service { name, .. } if sbx::mcp_secret(name).is_some() => Some(MCP_SECRETS),
+            SecretRow::Service { .. } => Some("Service tokens"),
             SecretRow::Close => None,
         }
     }
@@ -4777,10 +4828,17 @@ impl App {
             let effect = form.field_key(&catalog, field, key);
             if field == CreateRow::LitellmConn && effect != FieldEffect::Ignored {
                 self.litellm_picked(before);
+                if effect == FieldEffect::Next {
+                    self.wizard_next();
+                }
                 return;
             }
             match effect {
                 FieldEffect::Ignored => {}
+                FieldEffect::Next => {
+                    self.wizard_next();
+                    return;
+                }
                 // An existing token is the step's answer, like a radio: picked, and on.
                 FieldEffect::Done if key.code == KeyCode::Enter => {
                     if matches!(field, CreateRow::TokenPick(_)) {
@@ -4803,6 +4861,10 @@ impl App {
                 }
                 FieldEffect::ResetConfig(i) => {
                     self.reset_config(i);
+                    return;
+                }
+                FieldEffect::PickFolder => {
+                    self.action_pick_folder();
                     return;
                 }
             }
@@ -4885,6 +4947,7 @@ impl App {
                         self.wizard_back();
                     }
                 }
+                WizardRow::Edit(step) => self.wizard_goto(step),
                 WizardRow::Next => self.wizard_next(),
                 WizardRow::CreateStart => self.wizard_create(true),
                 WizardRow::CreateOnly => self.wizard_create(false),
@@ -5088,8 +5151,9 @@ impl App {
         self.start_job(job);
     }
 
-    /// After every key and click on the create form: open the Models step on the connection's
-    /// saved picks.
+    /// After every key and click on the create form: the generated label follows the answers
+    /// (a token or connection named, typed or picked), and the Models step opens on the
+    /// connection's saved picks.
     fn after_wizard_input(&mut self) {
         if self.modal.is_some() {
             return;
@@ -5098,6 +5162,7 @@ impl App {
         let Screen::Create(form) = &mut self.screen else {
             return;
         };
+        form.refresh_auto_name(&catalog);
         let (Some(agent), Some(conn)) =
             (form.models_agent(&catalog), form.connection.litellm.clone())
         else {
@@ -5465,8 +5530,8 @@ impl App {
             || Refusal::Error("the cursor is on + New sandbox — press ↵ to create one".into());
         let workspace = |sb: &Sandbox| match sb.workspace_missing {
             true => Err(Refusal::Error(format!(
-                "workspace {} no longer exists on this host",
-                sb.workspace.display()
+                "the folder {} no longer exists on this computer",
+                model::tilde(&sb.workspace)
             ))),
             false => Ok(()),
         };
@@ -5888,25 +5953,25 @@ impl App {
         let agent = form.models_agent(&self.catalog);
         let conn = form.connection.litellm.clone().unwrap_or_default();
         let what = match (agent, i) {
-            (Some(Agent::Claude), _) => {
-                "The model picker of Claude Code, merged into its ~/.claude/settings.json before                  each session"
-            }
-            (Some(Agent::Opencode), _) => "OpenCode's config, which OPENCODE_CONFIG names",
+            (Some(Agent::Claude), _) => "Claude Code's model picker, in its settings.json",
+            (Some(Agent::Opencode), _) => "OpenCode's config",
             (Some(Agent::Pi), 0) => "Pi's model list",
             _ => "Pi's settings",
         };
         let harness = form.harness_label(&self.catalog);
         let now = match state {
             FileState::Generated => format!(
-                "aisbx writes it from the models and picks above. ↵ opens it in an editor; a                  change you save replaces it for every {harness} sandbox on {conn}, from its next                  start."
+                "Made from your answers. A change you save goes to every {harness} sandbox on \
+                 {conn}, from its next start."
             ),
             FileState::Edited | FileState::Invalid(_) => format!(
-                "You edited it: every {harness} sandbox on {conn} gets your copy from its next                  start, and the models and picks above no longer change it. ↵ opens it again;                  Delete goes back to the generated file."
+                "Your copy: every {harness} sandbox on {conn} gets it from its next start, and \
+                 your answers no longer change it. Reset goes back to the file made from them."
             ),
         };
         let warn = match state {
             FileState::Invalid(e) => Some(format!(
-                "Your copy is not valid JSON ({e}), so the generated file is used."
+                "Your copy is not valid JSON ({e}), so the file made from your answers is used."
             )),
             _ => None,
         };
@@ -6140,18 +6205,17 @@ impl App {
                     Some(_) => TargetLaunch::NotOnPath(target.launcher().unwrap_or("?")),
                 };
                 let status = match launch {
-                    TargetLaunch::InApp => "set up inside the app — steps below".to_string(),
-                    TargetLaunch::NotOnPath(launcher) => {
-                        format!("`{launcher}` is not on this host's PATH")
-                    }
-                    TargetLaunch::Here => "↵ launches it".to_string(),
+                    TargetLaunch::InApp => "set up in the app".to_string(),
+                    TargetLaunch::NotOnPath(launcher) => format!("`{launcher}` command not found"),
+                    TargetLaunch::Here => String::new(),
                 };
                 let kit_warning = match target.needs_kit() && !has_kit && known_kit {
                     true => vec![
                         format!(
-                            "this sandbox has no {REMOTE_DEV_KIT} kit, so the server download is"
+                            "This sandbox has no {REMOTE_DEV_KIT} kit, so the editor cannot \
+                             install its server."
                         ),
-                        "blocked by the network policy. Add it with e, then try again.".into(),
+                        "Add the kit with Edit kits (e), then try again.".into(),
                     ],
                     false => Vec::new(),
                 };
@@ -6171,33 +6235,17 @@ impl App {
             state: match sb.running {
                 true => "running",
                 // Worth saying: unlike everything else here, connecting has a side effect.
-                false => "stopped — connecting starts it",
+                false => "stopped: connecting starts it",
             },
-            workspace: [
-                format!("Workspace inside the sandbox: {}", workspace.display()),
-                match sb.mountless() {
-                    true => {
-                        "— the image's own working directory: nothing from the host is mounted."
-                    }
-                    false => {
-                        "— its host path, not ~/workspace. Point the app's folder picker there."
-                    }
-                }
-                .to_string(),
-            ],
             ssh_missing: missing,
             ssh_warning: match missing {
-                true => vec![
-                    "`sbx setup ssh` has not written its block to ~/.ssh/config yet, so".into(),
-                    "nothing below can connect.".into(),
-                ],
+                true => vec!["SSH is not set up yet, so no app can connect.".into()],
                 false => Vec::new(),
             },
             ssh_notes: match missing {
                 true => vec![
-                    "Adds one managed `Host *.sbx` block. Idempotent, and needs no SSH key —"
-                        .into(),
-                    "the connection rides the daemon's socket and your Docker login.".into(),
+                    "Adds the sandboxes to your SSH settings (~/.ssh/config), once for all.".into(),
+                    "You need no SSH key.".into(),
                 ],
                 false => Vec::new(),
             },
@@ -6258,7 +6306,7 @@ impl App {
         };
         let name = form.sandbox.clone();
         if !form.ssh_ready {
-            self.set_error("SSH is not set up yet — run `sbx setup ssh` from the row above first");
+            self.set_error("SSH is not set up yet: choose Set up SSH now first");
             return;
         }
         let Some(sb) = self.sandboxes.iter().find(|s| s.name == name) else {
@@ -6268,14 +6316,14 @@ impl App {
         let Some(argv) = target.command(&name, &workspace) else {
             // Gateway and Claude Desktop are configured inside the app; the rows print how.
             self.set_info(format!(
-                "{} connects from inside the app — the steps are under the row",
+                "Set up {} in the app itself, as its steps say",
                 target.title()
             ));
             return;
         };
         if !target.available() {
             self.set_error(format!(
-                "`{}` is not on this host's PATH, so {} cannot be launched from here",
+                "`{}` command not found, so aisbx cannot open {}",
                 target.launcher().unwrap_or("the launcher"),
                 target.title()
             ));
@@ -6335,6 +6383,66 @@ impl App {
         ));
     }
 
+    /// Open the folder picker for one more host folder of the sandbox being created, on the
+    /// folder that holds its workspace.
+    fn action_pick_folder(&mut self) {
+        let Screen::Create(form) = &self.screen else {
+            return;
+        };
+        let workspace = form.workspace_root(&self.cwd);
+        let start = (workspace.parent())
+            .filter(|p| p.parent().is_some())
+            .map(Path::to_path_buf)
+            .or_else(model::home_dir)
+            .unwrap_or_else(|| workspace.clone());
+        let (root, rel) = host_root(&start);
+        let Screen::Create(form) = std::mem::replace(&mut self.screen, Screen::List) else {
+            return;
+        };
+        self.screen = Screen::StartDir(StartDirForm::open(
+            StartDirTarget::Folder(Box::new(form)),
+            "folder to mount".into(),
+            root,
+            Some(rel),
+        ));
+    }
+
+    /// Add the picked folder to the sandbox being created, unless a create would refuse it; then
+    /// the picker stays open, saying why.
+    fn use_picked_folder(&mut self, here: PathBuf) {
+        let real = std::fs::canonicalize(&here).unwrap_or_else(|_| here.clone());
+        let refusal = model::home_dir().and_then(|home| model::mount_refusal(&real, &home));
+        let Screen::StartDir(picker) = &self.screen else {
+            return;
+        };
+        let StartDirTarget::Folder(create) = &picker.target else {
+            return;
+        };
+        let workspace = create.workspace_root(&self.cwd);
+        let inside = std::fs::canonicalize(&workspace).is_ok_and(|ws| real.starts_with(ws))
+            || real.starts_with(&workspace);
+        let why = match (refusal, inside) {
+            (Some(why), _) => Some(why),
+            (None, true) => {
+                Some("it is in the project folder, which the sandbox has already".into())
+            }
+            (None, false) => None,
+        };
+        if let Some(why) = why {
+            return self.set_error(format!("{}: {why}", model::tilde(&here)));
+        }
+        let Screen::StartDir(picker) = std::mem::replace(&mut self.screen, Screen::List) else {
+            return;
+        };
+        let StartDirTarget::Folder(mut create) = picker.target else {
+            return;
+        };
+        let at = create.add_folder(&real);
+        let catalog = Arc::clone(&self.catalog);
+        create.focus_wizard_row(&catalog, WizardRow::Field(CreateRow::Folder(at)));
+        self.screen = Screen::Create(*create);
+    }
+
     /// Leave the picker for wherever it was opened from, changing nothing.
     fn leave_start_dir(&mut self) {
         let Screen::StartDir(_) = &self.screen else {
@@ -6344,7 +6452,9 @@ impl App {
             return;
         };
         match form.target {
-            StartDirTarget::New(create) => self.screen = Screen::Create(*create),
+            StartDirTarget::New(create) | StartDirTarget::Folder(create) => {
+                self.screen = Screen::Create(*create)
+            }
             StartDirTarget::HostFolder(folders) => self.screen = Screen::Folders(*folders),
             StartDirTarget::Sandbox(_) => {}
         }
@@ -6410,6 +6520,7 @@ impl App {
         let name = match &form.target {
             StartDirTarget::Sandbox(name) => name.clone(),
             StartDirTarget::HostFolder(_) => return self.use_host_folder(here),
+            StartDirTarget::Folder(_) => return self.use_picked_folder(here),
             StartDirTarget::New(_) => {
                 let Screen::StartDir(form) = std::mem::replace(&mut self.screen, Screen::List)
                 else {
@@ -6562,14 +6673,10 @@ impl App {
     /// What write access to the store means here, in the two sentences a confirmation wants.
     pub fn skills_trust_lines(&self) -> Vec<String> {
         match self.skills_writers() {
-            0 => vec![
-                "Every sandbox here mounts the store read-only, so none of them can change".into(),
-                "what the others load — only this screen and the host can.".into(),
-            ],
-            n => vec![
-                format!("{n} of them mount it read-write and can rewrite a skill the others"),
-                "then load, so they share one trust boundary.".into(),
-            ],
+            0 => vec!["None of them can change the skills: only this screen can.".into()],
+            n => vec![format!(
+                "{n} of them can change the skills, and every other sandbox gets their changes."
+            )],
         }
     }
 
@@ -6605,15 +6712,15 @@ impl App {
             }),
             SkillRow::AddRepo => (
                 "Add from a Git repository".to_string(),
-                "owner/repo or a Git URL — sbx skills add".to_string(),
+                "owner/repo or a Git URL".to_string(),
             ),
             SkillRow::Update => (
                 "Update from repositories".to_string(),
-                "refreshes what `add` installed — sbx skills update".to_string(),
+                "the skills added from a repository".to_string(),
             ),
             SkillRow::RepoSkills => (
                 "Repo skills for all sandboxes".to_string(),
-                "aisbx's skill repos, global picks — not this store".to_string(),
+                "picked from your skill repos".to_string(),
             ),
             SkillRow::Close => (String::new(), String::new()),
         }
@@ -6955,30 +7062,11 @@ impl App {
         let Some(request) = self.approval(id) else {
             return Vec::new();
         };
-        // Commands go between backticks: the GUI draws them in the monospace face.
-        let mut notes = vec![format!(
-            "Allow lets {} through for this sandbox alone: sbx records an ordinary rule, listed \
-             on its Network tab as “approved”, and removable with `sbx policy rm network --sandbox \
-             {} --resource {}`. Dismiss leaves it blocked, and the agent asks again on its next \
-             attempt.",
-            request.title, request.sandbox, request.title
-        )];
-        if request
-            .options
-            .iter()
-            .any(|o| o.id != "allow" && o.id != "dismiss")
-        {
-            notes.push(format!(
-                "sbx also offers: {}",
-                request
-                    .options
-                    .iter()
-                    .map(|o| format!("{} ({})", o.id, o.label))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ));
-        }
-        notes
+        vec![format!(
+            "Allow lets {} through for this sandbox from now on; its Network tab lists the rule as \
+             approved. Dismiss keeps it blocked, and the agent can ask again.",
+            request.title
+        )]
     }
 
     /// Open the approvals screen, whatever is pending.
@@ -7205,12 +7293,7 @@ impl App {
                 None,
                 Some(false),
                 "Stop keeping it running",
-                vec![
-                    "sbx makes detached mode permanent: a stop and a later start keep it. The \
-                     only way back to a sandbox that stops by itself after its last session is \
-                     to rebuild it, which this does."
-                        .into(),
-                ],
+                vec!["Only a rebuild makes it stop on its own again, so this rebuilds it.".into()],
             );
             match confirm {
                 Some(c) => self.modal = Some(Modal::Confirm(c)),
@@ -7221,14 +7304,12 @@ impl App {
         let mut body = vec![
             format!("{label}  ({name})"),
             String::new(),
-            "It stays running after every session ends — a dev server on a published port keeps \
-             answering — until you stop it (s) or delete it. Without this, sbx stops a sandbox \
-             about half a minute after its last session."
+            "It keeps running after its sessions end, so a server on a published port keeps \
+             answering, until you stop it (s). Otherwise, sbx stops it about half a minute after \
+             its last session."
                 .into(),
             String::new(),
-            "The switch is permanent: a stop and a later start keep it (measured). Only a rebuild \
-             returns it to stopping on its own — and R repeats it, so b again is how you undo it."
-                .into(),
+            "A stop and a start keep it so. Turning it off again (b) rebuilds the sandbox.".into(),
         ];
         if sb.ports.is_empty() && sb.running {
             body.push(String::new());
@@ -7415,15 +7496,15 @@ impl App {
             match sb.tmpfs_volumes {
                 true => VOLUMES_IN_RAM.into(),
                 false if sb.history_in_volumes => VOLUMES_STAY.into(),
-                false => "The container and the agent's session history are removed.".into(),
+                false => "The agent's earlier sessions are deleted with it.".into(),
             },
             match sb.mountless() {
                 // A mountless sandbox: its workspace is inside it, and goes with it.
                 true => format!(
-                    "No host folder is mounted — the files in {} inside it are deleted with it.",
+                    "It mounts no folder, so the files in {} inside it are deleted with it.",
                     model::MOUNTLESS_WORKDIR
                 ),
-                false => format!("Files in {} are untouched.", model::tilde(&sb.workspace)),
+                false => format!("Your files in {} stay.", model::tilde(&sb.workspace)),
             },
         ];
 
@@ -7503,23 +7584,16 @@ impl App {
             ));
         }
         body.push(String::new());
-        body.push("Each one's container is removed.".into());
         body.push(
-            "Where a sandbox's kit keeps the agent's session history in volumes (the Claude Code \
-             kits), it stays there and comes back to a sandbox created under that name from the \
-             same kit; no sbx command deletes them. On the other agents it is removed with the \
-             container."
-                .into(),
+            "Each one is deleted. Your files stay, and a running sandbox is never pruned.".into(),
         );
         body.push(
-            "Workspace files are untouched, and a running sandbox is never a candidate.".into(),
+            "Claude Code's earlier sessions stay, and come back to a new sandbox of the same name \
+             and kit; the other agents' sessions are deleted with them."
+                .into(),
         );
         body.push(String::new());
-        body.push(
-            "Named setup tokens, the /login account and the shared skills store all stay on the \
-             host."
-                .into(),
-        );
+        body.push("Setup tokens, the /login and the shared skills stay.".into());
         self.modal = Some(Modal::Confirm(Confirm {
             title: "Prune stopped sandboxes".into(),
             body,
@@ -7772,7 +7846,7 @@ impl App {
             (false, true) => "The session history stays in its volumes.".into(),
             (false, false) => SWITCH_KIT_HISTORY.into(),
         });
-        body.push("Files in the workspace are untouched.".into());
+        body.push("Your files stay.".into());
 
         AuthPlan::Confirm(Box::new(Confirm {
             title: "Change the Anthropic account".into(),
@@ -7835,7 +7909,7 @@ impl App {
             true => SWITCH_IN_RAM.into(),
             false => SWITCH_KIT_HISTORY.into(),
         });
-        body.push("Files in the workspace are untouched.".into());
+        body.push("Your files stay.".into());
 
         AuthPlan::Confirm(Box::new(Confirm {
             title: "Change the Anthropic account".into(),
@@ -8672,7 +8746,10 @@ impl App {
             (
                 form.harness.backend,
                 form.selected_addons(&catalog),
-                form.workspace.name.value.trim().to_string(),
+                (
+                    form.workspace.name.value.trim().to_string(),
+                    form.label_account(&catalog),
+                ),
                 form.workspace.clone,
                 // Only what the form was offering: `None` passes no `--skills` at all.
                 form.skills_offered(&catalog)
@@ -8706,7 +8783,7 @@ impl App {
                     .find_map(|step| form.step_problem(step, &catalog)),
                 form.workspace_root(&self.cwd),
                 form.git_guard_offered() && form.workspace.git_guard,
-                form.workspace.extra_folders.value.trim().to_string(),
+                form.workspace.extra_folders.clone(),
             )
         };
         // Checked first: sbx would refuse the create only at the very end.
@@ -8741,10 +8818,11 @@ impl App {
             },
             false => &catalog.backends[backend_idx],
         };
-        let label = if typed_label.is_empty() {
-            model::auto_label(&catalog, &backend.kit.name, &addons)
-        } else {
-            typed_label
+        let label = match typed_label {
+            (typed, account) if typed.is_empty() => {
+                model::auto_label(&catalog, &backend.kit.name, account.as_deref(), &addons)
+            }
+            (typed, _) => typed,
         };
 
         let taken: Vec<String> = self.sandboxes.iter().map(|s| s.name.clone()).collect();
@@ -8756,7 +8834,8 @@ impl App {
         } = model::kit_mounts(&addons);
         let mut folder_plan = self.folder_plan(&workspace);
         let home = model::home_dir();
-        let (extra, problems) = folders::extras(&typed_folders, &folder_plan, home.as_deref());
+        let picked = typed_folders.iter().map(String::as_str);
+        let (extra, problems) = folders::extras_of(picked, &folder_plan, home.as_deref());
         if let Some(problem) = problems.into_iter().next() {
             self.set_error(problem);
             return;
@@ -9320,7 +9399,7 @@ impl App {
             mounts: mut ro_mounts,
             notes: mut mount_notes,
         } = model::kit_mounts(addons);
-        // The host folders as the lists say now, those typed for this sandbox alone, and the
+        // The host folders as the lists say now, those picked for this sandbox alone, and the
         // `.git` guard the sandbox has.
         let git_guard = folders::has_git_guard(&sb.workspace, &sb.ro_mounts);
         let mut folder_plan = self.folder_plan(&sb.workspace);
@@ -9488,59 +9567,52 @@ impl App {
         body.push(String::new());
         // One paragraph per entry: a sentence split over two entries reads as two.
         body.push(match sb.tmpfs_volumes {
-            true => "The container is destroyed and rebuilt: everything installed inside it is \
-                     lost; its kit volumes are in RAM, so the agent's session history is lost \
-                     too; the new container's volumes are in RAM again."
+            true => "The sandbox is rebuilt: what you installed in it and the agent's earlier \
+                     sessions are lost. Its volumes are in RAM again."
                 .into(),
             false if sb.history_in_volumes => {
-                "The container is destroyed and rebuilt: everything installed inside it is lost; \
-                 the agent's session history stays in its kit volumes."
+                "The sandbox is rebuilt: what you installed in it is lost; the agent's earlier \
+                 sessions stay."
                     .into()
             }
-            false => "The container is destroyed and rebuilt: everything installed inside it and \
-                      the agent's session history are lost."
+            false => "The sandbox is rebuilt: what you installed in it and the agent's earlier \
+                      sessions are lost."
                 .into(),
         });
         body.push(match sb.mountless() {
             true => format!(
-                "No host folder is mounted, so the files in {} inside it are lost too; the new \
-                 container comes up mountless again.",
+                "It mounts no folder, so the files in {} inside it are lost too.",
                 model::MOUNTLESS_WORKDIR
             ),
-            false => format!("Files in {} are untouched.", model::tilde(&sb.workspace)),
+            false => format!("Your files in {} stay.", model::tilde(&sb.workspace)),
         });
         let ports = sbx::publish_specs(&sb.ports);
         if !ports.is_empty() {
-            body.push(format!(
-                "Published ports are re-published on the new container: {}.",
-                ports.join(", ")
-            ));
+            body.push(format!("Its ports come back: {}.", ports.join(", ")));
             body.push(
-                "A host port sbx assigned itself is asked for by number, so it can clash — the \
-                 job says so if it does."
+                "A port number sbx picked itself may be taken by then; the job says so if it is."
                     .into(),
             );
         } else if !sb.running {
             // sbx reports no ports for a stopped sandbox: nothing to carry over.
             body.push(
-                "sbx reports no published ports while a sandbox is stopped, so any it has are \
-                 lost in the rebuild. Start it first to keep them."
+                "sbx shows no ports while a sandbox is stopped, so any it has are lost. Start it \
+                 first to keep them."
                     .into(),
             );
         }
         match sb.skills {
             Some(model::Skills::Known(mode)) => body.push(format!(
-                "The shared agent-skills store comes back mounted {}, as it is now.",
+                "The shared skills come back {}, as now.",
                 match mode {
-                    sbx::SkillsMode::Off => "not at all",
+                    sbx::SkillsMode::Off => "off",
                     sbx::SkillsMode::Readonly => "read-only",
                     sbx::SkillsMode::Readwrite => "read-write",
                 }
             )),
             Some(model::Skills::Unrecorded) => body.push(
-                "How this sandbox mounts the shared agent-skills store was never recorded — sbx \
-                 reports it nowhere — so the new container takes the host default \
-                 (skills.defaultMode, read-only unless you changed it)."
+                "How this sandbox gets the shared skills was never recorded, so it gets the \
+                 default for new sandboxes (read-only unless you changed it)."
                     .into(),
             ),
             None => {}
@@ -9551,21 +9623,21 @@ impl App {
         let default_memory = format!("{} of memory", sbx::default_memory());
         match (sb.cpus, sb.memory.as_deref()) {
             (Some(cpus), Some(memory)) => body.push(format!(
-                "It keeps its recorded limits: {}, {memory} of memory.",
+                "It keeps its limits: {}, {memory} of memory.",
                 cpus_text(cpus)
             )),
             (Some(cpus), None) => body.push(format!(
-                "It keeps its recorded limit of {}, and gets the default \
-                 {default_memory} in place of sbx's automatic one.",
+                "It keeps its limit of {}, and gets {default_memory} in place of sbx's automatic \
+                 limit.",
                 cpus_text(cpus)
             )),
             (None, Some(memory)) => body.push(format!(
-                "It keeps its recorded memory limit of {memory}, and gets the default \
-                 {default_cpus} in place of every host CPU."
+                "It keeps its limit of {memory} of memory, and gets {default_cpus} in place of all \
+                 of them."
             )),
             (None, None) => body.push(format!(
-                "It gets the default limits, {default_cpus} and {default_memory}, in place of \
-                 sbx's automatic ones (every host CPU, half the host's memory)."
+                "It gets {default_cpus} and {default_memory}, in place of sbx's automatic limits \
+                 (all CPUs, half the memory)."
             )),
         }
         body.extend(
@@ -9575,7 +9647,7 @@ impl App {
         );
         if !sb.runtime_mounts.is_empty() {
             body.push(format!(
-                "The folder(s) added later with sbx mount are mounted again: {}.",
+                "The folders added with sbx mount are mounted again: {}.",
                 sb.runtime_mounts
                     .iter()
                     .map(|m| model::tilde(Path::new(&m.host_path)))
@@ -9598,54 +9670,40 @@ impl App {
                 parts.push(format!("{} approved destination(s)", plan.approved));
             }
             body.push(format!(
-                "Its own network rules come back: {} (sbx rm takes a sandbox's rules with it).",
+                "Its own network rules come back: {}.",
                 parts.join(", ")
             ));
         }
         let static_mcp = self.registry.static_mcp(name);
         if sbx::is_no_mcp(&static_mcp) {
-            body.push(format!(
-                "It comes back with no MCP server, as it was created: {}. One loaded since with \
-                 sbx mcp load is not carried over — sbx reports no sandbox's current servers.",
-                crate::create::NO_MCP
-            ));
+            body.push(
+                "It comes back with no MCP servers, as it was created. A server added since with \
+                 sbx mcp load is not kept."
+                    .into(),
+            );
         } else if !static_mcp.is_empty() {
             body.push(format!(
-                "Its MCP servers come back as the fixed set it was created with: {}. One loaded or \
-                 unloaded since with sbx mcp load / unload is not carried over — sbx reports no \
-                 sandbox's current servers.",
+                "It comes back with the MCP servers it was created with: {}. A server added or \
+                 removed since with sbx mcp is not kept.",
                 static_mcp.join(", ")
             ));
         }
         match (sb.keep_running, plan.keep_running) {
-            (true, true) => body.push(
-                "It comes back in detached mode, so it keeps running after its sessions end, as \
-                 it does now."
-                    .into(),
-            ),
-            (true, false) => body.push(
-                "It comes back as an ordinary sandbox, which stops itself shortly after its last \
-                 session ends."
-                    .into(),
-            ),
+            (true, true) => body.push("It keeps running after its sessions end, as now.".into()),
+            (true, false) => body.push("It then stops after its last session.".into()),
             _ => {}
         }
         match &sb.auth {
             Some(auth) if auth.on_token() => {
                 body.push(String::new());
                 body.push(format!(
-                    "It comes back on the same setup token (“{}”) — the token is stored once for \
-                     the host, and the rebuild stacks its kit again.",
+                    "It stays on the setup token “{}”.",
                     auth.token_name().unwrap_or(DEFAULT_TOKEN_NAME)
                 ));
             }
             Some(_) => {
                 body.push(String::new());
-                body.push(
-                    "The /login survives: sbx keeps it on the host and re-seeds the new container \
-                     from it."
-                        .into(),
-                );
+                body.push("It stays on the /login.".into());
             }
             None => {}
         }
@@ -9773,17 +9831,13 @@ impl App {
 
 /// What the approvals screen is about, said once for all its requests: why one is held, and
 /// what each answer does with it — the TUI's strip under *Close*, the GUI's subtitle.
-pub const APPROVALS_NOTE: &str = "Requests a sandbox is holding because no rule allows them — \
-    under the balanced and deny-all presets sbx asks rather than only refusing. Allow records a \
-    rule for that one destination, for that sandbox only; the blocked request is not retried, so \
-    the agent has to try again. Dismiss leaves it blocked, and it is asked again on the next \
-    attempt.";
+pub const APPROVALS_NOTE: &str = "A sandbox asks before it reaches a host that no rule allows. \
+    Allow lets that sandbox reach the host from now on; the agent has to try again. Dismiss keeps it \
+    blocked, and the sandbox asks again the next time.";
 
-/// The approvals screen with nothing waiting: where a held request shows, and why a refused one
-/// never does.
-pub const APPROVALS_EMPTY: &str = "When an agent's request is held you see it here, on that \
-    sandbox's row (⚑) and in the header. A host refused by a deny rule is never held — the \
-    Network tab says which rule, and Check host (c) checks a host before anything is sent.";
+/// The approvals screen with nothing waiting: where a request shows when one comes.
+pub const APPROVALS_EMPTY: &str = "Nothing waits for an answer. A request shows here, on its \
+    sandbox's row (⚑) and in the header.";
 
 /// Move a form's focus one row up (`delta < 0`) or down (`delta > 0`), treating the buttons a form
 /// ends with as a **single** row.
@@ -10160,24 +10214,16 @@ mod tests {
         // The note the form shows before Apply, for each kind of rebuild.
         let mut form = crate::testkit::auth_form(AccountChoice::New);
         form.ram_volumes = true;
+        let lost = "earlier sessions are lost";
         let to_token = form.effect().join(" ");
-        assert!(
-            to_token.contains("in RAM, so the session history is lost"),
-            "{to_token}"
-        );
+        assert!(to_token.contains(lost), "{to_token}");
         form.current = on_named("work", true);
         form.account = AccountChoice::Login;
         let to_login = form.effect().join(" ");
-        assert!(
-            to_login.contains("in RAM, so the session history is lost"),
-            "{to_login}"
-        );
+        assert!(to_login.contains(lost), "{to_login}");
         form.account = AccountChoice::Named("private".into());
         let other_token = form.effect().join(" ");
-        assert!(
-            other_token.contains("in RAM, so the session"),
-            "{other_token}"
-        );
+        assert!(other_token.contains(lost), "{other_token}");
         for text in [&to_token, &to_login, &other_token] {
             assert!(!text.contains("stays"), "{text}");
         }
@@ -10359,13 +10405,16 @@ mod tests {
         );
     }
 
-    /// Put the create wizard on `step` with its cursor on `row`.
+    /// Put the create wizard on `step` with its cursor on `row`, the fold it stands under open.
     fn wizard_on(app: &mut App, step: CreateStep, row: WizardRow) {
         let catalog = Arc::clone(&app.catalog);
         let Screen::Create(form) = &mut app.screen else {
             panic!("the create form is open")
         };
         form.wizard_set_step(&catalog, step);
+        if let WizardRow::Field(field) = row {
+            form.reveal(field);
+        }
         assert!(
             form.focus_wizard_row(&catalog, row),
             "{row:?} is on {step:?}"
@@ -10457,9 +10506,8 @@ mod tests {
         press(&mut app, KeyCode::Left);
         assert_eq!(focus(&app), WizardRow::Cancel);
 
-        // Up leaves the whole line, onto the step's last row: the no-MCP tick here.
         press(&mut app, KeyCode::Up);
-        assert_eq!(focus(&app), WizardRow::Field(CreateRow::McpNone));
+        assert_eq!(focus(&app), WizardRow::Field(CreateRow::AdvancedFold));
         press(&mut app, KeyCode::Down);
         assert_eq!(
             focus(&app),
@@ -10771,7 +10819,7 @@ mod tests {
     }
 
     #[test]
-    fn a_create_mounts_the_folders_typed_for_it_at_their_targets_and_records_them() {
+    fn a_create_mounts_its_own_folders_at_their_targets_and_records_them() {
         let root = std::env::temp_dir().join(format!("aisbx-tests-extras-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         for d in ["more-ws", "docs", "data", "kb", "state"] {
@@ -10793,7 +10841,7 @@ mod tests {
 
         app.open_create();
         if let Screen::Create(form) = &mut app.screen {
-            form.workspace.extra_folders = TextInput::new(format!(" {docs} ,{data}, "));
+            form.workspace.extra_folders = vec![docs.clone(), data.clone()];
         }
         press_create_only(&mut app);
         let Some(Modal::Running(_, pending)) = app.modal.take() else {
@@ -10827,7 +10875,7 @@ mod tests {
 
         let gone = format!("{}:/gone", root.join("gone").display());
         let steps = submit_create_form(&mut app, |form| {
-            form.workspace.extra_folders = TextInput::new(gone.clone())
+            form.workspace.extra_folders = vec![gone.clone()]
         });
         assert!(steps.is_empty(), "{steps:?}");
         let (text, err, _) = app.status.clone().expect("a reason is shown");
@@ -10835,13 +10883,39 @@ mod tests {
         assert_eq!(text, format!("“{gone}”: the folder does not exist"));
         let inside = format!("{}:{}/data", root.join("data").display(), app.cwd.display());
         let steps = submit_create_form(&mut app, |form| {
-            form.workspace.extra_folders = TextInput::new(inside.clone())
+            form.workspace.extra_folders = vec![inside.clone()]
         });
         assert!(steps.is_empty(), "{steps:?}");
         let (text, _, _) = app.status.clone().expect("a reason is shown");
         let why = "the target is the workspace or inside it";
         assert_eq!(text, format!("“{inside}”: {why}"));
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn the_folders_help_says_what_each_access_means_and_nothing_a_button_says() {
+        let form = FoldersForm {
+            folders: vec![folders::Entry {
+                path: "/srv/kb".into(),
+                access: folders::Access::Read,
+                purpose: String::new(),
+            }],
+            ..Default::default()
+        };
+        assert_eq!(
+            form.help(FoldersRow::Folder(0)).text,
+            "Read-only: nothing in the sandbox can change it."
+        );
+        let access = form.help(FoldersRow::Access).text;
+        for value in folders::Access::ALL {
+            assert!(access.contains(value.meaning()), "{access}");
+        }
+        for row in [FoldersRow::Save, FoldersRow::Close] {
+            assert!(form.help(row).text.is_empty(), "{row:?}");
+        }
+        let browse = form.help(FoldersRow::Browse).text;
+        assert!(!browse.contains('↵') && !browse.contains("Use"), "{browse}");
+        assert!(!FOLDERS_NOTE.contains("companion.json"), "{FOLDERS_NOTE}");
     }
 
     #[test]
@@ -11447,7 +11521,7 @@ mod tests {
         let mut sb = model::sample("claude-litellm-proj", Some("claude-litellm"), &[]);
         sb.workspace = root.clone();
         let mut app = App::for_test(Catalog::load().unwrap(), vec![sb]);
-        // Regroup after moving the cwd, or the sandbox sits under "Other folders".
+        // Regroup after moving the cwd, or the sandbox sits under "Sandboxes in other folders".
         app.cwd = root.clone();
         app.refresh_cells();
         app.cursor = 0;
@@ -12149,7 +12223,7 @@ mod tests {
             confirm
                 .body
                 .iter()
-                .any(|l| l.contains("comes back on the same setup token")),
+                .any(|l| l.contains("stays on the setup token")),
             "{:?}",
             confirm.body
         );
@@ -12221,10 +12295,13 @@ mod tests {
         // The history stays only where a kit keeps it in volumes, so the text says where.
         let text = confirm.body.join(" ");
         assert!(
-            text.contains("(the Claude Code kits), it stays there"),
+            text.contains("Claude Code's earlier sessions stay"),
             "{text}"
         );
-        assert!(text.contains("On the other agents it is removed"), "{text}");
+        assert!(
+            text.contains("other agents' sessions are deleted"),
+            "{text}"
+        );
     }
 
     #[test]
@@ -13079,7 +13156,10 @@ mod tests {
             "nothing is remembered about it"
         );
         assert!(
-            confirm.body.iter().any(|l| l.contains("permanent")),
+            confirm
+                .body
+                .iter()
+                .any(|l| l.contains("A stop and a start keep it so")),
             "{:?}",
             confirm.body
         );
@@ -13121,7 +13201,10 @@ mod tests {
             .iter()
             .all(|s| s.argv != sbx::keep_running_argv(&name)));
         assert!(
-            confirm.body.iter().any(|l| l.contains("ordinary sandbox")),
+            confirm
+                .body
+                .iter()
+                .any(|l| l.contains("then stops after its last session")),
             "{:?}",
             confirm.body
         );
@@ -13134,6 +13217,10 @@ mod tests {
         let name = sb.name.clone();
         let mut app = App::for_test(Catalog::load().unwrap(), vec![sb.clone()]);
         assert_eq!(app.rebuild_blocker(&name), Some(WORKSPACE_GONE));
+        assert!(
+            WORKSPACE_GONE.contains("on this computer") && !WORKSPACE_GONE.contains("host"),
+            "{WORKSPACE_GONE}"
+        );
         assert!(app.recreate_job(&name, &[], None).is_none());
         app.on_key(KeyEvent::from(KeyCode::Char('R')));
         assert!(
@@ -13292,7 +13379,7 @@ mod tests {
             confirm
                 .body
                 .iter()
-                .any(|l| l.contains("recorded limit of 1 CPU, and")),
+                .any(|l| l.contains("keeps its limit of 1 CPU, and")),
             "{:?}",
             confirm.body
         );
@@ -13352,7 +13439,7 @@ mod tests {
             confirm
                 .body
                 .iter()
-                .any(|l| l.contains("its kit volumes are in RAM")),
+                .any(|l| l.contains("Its volumes are in RAM again")),
             "{:?}",
             confirm.body
         );
@@ -13387,7 +13474,7 @@ mod tests {
             confirm
                 .body
                 .iter()
-                .any(|l| l.contains("the default limits, 4 CPUs and 4g of memory")),
+                .any(|l| l.contains("gets 4 CPUs and 4g of memory, in place of")),
             "{:?}",
             confirm.body
         );
@@ -13397,6 +13484,7 @@ mod tests {
         repo_skills_ui::RepoView {
             id: id.into(),
             source: format!("o/{id}"),
+            git_ref: None,
             commit: Some("0123456789abcdef".into()),
             problem: None,
             skills: skills.iter().map(|s| s.to_string()).collect(),
@@ -13479,7 +13567,7 @@ mod tests {
         assert!(app
             .status
             .as_ref()
-            .is_some_and(|(m, _, _)| m.contains("global selection")));
+            .is_some_and(|(m, _, _)| m.contains("ticked for all sandboxes")));
         assert!(!repo_form(&mut app).dirty);
 
         // ↓ onto beta, tick it; then gamma off.
@@ -13730,7 +13818,11 @@ mod tests {
         );
         let help = file_help(&app);
         assert_eq!(help.title, file);
-        assert!(help.text.contains("for every OpenCode"), "{}", help.text);
+        assert!(
+            help.text.contains("every OpenCode sandbox"),
+            "{}",
+            help.text
+        );
 
         app.on_key(KeyEvent::from(KeyCode::Enter));
         let Some(Handoff::Edit { file: named, path }) = app.handoff.take() else {
@@ -13751,7 +13843,7 @@ mod tests {
         assert_eq!(app.config_file_row(0).unwrap().1, FileState::Edited);
         assert!(!app.edit_ended(file).1);
         let help = file_help(&app);
-        assert!(help.text.contains("You edited it"), "{}", help.text);
+        assert!(help.text.contains("Your copy"), "{}", help.text);
 
         std::fs::write(&path, "{").unwrap();
         assert!(
@@ -13779,11 +13871,13 @@ mod tests {
             rows,
             [
                 CreateRow::ModelsRefresh,
+                CreateRow::ModelsFold,
                 CreateRow::Model(Slot::Main),
                 CreateRow::Model(Slot::Small),
-                CreateRow::ConfigFile(0),
                 CreateRow::ModelOn(0),
                 CreateRow::ModelOn(1),
+                CreateRow::FilesFold,
+                CreateRow::ConfigFile(0),
             ]
         );
         // No Models step for a harness that picks its own models: Next passes it by.
@@ -13932,13 +14026,20 @@ mod tests {
             CreateStep::Review,
             "a create is one key away"
         );
+        let rows = form.wizard_rows(&app.catalog);
+        assert_eq!(rows[form.wizard_focus()], WizardRow::CreateStart);
+        assert!(form.wizard.prefilled);
+        let (heading, _) = form.step_heading(CreateStep::Review, &app.catalog);
+        assert!(heading.contains("last sandbox"), "{heading}");
+        let status = app.status.as_ref().map(|(text, _, _)| text.as_str());
+        assert_eq!(status, Some(crate::create::PREFILLED));
         let backend = &app.catalog.backends[form.harness.backend];
         assert_eq!(backend.kit.name, "opencode-litellm");
         assert!(form.kits.addons[rtk]);
         assert!(form.workspace.clone);
         assert_eq!(form.workspace.ports.value, "8080");
         assert_eq!(
-            form.workspace.name.value, "OpenCode (RTK)",
+            form.workspace.name.value, "OpenCode · LiteLLM acme (RTK)",
             "the label is this folder's own"
         );
     }
@@ -14826,10 +14927,7 @@ mod tests {
         );
         assert!(text.contains("lists no “claude-sonnet-5”"), "{text}");
         // The same workload under the same name: sbx hands its kit volumes back.
-        assert!(
-            text.contains("session history stays in its kit volumes"),
-            "{text}"
-        );
+        assert!(text.contains("earlier sessions stay"), "{text}");
         assert_eq!(
             confirm.job.steps[0].argv,
             sbx::rm_argv("claude-litellm-proj")
@@ -15701,11 +15799,15 @@ mod action_tests {
         assert_eq!(SETTINGS[3].tone(Some(false)), SettingTone::Plain);
         for spec in SETTINGS {
             assert!(
-                spec.note.contains(spec.key),
-                "{} names its command",
+                spec.note.starts_with("When on, ") && spec.note.contains(" Otherwise, "),
+                "{} says what on and off do",
                 spec.label
             );
         }
+        assert!(
+            SETTINGS[0].note.contains("sbx daemon restart"),
+            "what telemetry needs"
+        );
     }
 
     #[test]
@@ -15783,7 +15885,7 @@ mod action_tests {
         assert!(a.modal.is_none());
 
         a.sandboxes[0].workspace_missing = true;
-        let gone = Refusal::Error("workspace /proj no longer exists on this host".into());
+        let gone = Refusal::Error("the folder /proj no longer exists on this computer".into());
         for action in [
             Action::Start,
             Action::Shell,
@@ -16110,9 +16212,7 @@ mod connect_view_tests {
             (view.label.as_str(), view.host.as_str()),
             ("box", "box.sbx")
         );
-        assert_eq!(view.state, "stopped — connecting starts it");
-        assert_eq!(view.workspace[0], "Workspace inside the sandbox: /proj");
-        assert!(view.workspace[1].contains("its host path"));
+        assert_eq!(view.state, "stopped: connecting starts it");
         assert!(!view.ssh_missing && view.ssh_warning.is_empty() && view.ssh_notes.is_empty());
         let rows: Vec<ConnectRow> = view.targets.iter().map(|t| t.row).collect();
         assert_eq!(
@@ -16132,8 +16232,15 @@ mod connect_view_tests {
         let view = app.connect_view_with(|_| true).unwrap();
         assert_eq!(view.state, "running");
         assert!(view.ssh_missing);
-        assert!(view.ssh_warning[0].contains("`sbx setup ssh` has not written"));
-        assert!(view.ssh_notes[0].contains("Idempotent"));
+        assert_eq!(
+            view.ssh_warning,
+            ["SSH is not set up yet, so no app can connect."]
+        );
+        let notes = view.ssh_notes.join(" ");
+        assert!(notes.contains("~/.ssh/config"), "{notes}");
+        for inner in ["Idempotent", "socket", "Host *.sbx"] {
+            assert!(!notes.contains(inner), "{inner}: {notes}");
+        }
 
         // No Connect screen, or its sandbox gone: nothing to draw.
         let mut app = app;
@@ -16148,11 +16255,14 @@ mod connect_view_tests {
         let mut sb = model::sample("bare", Some("claude-anthropic"), &[]);
         sb.workspace = PathBuf::new();
         let view = on_connect(sb, true).connect_view_with(|_| true).unwrap();
-        assert_eq!(
-            view.workspace[0],
-            format!("Workspace inside the sandbox: {}", model::MOUNTLESS_WORKDIR)
-        );
-        assert!(view.workspace[1].contains("nothing from the host is mounted"));
+        for t in &view.targets {
+            let steps = t.steps.join(" ");
+            assert!(
+                steps.contains(model::MOUNTLESS_WORKDIR),
+                "{}: {steps}",
+                t.title
+            );
+        }
     }
 
     #[test]
@@ -16162,17 +16272,18 @@ mod connect_view_tests {
         let view = app.connect_view_with(|t| t != Target::VsCode).unwrap();
         let code = target(&view, Target::VsCode);
         assert_eq!(code.launch, TargetLaunch::NotOnPath("code"));
-        assert_eq!(code.status, "`code` is not on this host's PATH");
+        assert_eq!(code.status, "`code` command not found");
         let ssh = target(&view, Target::Terminal);
         assert_eq!(
             (ssh.launch, ssh.status.as_str()),
-            (TargetLaunch::Here, "↵ launches it")
+            (TargetLaunch::Here, ""),
+            "a target that opens says nothing: Open and the footer say it"
         );
         assert_eq!(ssh.steps, Target::Terminal.steps("box", Path::new("/proj")));
         for t in [Target::Jetbrains, Target::ClaudeDesktop] {
             let t = target(&view, t);
             assert_eq!(t.launch, TargetLaunch::InApp);
-            assert_eq!(t.status, "set up inside the app — steps below");
+            assert_eq!(t.status, "set up in the app");
         }
     }
 
@@ -16185,7 +16296,9 @@ mod connect_view_tests {
         for (t, view) in Target::ALL.iter().zip(&view.targets) {
             assert_eq!(!view.kit_warning.is_empty(), t.needs_kit(), "{t:?}");
         }
-        assert!(target(&view, Target::VsCode).kit_warning[0].contains(REMOTE_DEV_KIT));
+        let warning = target(&view, Target::VsCode).kit_warning.join(" ");
+        assert!(warning.contains(REMOTE_DEV_KIT), "{warning}");
+        assert!(warning.contains("Edit kits"), "names the action: {warning}");
 
         let kitted = model::sample("box", Some("claude-anthropic"), &[REMOTE_DEV_KIT]);
         let view = on_connect(kitted, true)
@@ -16332,11 +16445,11 @@ mod form_decision_tests {
         assert_eq!(
             note,
             "Applying this rebuilds the sandbox: its kits come from another checkout. The \
-             session history stays in its volumes."
+             agent's earlier sessions stay."
         );
         let refused = KitsEffect::KitAddRefused("network rules").note(History::Volumes);
         assert!(
-            refused[0].ends_with("sbx adds no kit with network rules to a live sandbox"),
+            refused[0].starts_with("Applying this tries to add the kits without a rebuild."),
             "{refused:?}"
         );
         for cause in [
@@ -16345,7 +16458,7 @@ mod form_decision_tests {
             RebuildCause::OtherCheckout,
         ] {
             let text = KitsEffect::Rebuild(cause).note(History::Volumes).join(" ");
-            assert!(text.contains("session history stays"), "{cause:?}: {text}");
+            assert!(text.contains("earlier sessions stay"), "{cause:?}: {text}");
         }
         assert_eq!(
             KitsEffect::NoChanges.note(History::Volumes),
@@ -16369,15 +16482,15 @@ mod form_decision_tests {
                 "{effect:?}: {ram}"
             );
             assert!(
-                ram.contains("in RAM") && ram.contains("session history"),
+                ram.contains("earlier sessions are lost"),
                 "{effect:?}: {ram}"
             );
             let disk = effect.note(History::Volumes).join(" ");
-            assert!(!disk.contains("in RAM"), "{effect:?}: {disk}");
+            assert!(!disk.contains("sessions are lost"), "{effect:?}: {disk}");
             assert_ne!(ram, disk, "{effect:?}");
         }
         let kit_add = KitsEffect::KitAdd.note(History::Ram).join(" ");
-        assert!(kit_add.contains("what was installed survive"), "{kit_add}");
+        assert!(kit_add.contains("what you installed stay"), "{kit_add}");
         assert_eq!(KitsEffect::NoChanges.note(History::Ram), ["No changes."]);
     }
 
@@ -16399,12 +16512,9 @@ mod form_decision_tests {
             (rebuild, delete.body.join(" "))
         };
         let (rebuild, delete) = texts();
+        assert!(rebuild.contains("earlier sessions stay"), "{rebuild}");
         assert!(
-            rebuild.contains("session history stays in its kit volumes"),
-            "{rebuild}"
-        );
-        assert!(
-            delete.contains("session history stays in sbx's kit volumes"),
+            delete.contains("earlier sessions stay, and come back"),
             "{delete}"
         );
 
@@ -16419,7 +16529,7 @@ mod form_decision_tests {
             .body
             .join(" ");
         assert!(
-            rebuild.contains("and the agent's session history are lost"),
+            rebuild.contains("and the agent's earlier sessions are lost"),
             "{rebuild}"
         );
         assert!(!rebuild.contains("stays"), "{rebuild}");
@@ -16429,20 +16539,23 @@ mod form_decision_tests {
             panic!("a delete confirmation")
         };
         let delete = delete.body.join(" ");
-        assert!(delete.contains("session history are removed"), "{delete}");
-        assert!(!delete.contains("stays"), "{delete}");
+        assert!(
+            delete.contains("earlier sessions are deleted with it"),
+            "{delete}"
+        );
+        assert!(!delete.contains("sessions stay"), "{delete}");
         let kits = KitsEffect::Rebuild(RebuildCause::Kits)
             .note(History::Container)
             .join(" ");
         assert!(
-            kits.ends_with("The agent's session history is lost."),
+            kits.ends_with("The agent's earlier sessions are lost."),
             "{kits}"
         );
         let refused = KitsEffect::KitAddRefused("volumes")
             .note(History::Container)
             .join(" ");
         assert!(
-            refused.ends_with("offer a rebuild, which loses the session history."),
+            refused.ends_with("The agent's earlier sessions are lost."),
             "{refused}"
         );
     }
@@ -16565,34 +16678,27 @@ mod form_decision_tests {
                 ("Connection", CreateStep::Connection, false),
                 ("Harness", CreateStep::Harness, false),
                 ("Models", CreateStep::Models, true),
-                ("Offered", CreateStep::Models, true),
                 ("Kits", CreateStep::Kits, true),
                 ("Label", CreateStep::Workspace, false),
-                ("Opens in", CreateStep::Workspace, true),
-                ("More folders", CreateStep::Workspace, true),
+                ("Starts in", CreateStep::Workspace, true),
                 ("Clone mode", CreateStep::Workspace, true),
                 ("Skills", CreateStep::Workspace, true),
-                ("Ports", CreateStep::Workspace, true),
-                ("Blocked hosts", CreateStep::Workspace, true),
-                ("MCP servers", CreateStep::Workspace, true),
-            ]
+            ],
+            "the seldom used answers have no line while they are the form's defaults"
         );
-        assert_eq!(review.answers[8].value, "none");
-        assert_eq!(review.answers[13].value, crate::create::DYNAMIC_MCP);
         assert_eq!(review.answers[0].value, "LiteLLM");
         assert_eq!(review.answers[1].value, "acme");
         assert_eq!(review.answers[2].value, "Claude Code");
-        assert_eq!(review.answers[3].value, "default");
-        assert_eq!(review.answers[4].value, "2 of 2");
-        assert_eq!(review.answers[5].value, "none");
-        assert_eq!(review.answers[6].value, "Claude Code LiteLLM");
+        assert_eq!(review.answers[3].value, crate::create::AGENT_PICKS);
+        assert_eq!(review.answers[4].value, "none");
+        assert_eq!(review.answers[5].value, "Claude Code · LiteLLM acme");
         assert_eq!(review.sbx_name, "claude-litellm-proj");
         assert_eq!(review.sbx_name, form.sbx_name(&app));
         assert_eq!(review.mounts, ["/proj"]);
         assert!(!review.policy_warning);
         assert_eq!(
             crate::create::account_notes(&AccountChoice::Named("work".into()))[0],
-            "Already stored on this host, so there is nothing to paste. Every sandbox on"
+            "Stored on this computer. Sandboxes on the same token share its account."
         );
         assert!(crate::kits::headroom_warning("claude").starts_with("⚠ headroom is unmeasured"));
         assert!(crate::kits::headroom_warning("opencode").contains("idle proxy"));
@@ -16618,24 +16724,47 @@ mod form_decision_tests {
                 .unwrap_or_else(|| panic!("{label} is reviewed"))
                 .default
         };
+        let reviewed = |app: &App, label: &str| {
+            let Screen::Create(form) = &app.screen else {
+                panic!("the create form is open")
+            };
+            form.review(app).answers.iter().any(|a| a.label == label)
+        };
         type Change = fn(&mut CreateForm, &Catalog);
-        let changes: [(&str, Change); 11] = [
+        let changes: [(&str, Change); 6] = [
             ("Models", |f, c| {
                 f.connection
                     .models
                     .set(Slot::Opus, Some(c.models[0].id.clone()))
             }),
-            ("Offered", |f, c| f.toggle_model(c, 1)),
             ("Kits", |f, _| f.kits.addons[0] = true),
-            ("Opens in", |f, _| {
+            ("Starts in", |f, _| {
                 f.workspace.start_dir = Some("sub".into())
-            }),
-            ("More folders", |f, _| {
-                f.workspace.extra_folders = TextInput::new("/srv/docs:ro")
             }),
             ("Clone mode", |f, _| f.workspace.clone = true),
             ("Skills", |f, _| {
                 f.workspace.skills = f.workspace.skills.next()
+            }),
+            ("Label", |f, _| f.workspace.name = TextInput::new("mine")),
+        ];
+        for (label, change) in changes {
+            app.open_create();
+            let label_line = label == "Label";
+            assert_eq!(
+                default_of(&app, label),
+                !label_line,
+                "{label} opens as a default"
+            );
+            let Screen::Create(form) = &mut app.screen else {
+                panic!("the create form is open")
+            };
+            change(form, &catalog);
+            assert!(!default_of(&app, label), "{label} changed");
+        }
+        let seldom: [(&str, Change); 6] = [
+            ("Offered", |f, c| f.toggle_model(c, 1)),
+            ("Also mounts", |f, _| {
+                f.workspace.extra_folders = vec!["/srv/docs:ro".into()]
             }),
             ("Ports", |f, _| f.workspace.ports = TextInput::new("8080")),
             ("Blocked hosts", |f, _| {
@@ -16644,21 +16773,15 @@ mod form_decision_tests {
             ("MCP servers", |f, _| f.workspace.static_mcp[0] = true),
             ("MCP servers", |f, _| f.workspace.no_mcp = true),
         ];
-        for (label, change) in changes {
+        for (label, change) in seldom {
             app.open_create();
-            assert!(default_of(&app, label), "{label} opens as a default");
+            assert!(!reviewed(&app, label), "{label} has no line at first");
             let Screen::Create(form) = &mut app.screen else {
                 panic!("the create form is open")
             };
             change(form, &catalog);
             assert!(!default_of(&app, label), "{label} changed");
         }
-        // A label typed by hand is still the label: never a default, like the harness.
-        app.open_create();
-        if let Screen::Create(form) = &mut app.screen {
-            form.workspace.name = TextInput::new("mine");
-        }
-        assert!(!default_of(&app, "Label"));
     }
 }
 
@@ -16759,12 +16882,12 @@ mod screen_decision_tests {
         let app = app(Vec::new());
         let mcp = app.secret_notes(&SecretRow::global_service("mcp:slack:client_secret"));
         assert!(
-            mcp[0].starts_with("The MCP gateway's own credential"),
+            mcp[0].starts_with("The secret of the MCP server “slack”."),
             "{mcp:?}"
         );
         let service = app.secret_notes(&SecretRow::global_service("litellm"));
         assert!(
-            service[0].ends_with("use it on their next request — no sandbox here does yet."),
+            service[0].ends_with("gets the change at once — no sandbox here does yet."),
             "{service:?}"
         );
         assert!(app
@@ -16779,7 +16902,7 @@ mod screen_decision_tests {
         );
         assert_eq!(
             App::secret_heading(&SecretRow::global_service("mcp:acme:api-key")),
-            Some("MCP gateway — held on the host, never injected")
+            Some(MCP_SECRETS)
         );
         assert_eq!(App::secret_heading(&SecretRow::Close), None);
 
@@ -16807,16 +16930,16 @@ mod screen_decision_tests {
         use crate::app::AccountChoice;
         let effect = |account| testkit::auth_form(account).effect()[0];
         assert!(effect(AccountChoice::Login).starts_with("No changes."));
-        assert!(effect(AccountChoice::New).contains("claude-token kit"));
+        assert!(effect(AccountChoice::New).starts_with("Applying this rebuilds the sandbox."));
         let mut form = testkit::auth_form(AccountChoice::Login);
         form.current = Auth::Token {
             name: "work".into(),
             placeholder: sbx::named_token_placeholder("work"),
             stored: true,
         };
-        assert!(form.effect()[0].contains("claude-anthropic kit"));
+        assert!(form.effect()[0].contains("rebuilds the sandbox on /login"));
         form.account = AccountChoice::Named("private".into());
-        assert!(form.effect()[0].starts_with("The placeholder"));
+        assert!(form.effect()[0].contains("rebuilds the sandbox on the other token"));
         form.account = AccountChoice::Named("work".into());
         form.token = TextInput::new("sk-ant-oat01-rotated");
         assert!(form.effect()[0].starts_with("Applying this stores the token"));
@@ -16853,10 +16976,8 @@ mod screen_decision_tests {
         app.approvals = vec![request.clone()];
         let notes = app.approval_notes(&request.id);
         assert_eq!(notes.len(), 1);
-        assert!(notes[0].starts_with("Allow lets example.org:443 through for this sandbox alone"));
-        assert!(notes[0].contains(
-            "`sbx policy rm network --sandbox box --resource example.org:443`. Dismiss leaves"
-        ));
+        assert!(notes[0].starts_with("Allow lets example.org:443 through for this sandbox"));
+        assert!(notes[0].contains("Dismiss keeps it blocked"), "{notes:?}");
         request.options.push(sbx::ApprovalOption {
             id: "allow-all".into(),
             label: "Allow all".into(),
@@ -16864,10 +16985,21 @@ mod screen_decision_tests {
         app.approvals = vec![request.clone()];
         let notes = app.approval_notes(&request.id);
         assert_eq!(
-            notes[1],
-            "sbx also offers: allow (Allow), dismiss (Dismiss), allow-all (Allow all)"
+            notes.len(),
+            1,
+            "sbx's own option ids are not the user's: {notes:?}"
         );
+        for inner in ["sbx policy", "`", "allow-all"] {
+            assert!(!notes[0].contains(inner), "{inner}: {notes:?}");
+        }
         assert!(app.approval_notes("network:gone").is_empty());
+
+        assert_eq!(approval_reason(&request), NO_RULE_YET);
+        request.detail = "Protocol: TCP\nblocked by the organization's policy".into();
+        assert_eq!(
+            approval_reason(&request),
+            "blocked by the organization's policy"
+        );
     }
 
     #[test]

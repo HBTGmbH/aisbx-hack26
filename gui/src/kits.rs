@@ -13,7 +13,10 @@ use crate::{page, theme, wizard};
 
 /// What the *Host caches* group says under its heading: the editor ticks them as any kit, while
 /// the wizard also greys out a cache this host does not have.
-const HOST_CACHES_GLOSS: &str = "Read-only, from this host.";
+const HOST_CACHES_GLOSS: &str = "Read-only, from this computer.";
+
+/// The editor's *Additional kits* gloss, for its *Can add later* badges.
+const OTHERS_GLOSS: &str = "Adding a kit rebuilds the sandbox, unless it is marked Can add later.";
 
 /// Draw the editor and pass a click on a row or a button to core.
 pub fn show(ui: &mut egui::Ui, app: &mut App) {
@@ -60,7 +63,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
             .unwrap_or_else(|| sb.agent.clone())
     });
     let subtitle = backend
-        .map(|b| format!("Built on {b}, which stays — a new sandbox is how to change it."))
+        .map(|b| format!("Runs {b}. A new sandbox can run another agent."))
         .unwrap_or_default();
     page::body(ui, "kits", &format!("Kits — {label}"), &subtitle, |ui| {
         // The wizard's items, badges and groups; what Apply would change is a badge too.
@@ -71,10 +74,9 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
         });
         let host = |i: &usize| model::is_host_folder_kit(&catalog.addons[*i].kit.name);
         let (hosts, others): (Vec<usize>, Vec<usize>) = addons.partition(host);
-        let others_gloss = format!("{}.", wizard::sentence(create::ADD_LATER_GLOSS));
         for (title, gloss, group) in [
             (wizard::HOST_CACHES, HOST_CACHES_GLOSS, hosts),
-            (wizard::ADDITIONAL_KITS, others_gloss.as_str(), others),
+            (wizard::ADDITIONAL_KITS, OTHERS_GLOSS, others),
         ] {
             if group.is_empty() {
                 continue;

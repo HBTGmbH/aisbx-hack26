@@ -144,8 +144,8 @@ is recommended.
 
    Start `aisbx-ui` from a shell, not from Finder or the Dock.
 
-2. Press `n` in `aisbx`, or click **New sandbox** in `aisbx-ui`. Pick the agent, the account and the addons, then
-   select **Create & start**.
+2. Press `n` in `aisbx`, or click **New sandbox** in `aisbx-ui`. Pick the AI provider, the agent, its account and
+   the addons, then select **Create & start**.
 
    ![The create wizard on its Kits step: host-gradle, jdk25 and rtk are ticked, and the summary below lists the choices so far.](docs/images/tui-wizard.png)
 
@@ -168,7 +168,7 @@ The keys you use most: `n` new, `↵` start, `x` shell, `e` kits, `y` approvals,
 The window has the same actions as buttons and menus, and every key works in it too
 ([The aisbx-ui GUI](docs/gui.md)).
 
-![The aisbx-ui window: the sandbox list on the left, and the page of the selected Claude Code sandbox with a request waiting for approval, the Start, Shell and Stop buttons, the tabs and a map of what the sandbox can reach.](docs/images/gui-main.png)
+![The aisbx-ui window: the sandbox list on the left, and the page of the selected Claude Code sandbox with a request waiting for approval, the New session, Shell and Stop buttons, the tabs and a map of what the sandbox can reach.](docs/images/gui-main.png)
 
 ## Headless: aisbx from scripts
 

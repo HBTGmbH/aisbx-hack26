@@ -257,8 +257,15 @@ fn focused(app: &App) -> WizardRow {
     rows[form.wizard_focus().min(rows.len() - 1)]
 }
 
-/// Walk the cursor to `row`, as `create_golden.rs` does: ↓ to it, then along the buttons.
+/// Walk the cursor to `row`, as `create_golden.rs` does: ↓ to it, then along the buttons. A row
+/// under a closed fold is reached by opening the fold first, with its own ↵.
 fn go(d: &mut dyn Driver, row: WizardRow) {
+    if let WizardRow::Field(field) = row {
+        if let Some(fold) = field.fold().filter(|f| !form(d.app()).fold_open(*f)) {
+            go(d, WizardRow::Field(fold));
+            d.press(KeyCode::Enter);
+        }
+    }
     let buttons = CreateForm::wizard_button_rows(form(d.app()).wizard_step());
     let (target, rights) = match buttons.iter().position(|b| *b == row) {
         Some(i) => (buttons[0], i),
@@ -504,33 +511,32 @@ fn the_golden_answers_through_the_window_start_the_same_job() {
         &[Do::Walk(CreateStep::Workspace), Do::Tick(CreateRow::Mcp(0))],
         false,
     );
-    // g7: a host folder for this sandbox alone, read-only at a target of its own.
-    let folder = std::fs::canonicalize(std::env::temp_dir()).unwrap();
-    let typed: &'static str =
-        Box::leak(format!("{}:/workspace/data:ro", folder.display()).into_boxed_str());
-    let more = &|app: &mut App| app.cwd = std::path::PathBuf::from("/proj-more");
+    // g7: a host folder for this sandbox alone, picked with the keys: into `data`, Mount it.
+    let base = std::env::temp_dir().join("aisbx-ui-golden-more");
+    for d in ["data", "proj-more"] {
+        std::fs::create_dir_all(base.join(d)).unwrap();
+    }
+    let base = std::fs::canonicalize(&base).unwrap();
+    let workspace = base.join("proj-more");
+    let more = move |app: &mut App| app.cwd = workspace.clone();
     same_job(
-        more,
+        &more,
         &[
             Do::Walk(CreateStep::Workspace),
-            Do::Type(CreateRow::ExtraFolders, typed),
+            Do::Enter(WizardRow::Field(CreateRow::FolderAdd)),
+            Do::Key(KeyCode::Right),
+            Do::Key(KeyCode::Down),
+            Do::Key(KeyCode::Enter),
         ],
         false,
     );
+    let _ = std::fs::remove_dir_all(&base);
     // g8: refusals, word for word.
     same_job(
         none,
         &[
             Do::Walk(CreateStep::Workspace),
             Do::Type(CreateRow::Ports, "8080:not-a-port"),
-        ],
-        true,
-    );
-    same_job(
-        none,
-        &[
-            Do::Walk(CreateStep::Workspace),
-            Do::Type(CreateRow::ExtraFolders, "docs:ro"),
         ],
         true,
     );
@@ -569,14 +575,14 @@ fn open_form() -> Win {
 }
 
 #[test]
-fn a_provider_tile_lists_its_harnesses_in_words() {
+fn a_provider_tile_says_what_it_serves_and_names_no_harness() {
     let mut w = open_form();
     w.frame(Vec::new());
-    let ways = "Runs Claude Code, OpenCode or Pi";
+    let blurb = sentence_case(aisbx_core::create::provider_blurb(Provider::Litellm));
+    assert!(w.drawn.contains(&blurb), "{:?}", w.drawn);
     let joined = w.drawn.join(" ");
-    assert!(joined.contains(ways), "{:?}", w.drawn);
-    for text in &w.drawn {
-        assert!(!text.trim_start().starts_with('·'), "{text:?}");
+    for named in ["Runs ", "OpenCode", "/login"] {
+        assert!(!joined.contains(named), "{named}: {:?}", w.drawn);
     }
 }
 
@@ -664,9 +670,11 @@ fn enter_on_the_start_folder_row_then_down_opens_the_picker_unmoved() {
         FieldEffect::OpenStartDir => {}
         FieldEffect::Ignored
         | FieldEffect::Done
+        | FieldEffect::Next
         | FieldEffect::FetchModels
         | FieldEffect::EditConfig(_)
-        | FieldEffect::ResetConfig(_) => panic!("↵ opens the picker"),
+        | FieldEffect::ResetConfig(_)
+        | FieldEffect::PickFolder => panic!("↵ opens the picker"),
     }
     w.frame(vec![
         pressed(Key::Enter, Modifiers::NONE),
@@ -1060,34 +1068,44 @@ fn a_bad_field_says_what_is_wrong_under_it_once_left() {
 }
 
 #[test]
-fn the_workspace_step_takes_more_folders_in_a_box_of_its_own() {
+fn the_workspace_step_lists_each_picked_folder_with_its_access_and_remove() {
     let mut w = open_form();
     run(&mut w, &[Do::Walk(CreateStep::Workspace)]);
+    if let Screen::Create(form) = &mut w.app.screen {
+        form.add_folder(std::path::Path::new("/srv/docs"));
+    }
     w.frame(Vec::new());
-    let placeholder = "~/docs:ro, ~/libs:/workspace/libs";
     let at = |w: &Win, text: &str| {
         (w.drawn_at.iter())
             .find(|(t, _)| t == text)
             .map(|(_, r)| r.center())
             .unwrap_or_else(|| panic!("{text} is drawn: {:?}", w.drawn))
     };
-    at(&w, "More folders");
-    let gloss = aisbx_core::create::field_gloss(CreateRow::ExtraFolders);
-    assert!(
-        (w.drawn.iter()).any(|t| t.to_lowercase() == gloss.to_lowercase()),
-        "{:?}",
-        w.drawn
-    );
-    let the_box = at(&w, placeholder);
-    click(&mut w, the_box);
-    assert_eq!(
-        focused(&w.app),
-        WizardRow::Field(CreateRow::ExtraFolders),
-        "a click on the box puts the cursor in it"
-    );
-    w.type_text("/srv/docs:ro");
-    assert_eq!(form(&w.app).workspace.extra_folders.value, "/srv/docs:ro");
-    at(&w, "/srv/docs:ro");
+    at(&w, "/srv/docs");
+    at(&w, "Mount a folder…");
+    let gloss = sentence_case(aisbx_core::create::field_gloss(CreateRow::FolderAdd));
+    assert!(w.drawn.contains(&gloss), "{:?}", w.drawn);
+    let segment = at(&w, "Read-write");
+    click(&mut w, segment);
+    assert_eq!(form(&w.app).workspace.extra_folders, ["/srv/docs"]);
+    let remove = at(&w, "Remove");
+    click(&mut w, remove);
+    assert!(form(&w.app).workspace.extra_folders.is_empty());
+}
+
+/// The seldom used options wait under a fold: a click on it opens it, and its fields come in.
+#[test]
+fn a_click_on_a_fold_shows_what_it_holds() {
+    let mut w = open_form();
+    run(&mut w, &[Do::Walk(CreateStep::Workspace)]);
+    w.frame(Vec::new());
+    assert!(!w.drawn.iter().any(|t| t == "Ports"), "{:?}", w.drawn);
+    let fold = text_from(&w, "More options", 0.0).center();
+    click(&mut w, fold);
+    assert!(form(&w.app).wizard.advanced_open);
+    w.frame(Vec::new());
+    assert!(w.drawn.iter().any(|t| t == "Ports"), "{:?}", w.drawn);
+    assert!(w.drawn.iter().any(|t| t == crate::controls::OPTIONAL));
 }
 
 #[test]
@@ -1265,6 +1283,7 @@ fn sentence_case(text: &str) -> String {
 #[test]
 fn the_wizard_bar_says_what_the_cursors_row_does() {
     let mut w = open_form();
+    run(&mut w, &[Do::Walk(CreateStep::Workspace)]);
     w.frame(Vec::new());
     let note_of = |w: &Win| {
         let help = form(&w.app).help(&w.app, focused(&w.app));

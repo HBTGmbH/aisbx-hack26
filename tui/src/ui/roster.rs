@@ -95,12 +95,11 @@ impl Columns {
 /// How many lines a row of the list takes.
 fn height(app: &App, row: &Row, cols: &Columns) -> u16 {
     match row {
-        // A blank line and the heading: the gap keeps the two sections apart.
-        Row::Other => 2,
+        Row::Other | Row::Folder(_) => 2,
         Row::Sandbox(cell) => app
             .sandbox_at(*cell)
             .map_or(1, |sb| cols.lines(sb, app.approvals_for(&sb.name))),
-        Row::Here | Row::Folder(_) | Row::New(_) => 1,
+        Row::Here | Row::New(_) => 1,
     }
 }
 
@@ -111,8 +110,8 @@ pub(super) fn wanted_height(app: &App) -> u16 {
         .roster()
         .iter()
         .map(|row| match row {
-            Row::Other | Row::Sandbox(_) => 2,
-            Row::Here | Row::Folder(_) | Row::New(_) => 1,
+            Row::Other | Row::Folder(_) | Row::Sandbox(_) => 2,
+            Row::Here | Row::New(_) => 1,
         })
         .sum();
     u16::try_from(lines + 2).unwrap_or(u16::MAX)
@@ -235,7 +234,11 @@ fn offscreen_hint(rows: &[Row], shown: &Range<usize>) -> Option<Line<'static>> {
     }
     if other_below {
         spans.push(Span::styled(
-            format!("{}Other folders ", if below > 0 { " · " } else { " ↓ " }),
+            format!(
+                "{}{} ",
+                if below > 0 { " · " } else { " ↓ " },
+                roster::OTHER_HEADING
+            ),
             theme::key(),
         ));
     } else if below > 0 {
@@ -271,7 +274,10 @@ fn ruled(mut left: Vec<Span<'static>>, right: Vec<Span<'static>>, width: u16) ->
 }
 
 fn render_here(frame: &mut Frame, app: &App, band: Rect) {
-    let mut left = vec![Span::styled("This folder", theme::title()), Span::raw("  ")];
+    let mut left = vec![
+        Span::styled(roster::HERE_HEADING, theme::title()),
+        Span::raw("  "),
+    ];
     left.extend(folder_spans(&app.cwd));
     left.push(Span::styled(
         match app.here {
@@ -292,8 +298,8 @@ fn render_other(frame: &mut Frame, app: &App, band: Rect) -> Hits {
         ..band
     };
     let left = vec![
-        Span::styled(if app.show_other { "▾ " } else { "▸ " }, theme::muted()),
-        Span::styled("Other folders", theme::muted().add_modifier(Modifier::BOLD)),
+        Span::styled(if app.show_other { "▾ " } else { "▸ " }, theme::title()),
+        Span::styled(roster::OTHER_HEADING, theme::title()),
         Span::styled(
             format!(
                 "   {}",
@@ -314,18 +320,38 @@ fn render_other(frame: &mut Frame, app: &App, band: Rect) -> Hits {
     vec![(line, Hit::key(KeyCode::Char('a')))]
 }
 
-/// A folder heading in the second section: one line over the sandboxes that mount it.
+/// A folder heading in the second section, after a blank line that sets its sandboxes apart from
+/// the folder above: the folder in bold, then how many sandboxes mount it.
 fn render_folder(frame: &mut Frame, head: &FolderHead, band: Rect, query: &str) {
+    let line = Rect {
+        y: band.bottom().saturating_sub(1),
+        height: 1,
+        ..band
+    };
     let mut spans = vec![Span::raw(" ")];
     if head.mountless() {
-        spans.push(Span::styled("no host folder (mountless)", theme::muted()));
+        spans.push(Span::styled(
+            roster::NO_FOLDER,
+            Style::default().add_modifier(Modifier::BOLD),
+        ));
     } else {
-        spans.extend(marked(folder_spans(&head.path), query));
+        let folder = folder_spans(&head.path).into_iter().map(|span| {
+            let style = span.style.add_modifier(Modifier::BOLD);
+            span.style(style)
+        });
+        spans.extend(marked(folder.collect(), query));
     }
     if head.missing {
-        spans.push(Span::styled("  folder missing", theme::danger()));
+        spans.push(Span::styled(
+            format!("  {}", roster::FOLDER_GONE),
+            theme::danger(),
+        ));
     }
-    frame.render_widget(Paragraph::new(Line::from(spans)), band);
+    spans.push(Span::styled(
+        format!("   {}", roster::count(head.sandboxes)),
+        theme::muted(),
+    ));
+    frame.render_widget(Paragraph::new(Line::from(spans)), line);
 }
 
 /// A line built left to right at fixed columns.
@@ -928,7 +954,7 @@ mod tests {
                 .position(|l| l.contains(needle))
                 .unwrap_or_else(|| panic!("{needle} in {shown:#?}"))
         };
-        let heading = find("Other folders");
+        let heading = find(roster::OTHER_HEADING);
         assert!(shown[heading].contains("3 sandboxes in 2 folders"));
         assert!(heading < find("/work/api") && find("/work/api") < find("far-0"));
         assert!(find("far-1") < find("/work/ui") && find("/work/ui") < find("far-2"));
@@ -937,6 +963,11 @@ mod tests {
             1,
             "the folder is said once"
         );
+        for (folder, count) in [("/work/api", "2 sandboxes"), ("/work/ui", "1 sandbox")] {
+            let at = find(folder);
+            assert!(shown[at].trim_end().ends_with(count), "{:?}", shown[at]);
+            assert!(shown[at - 1].trim().is_empty(), "{:?}", shown[at - 1]);
+        }
     }
 
     #[test]

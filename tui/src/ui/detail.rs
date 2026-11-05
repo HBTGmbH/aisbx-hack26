@@ -7,14 +7,14 @@ use std::path::Path;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Paragraph, Wrap};
+use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
-use super::{bordered, clip, panel, Hits};
+use super::{bordered, clip, Hits};
 use crate::app::{App, Hit};
 use crate::insight::{self, short_time, Kind, Note, PieceKind, SourceTone, Tab};
 use crate::model::{self, Auth, FolderRelation, Lifecycle, Sandbox, Skills};
-use crate::sbx::{Approval, LogHost, PolicyRule, SkillsMode};
+use crate::sbx::{Approval, LogHost, PolicyRule};
 use crate::state;
 use crate::stats;
 use crate::theme;
@@ -22,12 +22,6 @@ use crate::theme;
 pub(super) fn render(frame: &mut Frame, app: &mut App, area: Rect) -> Hits {
     let mut hits = Hits::new();
     let Some(sb) = app.selected() else {
-        // The cursor is on the New row.
-        let block = panel("New sandbox", false);
-        let inner = block.inner(area);
-        frame.render_widget(block, area);
-        let lines = Paragraph::new(new_sandbox_lines(app)).wrap(Wrap { trim: true });
-        frame.render_widget(lines, inner);
         return hits;
     };
 
@@ -185,25 +179,15 @@ fn hang(lines: Vec<Line<'static>>, width: usize) -> Vec<Line<'static>> {
     out
 }
 
-/// What the pane says on the New row: the key, the folder, and the wizard's five steps as its
-/// trail names them.
-fn new_sandbox_lines(app: &App) -> Vec<Line<'static>> {
-    let mut steps = vec![Span::raw("   ")];
-    for step in crate::create::CreateStep::ALL {
-        steps.push(Span::styled(step.number().to_string(), theme::key()));
-        steps.push(Span::raw(format!(" {}   ", step.title())));
-    }
-    vec![
-        Line::from(vec![
-            Span::styled("↵", theme::key()),
-            Span::styled("  create a sandbox in  ", theme::muted()),
-            Span::raw(model::tilde(&app.cwd)),
-        ]),
-        Line::from(""),
-        Line::from(steps),
-        Line::from(""),
-        note("Nothing is created before the Review; the sandbox is named after this folder."),
-    ]
+/// How many lines the pane wants `width` wide, its rules included: as many as the tallest
+/// Overview of the host's sandboxes takes, so the split stays put while the cursor moves.
+pub(super) fn wanted_height(app: &App, width: u16) -> u16 {
+    let inner = width.saturating_sub(4) as usize;
+    let lines = (app.sandboxes.iter())
+        .map(|sb| hang(overview_in(sb, app, inner), inner).len())
+        .max()
+        .unwrap_or(0);
+    u16::try_from(lines + 2).unwrap_or(u16::MAX)
 }
 
 /// The tab strip's width with every title.
@@ -351,7 +335,7 @@ fn overview_parts(sb: &Sandbox, app: &App) -> (Vec<Line<'static>>, Vec<Line<'sta
         lines.push(field(
             "⚠ secret",
             vec![Span::styled(
-                format!("{service} is not stored — run  sbx secret set {service}"),
+                format!("{service} is missing — store it with  sbx secret set {service}"),
                 theme::danger(),
             )],
         ));
@@ -363,33 +347,24 @@ fn overview_parts(sb: &Sandbox, app: &App) -> (Vec<Line<'static>>, Vec<Line<'sta
             "lifecycle",
             vec![
                 Span::raw("keeps running after its sessions end"),
-                Span::styled(
-                    "   detached mode, until s stops it — b rebuilds it back",
-                    theme::muted(),
-                ),
+                Span::styled("   b turns this off", theme::muted()),
             ],
         ));
     } else if lifecycle == Some(Lifecycle::StopsWithPorts) {
         lines.push(field(
             "lifecycle",
             vec![
-                Span::raw("stops itself after its last session"),
-                Span::styled(
-                    "   and its ports stop answering — b keeps it running",
-                    theme::muted(),
-                ),
+                Span::raw("stops after its last session, and its ports with it"),
+                Span::styled("   b keeps it running", theme::muted()),
             ],
         ));
     }
 
     let agent = match app.backend_of(sb) {
-        Some(b) => vec![
-            Span::styled(
-                b.kit.display_name.clone(),
-                Style::default().fg(theme::agent_color(&b.agent)),
-            ),
-            Span::styled(format!("  — {}", b.setup_hint()), theme::muted()),
-        ],
+        Some(b) => vec![Span::styled(
+            b.kit.display_name.clone(),
+            Style::default().fg(theme::agent_color(&b.agent)),
+        )],
         None => vec![
             Span::styled(
                 format!("{} (not from this repo's kits)", sb.agent),
@@ -411,7 +386,7 @@ fn overview_parts(sb: &Sandbox, app: &App) -> (Vec<Line<'static>>, Vec<Line<'sta
         let mut spans = vec![Span::raw(conn.clone())];
         if app.litellm_key_missing(conn) {
             spans.push(Span::styled(
-                "  ⚠ key missing — aisbx litellm add <file> --key-stdin --replace",
+                "  ⚠ key missing — add it in Secrets (S)",
                 theme::danger(),
             ));
         }
@@ -497,7 +472,7 @@ fn overview_parts(sb: &Sandbox, app: &App) -> (Vec<Line<'static>>, Vec<Line<'sta
     if sb.start_dir.is_some() {
         let gone = sb.start_dir_missing();
         lines.push(field(
-            "opens in",
+            "starts in",
             vec![
                 Span::styled(
                     sb.start_dir
@@ -512,10 +487,10 @@ fn overview_parts(sb: &Sandbox, app: &App) -> (Vec<Line<'static>>, Vec<Line<'sta
                 ),
                 Span::styled(
                     match gone {
-                        true => "   ⚠ gone — starts at the folder above until w picks another",
-                        false => "   the agent's working directory, inside the folder above",
+                        true => "   ⚠ not found — the agent starts in the folder; w picks another",
+                        false => "",
                     },
-                    if gone { theme::warn() } else { theme::muted() },
+                    theme::warn(),
                 ),
             ],
         ));
@@ -525,33 +500,16 @@ fn overview_parts(sb: &Sandbox, app: &App) -> (Vec<Line<'static>>, Vec<Line<'sta
         lines.push(field(
             "skills",
             match skills {
-                Skills::Known(SkillsMode::Readonly) => vec![
-                    Span::raw("read-only"),
+                Skills::Known(mode) => vec![
+                    Span::raw(crate::create::skills_mode_name(mode)),
                     Span::styled(
-                        "   the host store, which it cannot change — K imports into it",
-                        theme::muted(),
-                    ),
-                ],
-                Skills::Known(SkillsMode::Readwrite) => vec![
-                    Span::raw("read-write"),
-                    Span::styled(
-                        "   the host store, and it can rewrite what other sandboxes load",
-                        theme::muted(),
-                    ),
-                ],
-                Skills::Known(SkillsMode::Off) => vec![
-                    Span::raw("not shared"),
-                    Span::styled(
-                        "   created with --skills=off; fixed at creation",
+                        format!("   {}", crate::create::skills_gloss(mode)),
                         theme::muted(),
                     ),
                 ],
                 Skills::Unrecorded => vec![
                     Span::raw("shared"),
-                    Span::styled(
-                        "   mode not recorded — created outside aisbx",
-                        theme::muted(),
-                    ),
+                    Span::styled("   created outside aisbx", theme::muted()),
                 ],
             },
         ));
@@ -573,7 +531,7 @@ fn overview_parts(sb: &Sandbox, app: &App) -> (Vec<Line<'static>>, Vec<Line<'sta
             Span::raw(crate::sbx::ssh_host(&sb.name)),
             Span::styled(
                 match app.ssh_ready {
-                    true => "   o connects an editor or a shell",
+                    true => "   o connects an editor",
                     false => "   ⚠ run `sbx setup ssh` first — press o",
                 },
                 match app.ssh_ready {
@@ -613,13 +571,7 @@ fn overview_parts(sb: &Sandbox, app: &App) -> (Vec<Line<'static>>, Vec<Line<'sta
         if let Some(memory) = &sb.memory {
             parts.push(format!("{memory} memory"));
         }
-        lines.push(field(
-            "limits",
-            vec![
-                Span::raw(parts.join(" · ")),
-                Span::styled("   recorded at creation; R keeps them", theme::muted()),
-            ],
-        ));
+        lines.push(field("limits", vec![Span::raw(parts.join(" · "))]));
     }
 
     if let Some((value, gloss)) = sb.volumes_note() {
@@ -632,24 +584,12 @@ fn overview_parts(sb: &Sandbox, app: &App) -> (Vec<Line<'static>>, Vec<Line<'sta
         ));
     }
 
-    lines.push(field(
-        "location",
-        vec![Span::styled(sb.location(), theme::muted())],
-    ));
-
     if !sb.image.is_empty() {
         let mut spans = vec![Span::styled(sb.image.clone(), theme::muted())];
         if let Some(short) = sb.short_digest() {
             spans.push(Span::styled(format!("   {short}"), theme::muted()));
         }
         lines.push(field("image", spans));
-    }
-
-    if !sb.auth_mode.is_empty() {
-        lines.push(field(
-            "sbx auth",
-            vec![Span::styled(sb.auth_mode.clone(), theme::muted())],
-        ));
     }
 
     if !sb.secrets.is_empty() {
@@ -663,20 +603,15 @@ fn overview_parts(sb: &Sandbox, app: &App) -> (Vec<Line<'static>>, Vec<Line<'sta
             .collect();
         lines.push(field(
             "secrets",
-            vec![
-                Span::styled(list.join("  "), theme::muted()),
-                Span::styled("  — values stay on the host", theme::muted()),
-            ],
+            vec![Span::styled(list.join("  "), theme::muted())],
         ));
     }
 
     if sb.mcp_gateway {
         let servers = app.registry.static_mcp(&sb.name);
-        let mut spans = vec![Span::styled("gateway enabled", theme::muted())];
-        if let Some(set) = crate::create::mcp_set(&servers) {
-            spans.push(Span::styled(format!("   {set}"), theme::muted()));
-        }
-        lines.push(field("mcp", spans));
+        let set = crate::create::mcp_set(&servers);
+        let set = set.unwrap_or_else(|| crate::create::HOST_MCP.to_string());
+        lines.push(field("mcp", vec![Span::styled(set, theme::muted())]));
     }
 
     (head, lines)
@@ -687,11 +622,8 @@ fn overview_parts(sb: &Sandbox, app: &App) -> (Vec<Line<'static>>, Vec<Line<'sta
 fn account_spans(auth: &Auth, users: usize) -> Vec<Span<'static>> {
     match auth {
         Auth::Login => vec![
-            Span::raw("/login (OAuth)"),
-            Span::styled(
-                "   host-global — shared with every other /login sandbox",
-                theme::muted(),
-            ),
+            Span::raw("/login"),
+            Span::styled("   shared with every /login sandbox", theme::muted()),
         ],
         Auth::Token {
             name,
@@ -702,10 +634,7 @@ fn account_spans(auth: &Auth, users: usize) -> Vec<Span<'static>> {
                 format!("setup token “{name}” — not stored"),
                 theme::danger(),
             ),
-            Span::styled(
-                "   it cannot authenticate until one is stored: press A",
-                theme::danger(),
-            ),
+            Span::styled("   it cannot sign in: A stores one", theme::danger()),
         ],
         Auth::Token { name, .. } => vec![
             Span::styled(
@@ -714,14 +643,9 @@ fn account_spans(auth: &Auth, users: usize) -> Vec<Span<'static>> {
             ),
             Span::styled(
                 match users {
-                    0 | 1 => {
-                        "   independent of the /login; no other sandbox uses it yet".to_string()
-                    }
-                    2 => "   independent of the /login; 1 other sandbox uses it too".to_string(),
-                    n => format!(
-                        "   independent of the /login; {} other sandboxes use it too",
-                        n - 1
-                    ),
+                    0 | 1 => "   no other sandbox uses it".to_string(),
+                    2 => "   1 other sandbox uses it too".to_string(),
+                    n => format!("   {} other sandboxes use it too", n - 1),
                 },
                 theme::muted(),
             ),
@@ -1382,6 +1306,7 @@ fn notes(notes: &[Note]) -> Vec<Line<'static>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sbx::SkillsMode;
     use crate::stats::Sample;
 
     /// Two sandboxes, a short label and a long one; the first selected.
@@ -1419,6 +1344,7 @@ mod tests {
     fn a_wide_overview_puts_the_record_in_a_second_column() {
         let mut sb = crate::model::sample("box", Some("claude-anthropic"), &["jdk25"]);
         sb.running = true;
+        sb.start_dir = Some(std::path::PathBuf::from("gone-since"));
         let app = App::for_test(crate::kits::Catalog::load().unwrap(), vec![sb.clone()]);
         let one = text(&overview_in(&sb, &app, 80));
         assert_eq!(text(&overview(&sb, &app)), one);
@@ -1488,7 +1414,6 @@ mod tests {
             "sbx name",
             "ssh",
             "created",
-            "location",
             "image",
         ];
         assert_eq!(at("status"), 0, "{labels:?}");
@@ -1690,9 +1615,8 @@ mod tests {
             app.detail_scroll = scroll;
             seen.push_str(&crate::ui::tests_support::render_at(&mut app, 50, 24));
         }
-        // The agent row's gloss ends past column 50, and the last row is the sbx auth mode.
-        assert!(seen.contains("Enterprise)"), "{seen}");
-        assert!(seen.contains("sbx auth"), "{seen}");
+        assert!(seen.contains("every /login"), "{seen}");
+        assert!(seen.contains("0123456789ab"), "{seen}");
         app.detail_scroll = u16::MAX;
         let screen = crate::ui::tests_support::render_at(&mut app, 50, 24);
         assert!(!screen.contains("more  ctrl"), "{screen}");
@@ -2068,20 +1992,20 @@ mod tests {
         assert_eq!(pin(&activity(&app)), PIN_ACTIVITY);
     }
 
-    const PIN_RESOURCES_RUNNING: &str = "      CPUs  ‹muted›██▏░░░░░░░░░░░░░░░‹running›  12%‹running›   2 vCPU‹muted›\n    Memory  ‹muted›▍░░░░░░░░░░░░░░░░░‹running›   2%‹running›   0.3 GB used / 15.8 GB total‹muted›\n      Disk  ‹muted›▎░░░░░░░░░░░░░░░░░‹running›   2%‹running›   0.3 GB used / 19.5 GB total‹muted›\n    Uptime  ‹muted›8m 25s\n\nThe sandbox microVM's own CPUs, memory and root filesystem — not the host's.‹muted›";
-    const PIN_RESOURCES_STOPPED: &str = "The sandbox is stopped.‹muted›\n\nCPU, memory and disk are read from inside the sandbox, which needs it to be‹muted›\nrunning — starting one just to measure it would be worse than saying so.‹muted›\n\n↵‹key›  start it, or  ‹muted›x‹key›  open a shell inside it‹muted›";
-    const PIN_RESOURCES_FIRST: &str = "      CPUs  ‹muted›2 vCPU   load needs a second reading‹muted›\n    Memory  ‹muted›▍░░░░░░░░░░░░░░░░░‹running›   2%‹running›   0.3 GB used / 15.8 GB total‹muted›\n      Disk  ‹muted›▎░░░░░░░░░░░░░░░░░‹running›   2%‹running›   0.3 GB used / 19.5 GB total‹muted›\n    Uptime  ‹muted›8m 25s\n\nThe sandbox microVM's own CPUs, memory and root filesystem — not the host's.‹muted›";
+    const PIN_RESOURCES_RUNNING: &str = "      CPUs  ‹muted›██▏░░░░░░░░░░░░░░░‹running›  12%‹running›   2 vCPU‹muted›\n    Memory  ‹muted›▍░░░░░░░░░░░░░░░░░‹running›   2%‹running›   0.3 GB used / 15.8 GB total‹muted›\n      Disk  ‹muted›▎░░░░░░░░░░░░░░░░░‹running›   2%‹running›   0.3 GB used / 19.5 GB total‹muted›\n    Uptime  ‹muted›8m 25s\n\nThe sandbox's own CPUs, memory and disk, not your computer's.‹muted›";
+    const PIN_RESOURCES_STOPPED: &str = "The sandbox is stopped.‹muted›\n\n↵‹key›  start it, or  ‹muted›x‹key›  open a shell inside it‹muted›";
+    const PIN_RESOURCES_FIRST: &str = "      CPUs  ‹muted›2 vCPU   load needs a second reading‹muted›\n    Memory  ‹muted›▍░░░░░░░░░░░░░░░░░‹running›   2%‹running›   0.3 GB used / 15.8 GB total‹muted›\n      Disk  ‹muted›▎░░░░░░░░░░░░░░░░░‹running›   2%‹running›   0.3 GB used / 19.5 GB total‹muted›\n    Uptime  ‹muted›8m 25s\n\nThe sandbox's own CPUs, memory and disk, not your computer's.‹muted›";
     const PIN_METERS: &str = "████████████▍░░░░░‹running›  69%‹running›\n████████████▋░░░░░‹warn›  70%‹warn›\n████████████████░░‹warn›  89%‹warn›\n████████████████▎░‹red›  90%‹red›";
-    const PIN_MOUNTS_REPORTED: &str = " workspace  ‹muted›/proj   read-write‹muted›\n     mount  ‹muted›/data/libs → /workspace/libs‹muted›   read-only‹muted›\n    skills  ‹muted›/sbx/agent-skills → /home/agent/.local/share/aisbx/skills-store‹muted›   read-only, linked into the agent's skills folder‹muted›\n     added  ‹muted›/data/set → /mnt/set‹muted›   read-only‹muted›\n     mount  ‹muted›/data/gone   read-write‹muted›   ⚠ missing on this host‹danger›\n\nThe workspace is bind-mounted: edits inside the sandbox change these files.‹muted›\nAdded with sbx mount after creation; restored on every start, and mounted again by R.‹muted›";
-    const PIN_MOUNTS_BIND: &str = " workspace  ‹muted›/proj   read-write‹muted›\n     mount  ‹muted›/home/u/.gradle   read-only‹muted›\n\nThe workspace is bind-mounted: edits inside the sandbox change these files.‹muted›\n\n    skills  ‹muted›the host's shared agent-skills store   read-only, linked into the agent's skills folder‹muted›";
-    const PIN_MOUNTS_CLONE: &str = " workspace  ‹muted›/proj   read-only (clone mode)‹muted›\n\nClone mode: the agent works on a private in-container clone. Fetch its commits‹muted›\nwith  git fetch sandbox-s‹muted›\nNo extra mounts. The host-gradle and host-maven kits add read-only cache mounts.‹muted›\n\n    skills  ‹muted›the host's shared agent-skills store   read-write, mounted over the agent's skills folder‹muted›\n⚠ the workspace folder no longer exists on this host‹danger›";
-    const PIN_MOUNTS_MOUNTLESS: &str = "\nNo host folder is mounted (a mountless sandbox): the agent works in /home/agent/workspace,‹muted›\ninside the sandbox. Those files survive a stop, and are deleted with the sandbox —‹muted›\n`sbx cp` copies them out (sandbox paths must be absolute).‹muted›\nNo extra mounts. The host-gradle and host-maven kits add read-only cache mounts.‹muted›\n\n    skills  ‹muted›the host's shared agent-skills store   mode not recorded‹muted›\n\n     added  ‹muted›/data/set → /mnt/set‹muted›   read-only‹muted›\n     added  ‹muted›/data/out   read-write‹muted›\nAdded with sbx mount after creation; restored on every start, and mounted again by R.‹muted›";
-    const PIN_PORTS_LISTED: &str = "  http://127.0.0.1:8080       ‹running›→  sandbox ‹muted›3000  tcp‹muted›\n  http://127.0.0.1:54321      ‹running›→  sandbox ‹muted›8000  tcp‹muted›  ephemeral‹warn›\n\np‹key›  publish another   ‹muted›u‹key›  unpublish‹muted›\n\nThe service inside must listen on 0.0.0.0 (or [::]), not 127.0.0.1, to be reachable.‹muted›\nIt stops itself shortly after its last session ends, and these stop answering with it‹muted›\n— ‹muted›b‹key› keeps it running in the background.‹muted›";
-    const PIN_PORTS_KEPT: &str = "  http://127.0.0.1:8080       ‹running›→  sandbox ‹muted›3000  tcp‹muted›\n  http://127.0.0.1:54321      ‹running›→  sandbox ‹muted›8000  tcp‹muted›  ephemeral‹warn›\n\np‹key›  publish another   ‹muted›u‹key›  unpublish‹muted›\n\nThe service inside must listen on 0.0.0.0 (or [::]), not 127.0.0.1, to be reachable.‹muted›";
+    const PIN_MOUNTS_REPORTED: &str = " workspace  ‹muted›/proj   read-write‹muted›\n     mount  ‹muted›/data/libs → /workspace/libs‹muted›   read-only‹muted›\n    skills  ‹muted›/sbx/agent-skills → /home/agent/.local/share/aisbx/skills-store‹muted›   read-only‹muted›\n     added  ‹muted›/data/set → /mnt/set‹muted›   read-only‹muted›\n     mount  ‹muted›/data/gone   read-write‹muted›   ⚠ missing on this host‹danger›\n\nWhat the agent changes in these folders changes your files.‹muted›\nAdded with sbx mount after it was created; a rebuild mounts them again.‹muted›";
+    const PIN_MOUNTS_BIND: &str = " workspace  ‹muted›/proj   read-write‹muted›\n     mount  ‹muted›/home/u/.gradle   read-only‹muted›\n\nWhat the agent changes in these folders changes your files.‹muted›\n\n    skills  ‹muted›the shared skills   read-only‹muted›";
+    const PIN_MOUNTS_CLONE: &str = " workspace  ‹muted›/proj   read-only (clone mode)‹muted›\n\nClone mode: the agent works on its own Git clone. Get its commits with‹muted›\ngit fetch sandbox-s‹muted›\n\n    skills  ‹muted›the shared skills   read-write‹muted›\n⚠ this folder no longer exists on this computer‹danger›";
+    const PIN_MOUNTS_MOUNTLESS: &str = "\nNo folder of your computer is mounted: the agent works in /home/agent/workspace,‹muted›\ninside the sandbox. Deleting the sandbox deletes those files; `sbx cp` copies them out.‹muted›\n\n    skills  ‹muted›the shared skills   mode not recorded‹muted›\n\n     added  ‹muted›/data/set → /mnt/set‹muted›   read-only‹muted›\n     added  ‹muted›/data/out   read-write‹muted›\nAdded with sbx mount after it was created; a rebuild mounts them again.‹muted›";
+    const PIN_PORTS_LISTED: &str = "  http://127.0.0.1:8080       ‹running›→  sandbox ‹muted›3000  tcp‹muted›\n  http://127.0.0.1:54321      ‹running›→  sandbox ‹muted›8000  tcp‹muted›  ephemeral‹warn›\n\np‹key›  publish another   ‹muted›u‹key›  unpublish‹muted›\n\nA server in the sandbox must listen on 0.0.0.0, not 127.0.0.1.‹muted›\nIt stops after its last session, and its ports with it — ‹muted›b‹key› keeps it running.‹muted›";
+    const PIN_PORTS_KEPT: &str = "  http://127.0.0.1:8080       ‹running›→  sandbox ‹muted›3000  tcp‹muted›\n  http://127.0.0.1:54321      ‹running›→  sandbox ‹muted›8000  tcp‹muted›  ephemeral‹warn›\n\np‹key›  publish another   ‹muted›u‹key›  unpublish‹muted›\n\nA server in the sandbox must listen on 0.0.0.0, not 127.0.0.1.‹muted›";
     const PIN_PORTS_LOADING: &str = "loading…‹muted›";
-    const PIN_PORTS_EMPTY: &str = "No ports published — nothing on the host can reach into this sandbox.‹muted›\n\np‹key›  publish one, e.g.  ‹muted›8080:3000  (host 8080 → sandbox 3000)‹muted›\n\nThe service inside must listen on 0.0.0.0 (or [::]), not 127.0.0.1, to be reachable.‹muted›";
-    const PIN_PORTS_STOPPED: &str = "  http://127.0.0.1:8080       ‹running›→  sandbox ‹muted›3000  tcp‹muted›\n  http://127.0.0.1:54321      ‹running›→  sandbox ‹muted›8000  tcp‹muted›  ephemeral‹warn›\n\np‹key›  publish another   ‹muted›u‹key›  unpublish‹muted›\n\nThe service inside must listen on 0.0.0.0 (or [::]), not 127.0.0.1, to be reachable.‹muted›\nThe sandbox is stopped. Published ports are restored when it starts again;‹muted›\npublishing a new one starts it first.‹muted›\nIt stops itself shortly after its last session ends, and these stop answering with it‹muted›\n— ‹muted›b‹key› keeps it running in the background.‹muted›";
-    const PIN_NETWORK: &str = "    policy  ‹muted›global scope\n     proxy  ‹muted›http://gateway.docker.internal:3128   enforces the rules below‹muted›\n   network  ‹muted›sbx-net‹muted›\n\n deny  ‹danger›http            ‹muted›added‹muted›\n        POST api.github.com/repos/**?state=open\n deny  ‹danger›network         ‹muted›local    ‹muted›all sandboxes   tcp+udp‹muted›\n        both.example.com\n deny  ‹danger›network         ‹muted›local    ‹muted›all sandboxes   udp‹muted›   (inactive)‹warn›\n        dns.example.com\n allow ‹running›network         ‹muted›approved‹warn›\n        registry.npmjs.org:443\n allow ‹running›network         ‹muted›kit‹accent›\n        api.anthropic.com  console.anthropic.com  claude.ai\n        platform.claude.com  downloads.claude.ai:443\n        github.com  *.githubusercontent.com\n deny  ‹danger›network         ‹muted›fallback ‹muted›all sandboxes   tcp+udp‹muted›\n        **\n\n⚠ the web kit allows ** — every host is reachable from this sandbox‹danger›\n\nc‹key›  check whether a host is reachable from this sandbox‹muted›";
+    const PIN_PORTS_EMPTY: &str = "No ports published: nothing in the sandbox is reachable from your computer.‹muted›\n\np‹key›  publish one, e.g.  ‹muted›8080:3000  (host 8080 → sandbox 3000)‹muted›\n\nA server in the sandbox must listen on 0.0.0.0, not 127.0.0.1.‹muted›";
+    const PIN_PORTS_STOPPED: &str = "  http://127.0.0.1:8080       ‹running›→  sandbox ‹muted›3000  tcp‹muted›\n  http://127.0.0.1:54321      ‹running›→  sandbox ‹muted›8000  tcp‹muted›  ephemeral‹warn›\n\np‹key›  publish another   ‹muted›u‹key›  unpublish‹muted›\n\nA server in the sandbox must listen on 0.0.0.0, not 127.0.0.1.‹muted›\nThe sandbox is stopped. Its ports come back when it starts; publishing one starts it.‹muted›\nIt stops after its last session, and its ports with it — ‹muted›b‹key› keeps it running.‹muted›";
+    const PIN_NETWORK: &str = "    policy  ‹muted›global scope\n     proxy  ‹muted›http://gateway.docker.internal:3128   enforces the rules below‹muted›\n   network  ‹muted›sbx-net‹muted›\n\n deny  ‹danger›http            ‹muted›added‹muted›\n        POST api.github.com/repos/**?state=open\n deny  ‹danger›network         ‹muted›local    ‹muted›all sandboxes   tcp+udp‹muted›\n        both.example.com\n deny  ‹danger›network         ‹muted›local    ‹muted›all sandboxes   udp‹muted›   (inactive)‹warn›\n        dns.example.com\n allow ‹running›network         ‹muted›approved‹warn›\n        registry.npmjs.org:443\n allow ‹running›network         ‹muted›kit‹accent›\n        api.anthropic.com  console.anthropic.com  claude.ai\n        platform.claude.com  downloads.claude.ai:443\n        github.com  *.githubusercontent.com\n deny  ‹danger›network         ‹muted›fallback ‹muted›all sandboxes   tcp+udp‹muted›\n        **\n\n⚠ the web kit lets this sandbox reach every host on the internet‹danger›\n\nc‹key›  check whether a host is reachable from this sandbox‹muted›";
     const PIN_FILESYSTEM: &str = "Which host paths any sandbox may be given as a workspace.‹muted›\n\n allow ‹running›filesystem:read ‹muted›local    ‹muted›all sandboxes\n        **";
     const PIN_ACTIVITY: &str = "blocked‹heading›\n  registry.example.com:443              ‹danger›forward         ‹muted›×3     ‹muted›10:39:45‹muted›   no rule (default deny)‹muted›\n  evil.example.com:443                  ‹danger›forward         ‹muted›×1     ‹muted›11:00:01‹muted›   deny-evil‹muted›\n  no rule allowed those — the sandbox asked for approval: ‹muted›y‹key› answers it‹muted›\n\nallowed‹heading›\n  api.anthropic.com:443                 ‹running›forward         ‹muted›×128   ‹muted›10:39:45‹muted›\n  github.com:443                        ‹running›forward-bypass  ‹muted›×4     ‹muted›10:39:45‹muted›";
 }

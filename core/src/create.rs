@@ -252,9 +252,10 @@ pub struct WorkspaceAnswers {
     /// The host folders the sandbox mounts beside the workspace ([`crate::folders::plan`]), read
     /// when the form opens and when the mounted folder changes.
     pub folders: crate::folders::Plan,
-    /// More host folders for this sandbox alone, as typed ([`CreateForm::extra_folders`]).
-    /// `App::submit_create` writes them to the registry, so a rebuild mounts them again.
-    pub extra_folders: TextInput,
+    /// More host folders for this sandbox alone, picked one at a time, each as sbx takes an extra
+    /// workspace: `PATH` or `PATH:ro` ([`CreateForm::extra_folders`]). `App::submit_create`
+    /// writes them to the registry, so a rebuild mounts them again.
+    pub extra_folders: Vec<String>,
     /// How the host's shared agent-skills store is mounted. Opens on the host's own
     /// `skills.defaultMode`, and is always passed explicitly.
     pub skills: crate::sbx::SkillsMode,
@@ -289,18 +290,22 @@ impl CreateRow {
             | CreateRow::TokenName
             | CreateRow::Token => CreateStep::Harness,
             CreateRow::ModelsRefresh
+            | CreateRow::ModelsFold
             | CreateRow::Model(_)
             | CreateRow::ModelDefault(_)
             | CreateRow::ModelPick(..)
             | CreateRow::ModelOn(_)
+            | CreateRow::FilesFold
             | CreateRow::ConfigFile(_) => CreateStep::Models,
             CreateRow::Addon(_) => CreateStep::Kits,
             CreateRow::Name
             | CreateRow::StartDir
-            | CreateRow::ExtraFolders
+            | CreateRow::Folder(_)
+            | CreateRow::FolderAdd
             | CreateRow::Clone
             | CreateRow::GitGuard
             | CreateRow::Skills
+            | CreateRow::AdvancedFold
             | CreateRow::Ports
             | CreateRow::DenyNetwork
             | CreateRow::McpNone
@@ -321,14 +326,28 @@ impl CreateForm {
     /// Why a create would be refused over the answers `step` owns, if it would be: the first of its
     /// rows' problems ([`CreateForm::field_problem`]), in the order the rows are drawn.
     pub fn step_problem(&self, step: CreateStep, catalog: &Catalog) -> Option<String> {
+        self.refused_row(step, catalog).map(|(_, problem)| problem)
+    }
+
+    /// The row [`CreateForm::step_problem`] refuses over, with its problem.
+    fn refused_row(&self, step: CreateStep, catalog: &Catalog) -> Option<(CreateRow, String)> {
         self.rows_of(step, catalog)
             .into_iter()
-            .find_map(|row| self.field_problem(row, catalog))
+            .find_map(|row| Some((row, self.field_problem(row, catalog)?)))
+    }
+
+    /// Refuse to leave `step` over its answers, if they would refuse a create: say so on its
+    /// fields from now on, open the fold of the row refused over, and give its problem.
+    fn refuse(&mut self, step: CreateStep, catalog: &Catalog) -> Option<String> {
+        let (row, problem) = self.refused_row(step, catalog)?;
+        self.wizard.refused = true;
+        self.reveal(row);
+        Some(problem)
     }
 
     /// What is wrong with one row's answer, if a create would be refused over it. Only a new token
-    /// and *new connection...* have fields to check, besides the more folders, the ports and the
-    /// blocked hosts.
+    /// and *new connection...* have fields to check, besides the picked folders, the ports and
+    /// the blocked hosts.
     pub fn field_problem(&self, row: CreateRow, catalog: &Catalog) -> Option<String> {
         let ws = &self.workspace;
         let new_token = self.use_token(catalog) && self.connection.account == AccountChoice::New;
@@ -336,7 +355,12 @@ impl CreateForm {
         let name = self.connection.token_name.value.trim();
         let field = ConnField::ALL.into_iter().find(|f| f.row() == row);
         let problem = match row {
-            CreateRow::ExtraFolders => return self.extra_folders().1.into_iter().next(),
+            CreateRow::Folder(i) => {
+                let spec = ws.extra_folders.get(i)?;
+                let mark = format!("“{spec}”");
+                let problems = self.extra_folders().1;
+                return problems.into_iter().find(|p| p.starts_with(&mark));
+            }
             CreateRow::Ports => return Self::port_problem(ws.ports.value.trim()),
             CreateRow::DenyNetwork => return Self::deny_problem(ws.deny_network.value.trim()),
             _ if field.is_some() && new_conn => {
@@ -375,7 +399,6 @@ impl CreateForm {
             CreateRow::Name => Some(&self.workspace.name),
             CreateRow::TokenName => Some(&self.connection.token_name),
             CreateRow::Token => Some(&self.connection.token),
-            CreateRow::ExtraFolders => Some(&self.workspace.extra_folders),
             CreateRow::Ports => Some(&self.workspace.ports),
             CreateRow::DenyNetwork => Some(&self.workspace.deny_network),
             CreateRow::LitellmName => Some(&self.connection.new_conn.name),
@@ -393,6 +416,10 @@ impl CreateForm {
             CreateRow::Skills => SKILLS_MODES
                 .iter()
                 .map(|m| skills_mode_name(*m).to_string())
+                .collect(),
+            CreateRow::Folder(_) => FOLDER_ACCESS
+                .iter()
+                .map(|a| a.label().to_string())
                 .collect(),
             CreateRow::LitellmConn => (self.connection.connections.iter())
                 .map(|c| c.name.clone())
@@ -415,6 +442,9 @@ impl CreateForm {
                     })
                     .unwrap_or(self.connection.connections.len()),
             ),
+            CreateRow::Folder(i) if i < self.workspace.extra_folders.len() => {
+                Some(usize::from(!self.folder_read_only(i)))
+            }
             _ => None,
         }
     }
@@ -433,6 +463,19 @@ impl CreateForm {
                     return false;
                 }
                 self.connection.litellm = all.get(value).map(|c| c.name.clone());
+            }
+            CreateRow::Folder(i) => {
+                let (Some(spec), Some(access)) = (
+                    self.workspace.extra_folders.get(i).cloned(),
+                    FOLDER_ACCESS.get(value),
+                ) else {
+                    return false;
+                };
+                let host = crate::folders::spec_host(&spec).0.to_string();
+                self.workspace.extra_folders[i] = match access {
+                    crate::folders::Access::Read => format!("{host}:ro"),
+                    crate::folders::Access::Write => host,
+                };
             }
             _ => return false,
         }
@@ -582,6 +625,8 @@ pub enum WizardRow {
     Connection(ConnChoice),
     /// A row of the form itself: the connection, token, model, kit and workspace rows.
     Field(CreateRow),
+    /// Step 7: the answers of one step, which ↵ goes back to.
+    Edit(CreateStep),
     /// Inert on step 1, where it is drawn muted.
     Back,
     Next,
@@ -609,6 +654,17 @@ pub struct WizardState {
     /// The connection whose list the Models step fetched on its own once already, so a fetch
     /// that failed is not started again at every key.
     pub auto_fetched: Option<String>,
+    /// The Models step shows the agent's slots and the models it is offered
+    /// ([`CreateRow::ModelsFold`]).
+    pub models_open: bool,
+    /// The Models step shows the connection's config files ([`CreateRow::FilesFold`]).
+    pub files_open: bool,
+    /// The Workspace step shows the ports, the blocked hosts and the MCP servers
+    /// ([`CreateRow::AdvancedFold`]).
+    pub advanced_open: bool,
+    /// The form opened on the last create's answers ([`CreateForm::apply_defaults`]), which the
+    /// Review's heading says.
+    pub prefilled: bool,
 }
 
 impl Default for WizardState {
@@ -620,6 +676,10 @@ impl Default for WizardState {
             refused: false,
             editing: None,
             auto_fetched: None,
+            models_open: false,
+            files_open: false,
+            advanced_open: false,
+            prefilled: false,
         }
     }
 }
@@ -636,17 +696,24 @@ pub fn harness_label(backend: &Backend) -> String {
     }
 }
 
-/// The TUI's tag beside the label while it is still generated from the agent and the kits.
+/// The TUI's tag beside the label while it is still generated from the answers.
 pub const GENERATED_TAG: &str = "generated";
 
 /// The GUI's line under the label's box while the label is still generated.
-pub const GENERATED_GLOSS: &str = "generated from the agent and the kits; type to replace it";
+pub const GENERATED_GLOSS: &str = "made from your answers; type to replace it";
 
 /// What the status line says when New brings back the answers a wizard was left with.
-pub const DRAFT_BACK: &str = "your unfinished answers are back — Cancel discards them";
+pub const DRAFT_BACK: &str = "your unfinished answers are back";
+
+/// What the status line says when New opens on the last create's answers.
+pub const PREFILLED: &str = "prefilled with the settings of your last sandbox";
 
 /// The last value of the LiteLLM connection row: a connection made together with the sandbox.
 pub const NEW_CONNECTION: &str = "new connection…";
+
+/// What a picked folder's choice row offers, tightest first.
+pub const FOLDER_ACCESS: [crate::folders::Access; 2] =
+    [crate::folders::Access::Read, crate::folders::Access::Write];
 
 /// The skills modes in the order a choice row offers them, tightest first.
 pub const SKILLS_MODES: [crate::sbx::SkillsMode; 3] = [
@@ -667,9 +734,9 @@ pub fn skills_mode_name(mode: crate::sbx::SkillsMode) -> &'static str {
 /// What a skills mode gives the sandbox, in one line.
 pub fn skills_gloss(mode: crate::sbx::SkillsMode) -> &'static str {
     match mode {
-        crate::sbx::SkillsMode::Off => "no skills mount — this sandbox is outside the shared store",
-        crate::sbx::SkillsMode::Readonly => "the host's shared skills, which it cannot change",
-        crate::sbx::SkillsMode::Readwrite => "and it can rewrite what the other sandboxes load",
+        crate::sbx::SkillsMode::Off => "the agent gets none of the shared skills",
+        crate::sbx::SkillsMode::Readonly => "the agent uses the shared skills",
+        crate::sbx::SkillsMode::Readwrite => "the agent uses and changes the shared skills",
     }
 }
 
@@ -678,15 +745,15 @@ pub fn skills_gloss(mode: crate::sbx::SkillsMode) -> &'static str {
 pub const LOGIN_TAG: &str = "recommended";
 
 /// What the `/login` radio says, on the create wizard and the account editor of both frontends.
-pub const LOGIN_HINT: &str = "one global login, reused by every sandbox";
+pub const LOGIN_HINT: &str = "sign in once, and every /login sandbox uses it";
 
 /// What the *setup token* radio says. Not picked, it says why to pick it; picked, it says what to
 /// do next, which depends on whether this host holds a token yet (`stored`).
 pub fn token_hint(selected: bool, stored: usize) -> &'static str {
     match (selected, stored) {
-        (false, _) => "a second, independent Anthropic subscription",
-        (true, 0) => "name it and paste it in; later sandboxes can use it too",
-        (true, _) => "pick one below, or add a new one",
+        (false, _) => "for a second Claude account",
+        (true, 0) => "paste a token and name it",
+        (true, _) => "pick one, or add a new one",
     }
 }
 
@@ -711,64 +778,45 @@ pub fn connection_hint(choice: ConnChoice, form: &CreateForm, catalog: &Catalog)
     }
 }
 
-/// What a harness radio says beside its name: how that agent reaches the provider's model.
-pub fn harness_hint(backend: &Backend) -> String {
-    match backend.account() {
-        Some(_) => "the /login or a setup token, picked below".into(),
-        None if backend.litellm_agent().is_some() && backend.harness() == "claude" => {
-            "a connection to your gateway; no Anthropic account needed".into()
-        }
-        None if backend.litellm_agent().is_some() => "a connection to your gateway".into(),
-        None => backend.setup_hint().into(),
-    }
-}
-
-/// What a provider is, in a sentence: the Provider step's gloss under its name.
+/// What a provider serves, in a few words: the Provider step's gloss beside its name.
 pub fn provider_blurb(provider: Provider) -> &'static str {
     match provider {
-        Provider::Anthropic => "Your Anthropic subscription: this host's /login or a setup token.",
-        Provider::Google => "Your Google account, signed in once and kept on the host.",
-        Provider::OpenAi => "Your OpenAI sign-in or API key, kept on the host.",
-        Provider::Litellm => "Your own LiteLLM gateway, through a connection and its key.",
+        Provider::Anthropic => "Claude models",
+        Provider::Google => "Gemini models",
+        Provider::OpenAi => "GPT models",
+        Provider::Litellm => "the models of your LiteLLM gateway",
         Provider::Other => "",
     }
 }
 
-/// The warning under a picked connection whose key this host does not hold: where to store it
-/// without leaving the dashboard (`S`, then the connection's own dialog, whose key field stores
-/// it).
+/// The warning under a picked connection whose key this host does not hold, and where to store
+/// it without leaving the dashboard: Secrets, then the connection's own dialog.
 pub fn missing_key_note(conn: &crate::litellm::Connection) -> String {
     format!(
-        "⚠ no key stored for {}: open Secrets (S), pick {} and paste its key",
-        crate::litellm::host(&conn.url),
+        "⚠ the key of {} is missing: add it in Secrets (S)",
         conn.name
     )
 }
 
-/// The note under a focused kit that `sbx kit add` cannot add later, `reason` being what the kit
-/// declares that it does not apply ([`crate::kits::Addon::create_time_reason`]).
-pub fn only_now_note(reason: &str) -> String {
-    format!(
-        "Only now: sbx adds no kit with {reason} to an existing sandbox; later means a rebuild."
-    )
-}
+/// The note under a focused kit that `sbx kit add` cannot add later
+/// ([`crate::kits::Addon::create_time_reason`]).
+pub const ONLY_NOW_NOTE: &str = "Adding it later rebuilds the sandbox.";
 
 /// The marker a kit row carries when ticking it now is the only chance to have it without a
 /// rebuild. Quiet on purpose: most kits carry it.
 pub const ONLY_NOW: &str = "only now";
 
-/// What `--static-mcp none` leaves the agent, after the word *none*.
-pub const NO_MCP: &str = "no server, and no tools to find or add one";
+/// The tick for `--static-mcp none`, and the Review's and the details' word for it.
+pub const NO_MCP: &str = "no MCP servers";
 
-/// The Review's MCP answer when nothing is ticked: sbx's dynamic mode, where the agent finds and
-/// attaches the host's registered servers itself.
-pub const DYNAMIC_MCP: &str = "dynamic: the agent finds the host's servers";
+/// The details' word for sbx's dynamic MCP mode: the agent finds and adds the host's servers.
+pub const HOST_MCP: &str = "the servers set up on this computer";
 
-/// A sandbox's MCP set as the details name it, from the registry: `None` for the dynamic mode,
-/// which has no fixed set to name.
+/// A sandbox's MCP servers as the details name them, from the registry: `None` for the dynamic
+/// mode, which has no fixed set to name.
 pub fn mcp_set(servers: &[String]) -> Option<String> {
     match (crate::sbx::is_no_mcp(servers), servers.is_empty()) {
-        (true, _) => Some(format!("none: {NO_MCP}")),
+        (true, _) => Some("none".into()),
         (false, true) => None,
         (false, false) => Some(servers.join(" ")),
     }
@@ -780,8 +828,7 @@ pub const ADD_LATER: &str = "can add later";
 
 /// What the GUI's Kits step says under its heading, for its [`ADD_LATER`] markers.
 pub const ADD_LATER_GLOSS: &str =
-    "most kits go in only now: adding one later means a rebuild. The ones marked Can add later \
-     are the exception";
+    "optional; adding a kit later rebuilds the sandbox, unless it is marked Can add later";
 
 /// What the Harness step calls an account radio.
 pub fn connection_label(choice: ConnChoice) -> &'static str {
@@ -796,20 +843,16 @@ pub fn connection_label(choice: ConnChoice) -> &'static str {
 pub fn account_notes(account: &AccountChoice) -> &'static [&'static str] {
     match account {
         AccountChoice::Login => &[
-            "You sign in once with /login inside the sandbox. sbx keeps that login on the",
-            "host instead of in the container, so every sandbox on this option uses the same",
-            "account — including ones created later — and rebuilding one never loses it.",
-            "There is only ever one such account per machine.",
+            "Sign in with /login inside the sandbox. Every /login sandbox then uses that",
+            "account, also after a rebuild.",
         ],
         AccountChoice::New => &[
-            "Run  claude setup-token  while signed in as the account you want, then give it",
-            "a name and paste it in. The token is kept on this host and the sandbox only",
-            "ever sees a placeholder. Later sandboxes can reuse this name, however many.",
+            "Run  claude setup-token  as the account you want, then name the token and",
+            "paste it. Later sandboxes can pick it by its name.",
         ],
-        AccountChoice::Named(_) => &[
-            "Already stored on this host, so there is nothing to paste. Every sandbox on",
-            "this name uses that one account — this just points one more at it.",
-        ],
+        AccountChoice::Named(_) => {
+            &["Stored on this computer. Sandboxes on the same token share its account."]
+        }
     }
 }
 
@@ -820,8 +863,8 @@ pub fn auth_now(current: &crate::model::Auth, users: usize) -> (String, String) 
     use crate::model::Auth;
     match current {
         Auth::Login => (
-            "/login (OAuth)".to_string(),
-            "the one global login, shared with every other /login sandbox".to_string(),
+            "/login".to_string(),
+            "shared with every /login sandbox".to_string(),
         ),
         Auth::Token {
             name,
@@ -829,12 +872,12 @@ pub fn auth_now(current: &crate::model::Auth, users: usize) -> (String, String) 
             ..
         } => (
             format!("setup token “{name}” — not stored"),
-            "it cannot authenticate until a token is stored below".to_string(),
+            "it cannot sign in until a token is stored below".to_string(),
         ),
         Auth::Token { name, .. } => (
             format!("setup token “{name}”"),
             match users {
-                0 | 1 => "its own account, independent of the /login".to_string(),
+                0 | 1 => "no other sandbox uses it".to_string(),
                 n => format!(
                     "shared with {} other sandbox{}",
                     n - 1,
@@ -925,12 +968,36 @@ impl CreateForm {
             .unwrap_or_else(|| cwd.to_path_buf())
     }
 
-    /// The folders typed into [`CreateRow::ExtraFolders`], checked against those the mounted
-    /// folder's plan mounts ([`crate::folders::extras`]), and what is wrong with any of them.
+    /// The folders picked for this sandbox ([`CreateRow::Folder`]), checked against those the
+    /// mounted folder's plan mounts ([`crate::folders::extras_of`]), and what is wrong with any
+    /// of them.
     pub fn extra_folders(&self) -> (Vec<crate::folders::Folder>, Vec<String>) {
         let ws = &self.workspace;
         let home = crate::model::home_dir();
-        crate::folders::extras(ws.extra_folders.value.trim(), &ws.folders, home.as_deref())
+        let specs = ws.extra_folders.iter().map(String::as_str);
+        crate::folders::extras_of(specs, &ws.folders, home.as_deref())
+    }
+
+    /// Add a host folder to the sandbox's own, read-only; a folder already picked stays as it
+    /// is. The index of its row ([`CreateRow::Folder`]).
+    pub fn add_folder(&mut self, path: &Path) -> usize {
+        let folders = &mut self.workspace.extra_folders;
+        let spec = |ro: bool| format!("{}{}", path.display(), if ro { ":ro" } else { "" });
+        match folders
+            .iter()
+            .position(|f| *f == spec(true) || *f == spec(false))
+        {
+            Some(at) => at,
+            None => {
+                folders.push(spec(true));
+                folders.len() - 1
+            }
+        }
+    }
+
+    /// Whether picked folder `i` is read-only: its spec ends in `:ro`.
+    pub fn folder_read_only(&self, i: usize) -> bool {
+        (self.workspace.extra_folders.get(i)).is_some_and(|f| crate::folders::spec_host(f).1)
     }
 
     /// Whether [`CreateRow::GitGuard`] is offered: the workspace has a `.git` folder, and clone
@@ -939,7 +1006,8 @@ impl CreateForm {
         self.workspace.git_offered && !self.workspace.clone
     }
 
-    /// The Review step's lines, for the answers on the form now.
+    /// The Review step's lines, for the answers on the form now. A seldom used answer
+    /// ([`CreateRow::AdvancedFold`]) has a line only while it is not the form's default.
     pub fn review(&self, app: &crate::app::App) -> Review {
         let catalog = &app.catalog;
         let mut answers: Vec<Answer> = Vec::new();
@@ -957,7 +1025,7 @@ impl CreateForm {
         if self.rows(catalog).contains(&CreateRow::LitellmConn) {
             let connection = match self.connection.litellm.as_deref() {
                 Some(name) => name.to_string(),
-                None => format!("new {}", self.connection.new_conn.name.value.trim()),
+                None => format!("new: {}", self.connection.new_conn.name.value.trim()),
             };
             answer(CreateStep::Connection, "Connection", connection, false);
         }
@@ -970,10 +1038,10 @@ impl CreateForm {
         if self.subscription(catalog) {
             let token = connection_label(ConnChoice::Token);
             let account = match &self.connection.account {
-                AccountChoice::Named(name) => format!("{token} · {name}"),
+                AccountChoice::Named(name) => format!("{token} {name}"),
                 AccountChoice::New => {
                     let name = self.connection.token_name.value.trim();
-                    format!("{token} · new, named {name}")
+                    format!("new {token} {name}")
                 }
                 AccountChoice::Login => connection_label(ConnChoice::Login).to_string(),
             };
@@ -992,35 +1060,32 @@ impl CreateForm {
                     .collect();
                 let none = pins.is_empty();
                 let value = match none {
-                    true => Slot::DEFAULT.to_string(),
+                    true => AGENT_PICKS.to_string(),
                     false => pins.join(", "),
                 };
                 answer(CreateStep::Models, "Models", value, none);
                 let total = catalog.models.len();
                 let on = self.enabled_models(catalog).len();
-                let offered = format!("{on} of {total}");
-                answer(CreateStep::Models, "Offered", offered, on == total);
+                if on < total {
+                    let offered = format!("{on} of {total}");
+                    answer(CreateStep::Models, "Offered", offered, false);
+                }
             }
             Some(_) => {
                 let value = "no list yet".to_string();
                 answer(CreateStep::Models, "Models", value, true);
             }
-            None => {
-                answer(
-                    CreateStep::Models,
-                    "Models",
-                    Slot::DEFAULT.to_string(),
-                    true,
-                );
-            }
+            None => answer(CreateStep::Models, "Models", AGENT_PICKS.to_string(), true),
         }
         let addons = self.selected_addons(catalog);
         let kits = or_none(&addons.join(", "));
         answer(CreateStep::Kits, "Kits", kits, addons.is_empty());
+        let account = self.label_account(catalog);
         let label = match self.workspace.name.value.trim() {
-            "" => self
-                .effective_backend(catalog)
-                .map(|b| crate::model::auto_label(catalog, &b.kit.name, &addons))
+            "" => (self.effective_backend(catalog))
+                .map(|b| {
+                    crate::model::auto_label(catalog, &b.kit.name, account.as_deref(), &addons)
+                })
                 .unwrap_or_default(),
             typed => typed.to_string(),
         };
@@ -1029,27 +1094,30 @@ impl CreateForm {
         let root = self.workspace_root(&app.cwd);
         if ws.root.is_some() {
             let mounted = crate::model::tilde(&root);
-            answer(CreateStep::Workspace, "Mounted folder", mounted, false);
+            answer(CreateStep::Workspace, "Project folder", mounted, false);
         }
         if self.start_dir_offered(catalog) {
             let opens = crate::startdir::describe(&root, ws.start_dir.as_deref());
             answer(
                 CreateStep::Workspace,
-                "Opens in",
+                "Starts in",
                 opens,
                 ws.start_dir.is_none() && ws.root.is_none(),
             );
         }
-        let extra = ws.extra_folders.value.trim();
-        let more = or_none(extra);
-        answer(
-            CreateStep::Workspace,
-            "More folders",
-            more,
-            extra.is_empty(),
-        );
+        if !ws.extra_folders.is_empty() {
+            let picked: Vec<String> = (ws.extra_folders.iter())
+                .map(|spec| shown_folder(spec))
+                .collect();
+            answer(
+                CreateStep::Workspace,
+                "Also mounts",
+                picked.join(", "),
+                false,
+            );
+        }
         let clone = match ws.clone {
-            true => "on — the agent works on its own copy",
+            true => "on",
             false => "off",
         };
         answer(CreateStep::Workspace, "Clone mode", clone.into(), !ws.clone);
@@ -1060,20 +1128,9 @@ impl CreateForm {
             };
             answer(
                 CreateStep::Workspace,
-                "Git folder",
+                ".git folder",
                 git.into(),
                 !ws.git_guard,
-            );
-        }
-        if !ws.folders.folders.is_empty() {
-            let listed: Vec<String> = (ws.folders.folders.iter())
-                .map(|f| format!("{} ({})", crate::model::tilde(&f.path), f.access.label()))
-                .collect();
-            answer(
-                CreateStep::Workspace,
-                "Host folders",
-                listed.join(", "),
-                true,
             );
         }
         if self.skills_offered(catalog) {
@@ -1081,19 +1138,22 @@ impl CreateForm {
             let default = ws.skills == app.skills_default;
             answer(CreateStep::Workspace, "Skills", skills.into(), default);
         }
-        let empty = |input: &TextInput| input.value.trim().is_empty();
-        let ports = or_none(&ws.ports.value);
-        answer(CreateStep::Workspace, "Ports", ports, empty(&ws.ports));
-        let deny = or_none(&ws.deny_network.value);
-        let open = empty(&ws.deny_network);
-        answer(CreateStep::Workspace, "Blocked hosts", deny, open);
+        if !ws.ports.value.trim().is_empty() {
+            let ports = ws.ports.value.trim().to_string();
+            answer(CreateStep::Workspace, "Ports", ports, false);
+        }
+        if !ws.deny_network.value.trim().is_empty() {
+            let deny = ws.deny_network.value.trim().to_string();
+            answer(CreateStep::Workspace, "Blocked hosts", deny, false);
+        }
         let picked = self.selected_mcp();
-        let mcp = match (ws.no_mcp, picked.is_empty()) {
-            (true, _) => format!("none: {NO_MCP}"),
-            (false, true) => DYNAMIC_MCP.to_string(),
-            (false, false) => picked.join(", "),
-        };
-        answer(CreateStep::Workspace, "MCP servers", mcp, picked.is_empty());
+        if let Some(mcp) = match (ws.no_mcp, picked.is_empty()) {
+            (true, _) => Some(NO_MCP.to_string()),
+            (false, true) => None,
+            (false, false) => Some(picked.join(", ")),
+        } {
+            answer(CreateStep::Workspace, "MCP servers", mcp, false);
+        }
 
         let crate::model::KitMounts { mounts, mut notes } = crate::model::kit_mounts(&addons);
         notes.extend(ws.folders.notes.iter().cloned());
@@ -1111,11 +1171,25 @@ impl CreateForm {
                 .chain(git)
                 .chain(mounts)
                 .chain(folders)
+                .map(|spec| shown_folder(&spec))
                 .collect(),
             notes,
         }
     }
 }
+
+/// An extra workspace as the Review writes it: `~/docs (read-only)` for sbx's `~/docs:ro`.
+pub fn shown_folder(spec: &str) -> String {
+    let (host, read_only) = crate::folders::spec_host(spec);
+    let host = crate::model::tilde(Path::new(host));
+    match read_only {
+        true => format!("{host} (read-only)"),
+        false => host,
+    }
+}
+
+/// The Review's and the ledger's word for models the agent picks itself.
+pub const AGENT_PICKS: &str = "the agent picks";
 
 impl CreateForm {
     /// The providers the Provider step offers, in [`Provider`]'s order.
@@ -1200,42 +1274,33 @@ impl CreateForm {
     /// answers so far.
     pub fn step_heading(&self, step: CreateStep, catalog: &Catalog) -> (String, &'static str) {
         match step {
-            CreateStep::Provider => ("Who serves the model".into(), ""),
-            CreateStep::Connection => (
-                "The LiteLLM gateway the sandbox talks to".into(),
-                "pick one of your connections, or add a new one",
-            ),
-            CreateStep::Harness => {
-                let provider = self.selected_provider(catalog).map(Provider::label);
-                let provider = provider.unwrap_or_default();
-                (format!("The agent that works with {provider}"), "")
-            }
+            CreateStep::Provider => ("Choose the AI provider".into(), ""),
+            CreateStep::Connection => ("Choose the LiteLLM gateway".into(), ""),
+            CreateStep::Harness => ("Choose the coding agent".into(), ""),
             CreateStep::Models => match (self.models_agent(catalog), catalog.models.len()) {
-                (None, _) => (
-                    "The agent picks its own models".into(),
-                    "only a LiteLLM connection has models to pick here",
-                ),
-                (Some(_), 0) => (
-                    "No model list yet".into(),
-                    "Refresh asks the gateway, through a small sandbox of its own",
-                ),
+                (None, _) => ("The agent picks its own models".into(), ""),
+                (Some(_), 0) => ("No model list yet".into(), ""),
                 (Some(_), n) => (
                     format!(
-                        "The {n} models of {}",
+                        "{n} model{} on {}",
+                        if n == 1 { "" } else { "s" },
                         self.connection.litellm.as_deref().unwrap_or_default()
                     ),
-                    "your picks are kept for the next sandbox on this connection",
+                    "",
                 ),
             },
             CreateStep::Kits => (
-                "Kits to build into the sandbox".into(),
-                "a kit marked only now cannot be added later without a rebuild",
+                "Add kits".into(),
+                "optional · only now: adding it later rebuilds the sandbox",
             ),
-            CreateStep::Workspace => ("Its name, where it opens, and what it can reach".into(), ""),
-            CreateStep::Review => (
-                "What sbx will create".into(),
-                "nothing is created until you press Create",
-            ),
+            CreateStep::Workspace => ("Name and options".into(), ""),
+            CreateStep::Review => match self.wizard.prefilled {
+                true => (
+                    "Prefilled from your last sandbox".into(),
+                    "pick a step to change it",
+                ),
+                false => ("Check and create".into(), "pick a step to change it"),
+            },
         }
     }
 
@@ -1350,9 +1415,13 @@ impl CreateForm {
             | CreateStep::Workspace => self
                 .rows_of(step, catalog)
                 .into_iter()
+                .filter(|row| self.row_shown(*row))
                 .map(WizardRow::Field)
                 .collect(),
-            CreateStep::Review => Vec::new(),
+            CreateStep::Review => (CreateStep::ALL.into_iter())
+                .filter(|s| *s != CreateStep::Review && self.step_shown(*s, catalog))
+                .map(WizardRow::Edit)
+                .collect(),
         };
         rows.extend(Self::wizard_button_rows(step));
         rows
@@ -1378,7 +1447,7 @@ impl CreateForm {
     }
 
     /// Move to `step`, with the cursor on its picked radio: the provider on step 1, the harness on
-    /// step 3.
+    /// step 3; on the Review, on *Create & start*.
     pub fn wizard_set_step(&mut self, catalog: &Catalog, step: CreateStep) {
         if self.wizard_step() == step {
             return;
@@ -1391,6 +1460,7 @@ impl CreateForm {
                 .selected_provider_index(catalog)
                 .map(WizardRow::Provider),
             CreateStep::Harness => self.selected_harness(catalog).map(WizardRow::Agent),
+            CreateStep::Review => Some(WizardRow::CreateStart),
             _ => None,
         };
         if let Some(picked) = picked {
@@ -1427,8 +1497,7 @@ impl CreateForm {
     /// that message, and stay.
     pub fn wizard_next(&mut self, catalog: &Catalog) -> Result<(), String> {
         let step = self.wizard_step();
-        if let Some(problem) = self.step_problem(step, catalog) {
-            self.wizard.refused = true;
+        if let Some(problem) = self.refuse(step, catalog) {
             return Err(problem);
         }
         if let Some(next) = self.next_step(step, catalog) {
@@ -1447,10 +1516,10 @@ impl CreateForm {
         let from = self.wizard_step();
         if to.number() > from.number() {
             for step in CreateStep::ALL[from.number() - 1..to.number() - 1].iter() {
-                if let Some(problem) = self.step_problem(*step, catalog) {
+                if self.step_problem(*step, catalog).is_some() {
                     self.wizard_set_step(catalog, *step);
-                    self.wizard.refused = true;
-                    return Err(problem);
+                    let problem = self.refuse(*step, catalog);
+                    return Err(problem.unwrap_or_default());
                 }
             }
         }
@@ -1485,10 +1554,11 @@ impl CreateForm {
         }
     }
 
-    /// Move to the step that owns `row` and put the cursor on it. False where that step does not
-    /// offer the row with the answers as they stand.
+    /// Move to the step that owns `row`, open the fold it stands under, and put the cursor on it.
+    /// False where that step does not offer the row with the answers as they stand.
     pub fn focus_field(&mut self, catalog: &Catalog, row: CreateRow) -> bool {
         self.wizard_set_step(catalog, row.step());
+        self.reveal(row);
         self.focus_wizard_row(catalog, WizardRow::Field(row))
     }
 
@@ -1505,7 +1575,6 @@ impl CreateForm {
             CreateRow::Name => Some(&mut self.workspace.name),
             CreateRow::TokenName => Some(&mut self.connection.token_name),
             CreateRow::Token => Some(&mut self.connection.token),
-            CreateRow::ExtraFolders => Some(&mut self.workspace.extra_folders),
             CreateRow::Ports => Some(&mut self.workspace.ports),
             CreateRow::DenyNetwork => Some(&mut self.workspace.deny_network),
             CreateRow::LitellmName => Some(&mut self.connection.new_conn.name),
@@ -1535,6 +1604,27 @@ impl CreateForm {
                 KeyCode::Delete | KeyCode::Backspace => FieldEffect::ResetConfig(i),
                 _ => FieldEffect::Ignored,
             };
+        }
+        match row {
+            CreateRow::FolderAdd => {
+                return match key.code {
+                    KeyCode::Enter | KeyCode::Char(' ') => FieldEffect::PickFolder,
+                    _ => FieldEffect::Ignored,
+                };
+            }
+            CreateRow::Folder(i) => return self.folder_key(catalog, i, key),
+            CreateRow::ModelsFold | CreateRow::FilesFold | CreateRow::AdvancedFold => {
+                let open = match key.code {
+                    KeyCode::Enter | KeyCode::Char(' ') => !self.fold_open(row),
+                    KeyCode::Right => true,
+                    KeyCode::Left => false,
+                    _ => return FieldEffect::Ignored,
+                };
+                self.set_fold(row, open);
+                self.focus_wizard_row(catalog, WizardRow::Field(row));
+                return FieldEffect::Done;
+            }
+            _ => {}
         }
 
         // Did the key open rows right below this one? Then the cursor steps onto the first.
@@ -1581,13 +1671,17 @@ impl CreateForm {
                     CreateRow::Name
                     | CreateRow::TokenName
                     | CreateRow::Token
-                    | CreateRow::ExtraFolders
                     | CreateRow::Ports
                     | CreateRow::DenyNetwork
                     | CreateRow::LitellmName
                     | CreateRow::LitellmUrl
                     | CreateRow::LitellmKey
-                    | CreateRow::ConfigFile(_) => {}
+                    | CreateRow::ConfigFile(_)
+                    | CreateRow::Folder(_)
+                    | CreateRow::FolderAdd
+                    | CreateRow::ModelsFold
+                    | CreateRow::FilesFold
+                    | CreateRow::AdvancedFold => {}
                 }
                 self.refresh_auto_name(catalog);
             }
@@ -1603,7 +1697,10 @@ impl CreateForm {
                 CreateRow::Clone => self.workspace.clone = !self.workspace.clone,
                 CreateRow::GitGuard => self.workspace.git_guard = !self.workspace.git_guard,
                 CreateRow::Skills => self.workspace.skills = self.workspace.skills.next(),
-                CreateRow::LitellmConn => self.cycle_litellm(true),
+                CreateRow::LitellmConn => match self.connection.litellm {
+                    Some(_) => return FieldEffect::Next,
+                    None => opened = true,
+                },
                 CreateRow::AuthOauth => self.connection.account = AccountChoice::Login,
                 // Picking "setup token" opens the token rows right below.
                 CreateRow::AuthToken => {
@@ -1646,13 +1743,17 @@ impl CreateForm {
                 CreateRow::Name
                 | CreateRow::TokenName
                 | CreateRow::Token
-                | CreateRow::ExtraFolders
                 | CreateRow::Ports
                 | CreateRow::DenyNetwork
                 | CreateRow::LitellmName
                 | CreateRow::LitellmUrl
                 | CreateRow::LitellmKey
-                | CreateRow::ConfigFile(_) => {}
+                | CreateRow::ConfigFile(_)
+                | CreateRow::Folder(_)
+                | CreateRow::FolderAdd
+                | CreateRow::ModelsFold
+                | CreateRow::FilesFold
+                | CreateRow::AdvancedFold => {}
             },
             // The skills mode is the one answer here that is a small enum rather than a tick, so
             // ←→ pick between its values.
@@ -1680,6 +1781,86 @@ impl CreateForm {
             _ => row,
         };
         self.focus_wizard_row(catalog, WizardRow::Field(landing));
+        FieldEffect::Done
+    }
+}
+
+impl CreateForm {
+    /// What a fold row says beside its title: what is set under it, or `None` while everything
+    /// there is still the form's default.
+    pub fn fold_summary(&self, app: &crate::app::App, row: CreateRow) -> Option<String> {
+        let catalog = &app.catalog;
+        let ws = &self.workspace;
+        let mut parts: Vec<String> = Vec::new();
+        match row {
+            CreateRow::ModelsFold => {
+                let agent = self.models_agent(catalog)?;
+                for slot in Slot::of(agent) {
+                    if let Some(id) = self.connection.models.get(*slot) {
+                        let name = crate::models::display_name(&catalog.models, id)
+                            .unwrap_or_else(|| id.to_string());
+                        parts.push(format!("{} → {name}", slot.label()));
+                    }
+                }
+                let hidden = catalog.models.len() - self.enabled_models(catalog).len();
+                if hidden > 0 {
+                    parts.push(format!("{hidden} hidden"));
+                }
+            }
+            CreateRow::FilesFold => {
+                let edited = (0..)
+                    .map_while(|i| app.config_file_row(i))
+                    .filter(|(_, state)| *state != crate::litellm::FileState::Generated)
+                    .count();
+                if edited > 0 {
+                    parts.push(format!("{edited} edited"));
+                }
+            }
+            CreateRow::AdvancedFold => {
+                if !ws.ports.value.trim().is_empty() {
+                    parts.push(format!("ports {}", ws.ports.value.trim()));
+                }
+                if !ws.deny_network.value.trim().is_empty() {
+                    parts.push(format!("blocked {}", ws.deny_network.value.trim()));
+                }
+                let picked = self.selected_mcp();
+                match (ws.no_mcp, picked.is_empty()) {
+                    (true, _) => parts.push(NO_MCP.to_string()),
+                    (false, false) => parts.push(format!("MCP {}", picked.join(", "))),
+                    (false, true) => {}
+                }
+            }
+            _ => return None,
+        }
+        (!parts.is_empty()).then(|| parts.join(" · "))
+    }
+
+    /// A key on picked folder `i`: ↵, space, ← and → switch it between read-only and read-write,
+    /// Delete and Backspace drop it, the cursor staying where the row was.
+    fn folder_key(&mut self, catalog: &Catalog, i: usize, key: KeyEvent) -> FieldEffect {
+        let folders = &mut self.workspace.extra_folders;
+        let Some(spec) = folders.get(i).cloned() else {
+            return FieldEffect::Ignored;
+        };
+        match key.code {
+            KeyCode::Enter | KeyCode::Char(' ') | KeyCode::Left | KeyCode::Right => {
+                folders[i] = match spec.strip_suffix(":ro") {
+                    Some(writable) => writable.to_string(),
+                    None => format!("{spec}:ro"),
+                };
+            }
+            KeyCode::Delete | KeyCode::Backspace => {
+                folders.remove(i);
+                let rows = self.wizard_rows(catalog);
+                let same = |r: &WizardRow| *r == WizardRow::Field(CreateRow::Folder(i));
+                let add = |r: &WizardRow| *r == WizardRow::Field(CreateRow::FolderAdd);
+                let at = (rows.iter().position(same)).or_else(|| rows.iter().position(add));
+                if let Some(at) = at {
+                    self.set_wizard_focus(at);
+                }
+            }
+            _ => return FieldEffect::Ignored,
+        }
         FieldEffect::Done
     }
 }
@@ -1720,12 +1901,9 @@ pub(crate) fn alias_help(slot: Slot) -> Help {
     Help::new(
         slot.label(),
         format!(
-            "Picks the {}: {}. ↵ lists the models the agent is offered; nothing picked ({}) leaves \
-             it to {}.",
-            slot.label(),
-            slot.hint(),
-            slot.unset(),
-            slot.agent_name()
+            "When set, {} uses this model for {}. Otherwise, it picks one itself.",
+            slot.agent_name(),
+            slot.hint()
         ),
     )
 }
@@ -1734,7 +1912,7 @@ pub(crate) fn alias_help(slot: Slot) -> Help {
 pub(crate) fn default_model_help(slot: Slot) -> Help {
     Help::new(
         slot.label(),
-        format!("Leaves the {} to the agent's own choice.", slot.label()),
+        format!("{} picks the {} itself.", slot.agent_name(), slot.label()),
     )
 }
 
@@ -1745,124 +1923,82 @@ pub(crate) fn model_pick_help(catalog: &Catalog, slot: Slot, i: usize) -> Help {
         .get(i)
         .map(|m| (m.name.clone(), m.id.clone()))
         .unwrap_or_default();
+    let id = match name == id {
+        true => String::new(),
+        false => format!(" ({id})"),
+    };
     Help::new(
         slot.label(),
-        format!("Puts the {} on {name} ({id}).", slot.label()),
+        format!(
+            "{} uses {name}{id} for the {}.",
+            slot.agent_name(),
+            slot.label()
+        ),
     )
 }
 
-/// What an agent is, in a sentence: the Harness step's gloss under its name.
+/// What an agent is, in a few words: the Harness step's gloss beside its name.
 pub fn harness_blurb(agent: &str) -> &'static str {
     match agent {
-        "claude" => "Anthropic's coding agent.",
-        "opencode" => "An open-source coding agent.",
-        "codex" => "OpenAI's coding agent.",
-        "agy" => "Google's Antigravity CLI.",
-        "pi" => "A minimal coding agent (pi.dev).",
+        "claude" => "Anthropic's coding agent",
+        "opencode" => "an open-source coding agent",
+        "codex" => "OpenAI's coding agent",
+        "agy" => "Google's coding agent",
+        "pi" => "a minimal coding agent",
         _ => "",
     }
 }
 
-/// The harnesses a provider offers, by name, as the Provider step lists them beside it.
-pub fn provider_harnesses(catalog: &Catalog, provider: Provider) -> Vec<String> {
-    (CreateForm::harnesses_of(catalog, provider).into_iter())
-        .map(|h| h.label)
-        .collect()
-}
-
-/// `a`, `a or b`, `a, b or c` — a provider's harnesses, as the window's tiles write them.
-pub fn or_list(items: &[String]) -> String {
-    match items {
-        [] => String::new(),
-        [one] => one.clone(),
-        [rest @ .., last] => format!("{} or {last}", rest.join(", ")),
-    }
-}
-
-/// One line under a text field: what goes in it.
+/// One line under a field or beside an option: what goes in it, or what it does.
 pub fn field_gloss(row: CreateRow) -> &'static str {
     match row {
-        CreateRow::Name => "the name the sandbox list shows",
-        CreateRow::StartDir => "where the agent starts; .. at the top mounts the folder above",
-        CreateRow::Clone => "the agent works on its own copy; your files stay read-only",
-        CreateRow::GitGuard => "the agent can read the history but not commit or change hooks",
-        CreateRow::ExtraFolders => {
-            "host folders for this sandbox alone, comma-separated: PATH[:/in/sandbox][:ro]"
-        }
-        CreateRow::Ports => "published at creation, space- or comma-separated",
-        CreateRow::DenyNetwork => "hosts this sandbox alone may not reach",
-        CreateRow::TokenName => "lower-case a–z, 0–9 and “-”; later sandboxes pick it by name",
+        CreateRow::Name => "the name in the sandbox list",
+        CreateRow::StartDir => "where the agent starts working",
+        CreateRow::Clone => "the agent works on a copy; your files stay unchanged",
+        CreateRow::GitGuard => "the agent can read the Git history, but not change it",
+        CreateRow::FolderAdd => "a folder outside the project that the agent may use too",
+        CreateRow::ModelsFold => "the agent picks them itself unless you do",
+        CreateRow::FilesFold => "for your review",
+        CreateRow::AdvancedFold => "ports, blocked hosts, MCP servers",
+        CreateRow::Ports => "for example 8080:3000",
+        CreateRow::DenyNetwork => "for example api.example.com",
+        CreateRow::McpNone => "the agent gets no MCP servers",
+        CreateRow::TokenName => "a–z, 0–9 and “-”; later sandboxes pick it by this name",
         CreateRow::Token => "the output of claude setup-token",
-        CreateRow::LitellmName => "lower-case a–z, 0–9 and “-”, at most 32 characters",
-        CreateRow::LitellmUrl => "the gateway's https:// address; the key goes to this host only",
-        CreateRow::LitellmKey => "stored in the host keychain, never in the sandbox",
+        CreateRow::LitellmName => "a–z, 0–9 and “-”, at most 32 characters",
+        CreateRow::LitellmUrl => "the gateway's https:// address",
+        CreateRow::LitellmKey => "stored on this computer, never in the sandbox",
         _ => "",
     }
 }
 
 impl CreateForm {
-    /// What `row` of the current step is about, worded for the answer it holds now.
+    /// What `row` of the current step is about, worded for the answer it holds now. Empty where
+    /// the row says it all.
     pub fn help(&self, app: &crate::app::App, row: WizardRow) -> Help {
         let catalog = &app.catalog;
         match row {
             WizardRow::Provider(p) => {
-                let Some(provider) = self.providers(catalog).into_iter().nth(p) else {
-                    return Help::new("", "");
-                };
-                let harnesses = provider_harnesses(catalog, provider);
-                let pick = match harnesses.len() {
-                    1 => String::new(),
-                    _ => " — the next step picks one".to_string(),
-                };
-                let text = format!(
-                    "{} It runs {}{pick}.",
-                    provider_blurb(provider),
-                    or_list(&harnesses)
-                );
-                Help::new(provider.label(), text.trim_start())
+                let provider = self.providers(catalog).into_iter().nth(p);
+                Help::new(provider.map(Provider::label).unwrap_or_default(), "")
             }
             WizardRow::Agent(h) => self.agent_help(app, h),
             WizardRow::Connection(choice) => self.connection_help(app, choice),
             WizardRow::Field(field) => self.field_help(app, field),
-            WizardRow::Next => {
-                let next = (self.next_step(self.wizard_step(), &app.catalog))
-                    .unwrap_or(CreateStep::Review);
-                let text = format!(
-                    "Checks this step's answers, then goes to step {}, {}.",
-                    next.number(),
-                    next.title()
-                );
-                Help::new("Next", text)
-            }
-            WizardRow::Back => match self.prev_step(self.wizard_step(), &app.catalog) {
-                Some(prev) => Help::new(
-                    "Back",
-                    format!(
-                        "Goes back to step {}, {}, keeping every answer.",
-                        prev.number(),
-                        prev.title()
-                    ),
-                ),
-                None => Help::new(
-                    "Back",
-                    "This is the first step: there is nothing before it.",
-                ),
-            },
+            WizardRow::Edit(step) => Help::new(step.title(), ""),
+            WizardRow::Next => Help::new("Next", ""),
+            WizardRow::Back => Help::new("Back", ""),
             WizardRow::CreateStart => Help::new(
                 "Create & start",
-                format!("Creates {} and opens a session in it.", self.sbx_name(app)),
+                "Creates the sandbox and starts the agent in it.",
             ),
             WizardRow::CreateOnly => Help::new(
                 "Create only",
-                format!(
-                    "Creates {} and goes back to the list without starting it.",
-                    self.sbx_name(app)
-                ),
+                "Creates the sandbox without starting the agent.",
             ),
             WizardRow::Cancel => Help::new(
                 "Cancel",
-                "Closes the wizard and discards these answers. Esc on step 1 closes it and keeps \
-                 them for the next New.",
+                "Discards your answers. Esc on step 1 keeps them for the next new sandbox.",
             ),
         }
     }
@@ -1875,22 +2011,11 @@ impl CreateForm {
         let Some(b) = harness.backends.first().map(|b| &catalog.backends[*b]) else {
             return Help::new("", "");
         };
-        let way = match b.account() {
-            Some(_) => "It signs in with the /login or a setup token, picked below.".to_string(),
-            None if b.litellm_agent().is_some() => {
-                let no_account = match b.harness() {
-                    "claude" => " No Anthropic account is needed.",
-                    _ => "",
-                };
-                format!(
-                    "It sends its requests to your LiteLLM gateway with the connection's key, \
-                     which stays in the host keychain; the sandbox only sees a \
-                     placeholder.{no_account}"
-                )
-            }
-            None => format!("{}.", capitalized(b.setup_hint())),
+        let own_sign_in = b.account().is_none() && b.litellm_agent().is_none();
+        let text = match own_sign_in && !b.setup_hint().is_empty() {
+            true => format!("It signs in with {}.", b.setup_hint()),
+            false => String::new(),
         };
-        let text = format!("{} {way}", harness_blurb(&harness.agent));
         let picked = harness.backends.contains(&self.harness.backend);
         let warn = picked.then(|| self.missing_warning(app)).flatten();
         Help::new(harness.label, text.trim_start()).warn(warn)
@@ -1903,7 +2028,7 @@ impl CreateForm {
             .unwrap_or_default();
         (!missing.is_empty()).then(|| {
             format!(
-                "{} is not stored on this host: {}",
+                "{} is missing on this computer. Store it with: {}",
                 missing.join(" and "),
                 missing
                     .iter()
@@ -1919,15 +2044,13 @@ impl CreateForm {
         let title = connection_label(choice);
         let text = match choice {
             ConnChoice::Login => {
-                "Sign in once with /login inside the sandbox. sbx keeps the login \
-                on the host, so every /login sandbox shares one account and a rebuild never loses \
-                it."
-                .to_string()
+                "You sign in with /login inside the sandbox. Every /login sandbox uses that \
+                 account, also after a rebuild."
             }
-            ConnChoice::Token => "A token from claude setup-token, stored on this host under a \
-                name; the sandbox only sees a placeholder. Every sandbox on one name shares that \
-                account, independent of the /login."
-                .to_string(),
+            ConnChoice::Token => {
+                "Uses a token from claude setup-token. Sandboxes on the same token share its \
+                 account, apart from /login."
+            }
         };
         let picked = self.connection_selected(choice, catalog);
         let warn = picked.then(|| self.missing_warning(app)).flatten();
@@ -1937,41 +2060,34 @@ impl CreateForm {
     fn field_help(&self, app: &crate::app::App, row: CreateRow) -> Help {
         let catalog = &app.catalog;
         let ws = &self.workspace;
+        let root = crate::model::tilde(&self.workspace_root(&app.cwd));
         let help = match row {
             CreateRow::LitellmConn => match self.litellm_choice() {
                 Some(conn) => {
-                    let text = format!(
-                        "{} at {}. The sandbox reads the gateway's models itself, and the agent \
-                         picks one. ←→ picks another connection, or {NEW_CONNECTION} to add one \
-                         with this sandbox.",
-                        conn.name,
-                        crate::litellm::host(&conn.url),
-                    );
+                    let host = crate::litellm::host(&conn.url);
                     let warn = app
                         .litellm_key_missing(&conn.name)
                         .then(|| missing_key_note(conn));
-                    Help::new("connection", text).warn(warn)
+                    Help::new("connection", format!("The sandbox uses the gateway at {host}."))
+                        .warn(warn)
                 }
                 None => Help::new(
                     "connection",
-                    "A new connection, stored with this sandbox: its key first, then its file. \
-                     ←→ picks an existing one.",
+                    "Adds a gateway: a name for it, its address and its key.",
                 ),
             },
             CreateRow::LitellmName => Help::new(
                 "name",
-                "The name the connection is listed under on Secrets (S): a–z, 0–9 and “-”, at most \
-                 32 characters.",
+                "A name for the gateway: a–z, 0–9 and “-”, at most 32 characters.",
             ),
             CreateRow::LitellmUrl => Help::new(
                 "URL",
-                "The gateway's address, https://host with an optional :443 and path. The key is \
-                 sent to this host only.",
+                "The gateway's address, for example https://litellm.example.com. The key is sent \
+                 to this address only.",
             ),
             CreateRow::LitellmKey => Help::new(
                 "key",
-                "The gateway's key. It goes to the host keychain on stdin — never into a file, \
-                 the registry or the sandbox.",
+                "The gateway's key. It is stored on this computer, never in the sandbox.",
             ),
             CreateRow::TokenPick(i) => {
                 let token = self.connection.tokens.get(i).cloned().unwrap_or_default();
@@ -1980,67 +2096,60 @@ impl CreateForm {
                     true => String::new(),
                     false => format!(" {}.", capitalized(&users)),
                 };
-                Help::new(
-                    token,
-                    format!(
-                        "Already stored on this host, so there is nothing to paste. Every \
-                         sandbox on this name uses that one account.{users}"
-                    ),
-                )
+                Help::new(token, format!("Stored on this computer.{users}"))
             }
             CreateRow::TokenNew => Help::new(
                 "new token",
-                "Run claude setup-token while signed in as the account you want, then name the \
-                 token and paste it. Later sandboxes can pick it by its name.",
+                "Run claude setup-token as the account you want, then name the token and paste \
+                 it.",
             ),
             CreateRow::TokenName => Help::new(
                 "token name",
-                "Lower-case letters, digits and dashes. Later sandboxes pick this account by the \
+                "Lower-case letters, digits and dashes. Later sandboxes pick the token by this \
                  name.",
             ),
             CreateRow::Token => Help::new(
                 "token",
-                "The output of claude setup-token. It goes to the host keychain on stdin; the \
-                 sandbox only ever sees a placeholder.",
+                "The output of claude setup-token. It is stored on this computer; the sandbox \
+                 never sees it.",
             ),
             CreateRow::ConfigFile(i) => return app.config_file_help(self, i),
             CreateRow::Model(slot) => alias_help(slot),
             CreateRow::ModelDefault(slot) => default_model_help(slot),
             CreateRow::ModelPick(slot, i) => model_pick_help(catalog, slot, i),
             CreateRow::ModelsRefresh => {
-                let when = match &catalog.models_source {
+                let text = match &catalog.models_source {
                     crate::models::Source::Gateway { fetched_at, .. } => format!(
-                        "The list is from {}.",
+                        "Reads the gateway's model list again. The list is from {}.",
                         crate::state::ago(u64::try_from(*fetched_at).unwrap_or(0))
                     ),
-                    crate::models::Source::NotYet => "There is no list yet.".to_string(),
+                    crate::models::Source::NotYet => "Reads the gateway's model list.".to_string(),
                 };
-                Help::new(
-                    "refresh",
-                    format!(
-                        "{when} ↵ asks the gateway again, through a small sandbox that only reaches \
-                         its host. The list is also fetched once a day when aisbx starts."
-                    ),
-                )
+                Help::new("refresh", text)
             }
+            CreateRow::ModelsFold => Help::new(
+                "models",
+                "When set, the agent starts on the models you pick, and sees only the models you \
+                 leave ticked. Otherwise, it picks its own models from all of the gateway's.",
+            ),
+            CreateRow::FilesFold => Help::new(
+                "config files",
+                "The files the agent reads, as your answers make them. Open one to check or \
+                 change it.",
+            ),
             CreateRow::ModelOn(i) => {
                 let (name, id) = catalog
                     .models
                     .get(i)
                     .map(|m| (m.name.clone(), m.id.clone()))
                     .unwrap_or_default();
-                let on = !self.connection.disabled.contains(&id);
-                let text = match on {
-                    true => format!(
-                        "{name} ({id}) is offered to the agent. Space switches it off for every \
-                         sandbox on this connection and harness, from its next start."
+                Help::new(
+                    id,
+                    format!(
+                        "When ticked, the agent can use {name}. Otherwise, the agent does not see \
+                         it, in every sandbox on this connection."
                     ),
-                    false => format!(
-                        "{name} ({id}) is switched off: the agent is not offered it. Space \
-                         switches it on again."
-                    ),
-                };
-                Help::new(id.clone(), text)
+                )
             }
             CreateRow::Addon(i) => {
                 let Some(addon) = catalog.addons.get(i) else {
@@ -2049,18 +2158,18 @@ impl CreateForm {
                 let mut text = Vec::new();
                 if let Some(found) = self.kits.host.get(i).and_then(Option::as_ref) {
                     text.push(match found.detected() {
-                        true => format!("Mounts {} read-only.", found.found().join(", ")),
+                        true => "When ticked, the sandbox can read these folders of your \
+                                 computer, but not change them."
+                            .to_string(),
                         false => format!(
-                            "Nothing to mount on this host: {}. It cannot be ticked here.",
+                            "Not found on this computer: {}.",
                             found.reason(&addon.kit.name)
                         ),
                     });
                 }
-                if let Some(reason) = addon
-                    .create_time_reason()
-                    .filter(|_| !self.addon_unavailable(i))
-                {
-                    text.push(only_now_note(reason));
+                let only_now = addon.create_time_reason().is_some() && !self.addon_unavailable(i);
+                if only_now {
+                    text.push(ONLY_NOW_NOTE.to_string());
                 }
                 text.push(addon.kit.first_sentence().to_string());
                 Help::new(addon.kit.name.clone(), text.join(" ").trim().to_string())
@@ -2068,75 +2177,81 @@ impl CreateForm {
             CreateRow::Name => Help::new(
                 "label",
                 match ws.name_touched {
-                    false => {
-                        "The name the sandbox list shows, generated from the agent and the kits \
-                         while it is left alone. Type to replace it, or use ← → to edit it."
-                    }
-                    true => "The name the sandbox list shows. It stays as typed.",
+                    false => "The name the sandbox list shows, made from your answers. Type to \
+                              replace it.",
+                    true => "The name the sandbox list shows.",
                 },
             ),
             CreateRow::StartDir => Help::new(
-                "opens in",
+                "starts in",
                 format!(
-                    "All of {} is mounted; this sets the folder the agent starts in, which it \
-                     treats as its project. ↵ picks a subfolder; .. at the top mounts the folder \
-                     above instead.",
-                    crate::model::tilde(&self.workspace_root(&app.cwd))
+                    "The agent starts in this folder of {root}. Pick a subfolder to start there \
+                     instead."
                 ),
             ),
+            CreateRow::FolderAdd => Help::new(
+                "mount a folder",
+                format!(
+                    "When added, the agent can also use a folder outside {root}: read-only, unless \
+                     you change it. Otherwise, it sees only {root}."
+                ),
+            ),
+            CreateRow::Folder(i) => {
+                let spec = ws.extra_folders.get(i).map(String::as_str).unwrap_or("");
+                let path = crate::model::tilde(Path::new(crate::folders::spec_host(spec).0));
+                let text = match self.folder_read_only(i) {
+                    true => format!("The agent can read {path}, but not change it."),
+                    false => format!("The agent can read and change {path}."),
+                };
+                Help::new(path, text)
+            }
             CreateRow::Clone => Help::new(
                 "clone mode",
-                "The agent works on a git clone made inside the sandbox, so your files stay \
-                 read-only. Needs a git repository; its commits come back as the git remote \
-                 sandbox-<name>.",
+                "When enabled, the agent works on its own Git clone, and your files stay \
+                 unchanged: get its commits with git fetch sandbox-<name>. Otherwise, the agent \
+                 changes your files directly. Needs a Git repository.",
             ),
             CreateRow::GitGuard => Help::new(
-                "git folder read-only",
-                "Mounts the workspace's .git folder a second time, read-only: nothing in the \
-                 sandbox, not even sudo, can change its hooks, config or history, so no git hook \
-                 the agent writes runs on your host. git status, log and diff work; commits are \
-                 yours to make.",
+                ".git read-only",
+                "When enabled, the agent can read the Git history, but cannot commit, change \
+                 branches or add Git hooks. Otherwise, it can do all of that.",
             ),
             CreateRow::Skills => {
                 let text = match ws.skills {
                     crate::sbx::SkillsMode::Readonly => {
-                        "The agent reads the host's skills store and cannot change it, so nothing \
-                         this sandbox does reaches another one. Fill the store with K."
+                        "The agent uses the skills you share with every sandbox (K), but cannot \
+                         change them."
                     }
                     crate::sbx::SkillsMode::Readwrite => {
-                        "The agent can rewrite a skill in the host store, and every other sharing \
-                         sandbox then loads it: one trust boundary around all of them."
+                        "The agent uses the shared skills and can change them; every other \
+                         sandbox gets its changes."
                     }
-                    crate::sbx::SkillsMode::Off => {
-                        "No skills mount: this sandbox sees nothing of the shared store."
-                    }
+                    crate::sbx::SkillsMode::Off => "The agent gets none of the shared skills.",
                 };
                 Help::new(
                     "share skills",
-                    format!("{text} Fixed at creation; changing it later means a rebuild."),
+                    format!("{text} Changing this later rebuilds the sandbox."),
                 )
             }
-            CreateRow::ExtraFolders => Help::new(
-                "more folders",
-                "Optional. Host folders for this sandbox alone, comma-separated: ~/docs:ro read-only, \
-                 ~/libs:/workspace/libs at that path. A rebuild keeps them.",
+            CreateRow::AdvancedFold => Help::new(
+                "more options",
+                "Ports, blocked hosts and MCP servers. Most sandboxes need none of them.",
             ),
             CreateRow::Ports => Help::new(
                 "ports",
-                "8080:3000 binds host port 8080 to sandbox port 3000; a bare 3000 takes any free \
-                 host port. The service must listen on 0.0.0.0 in the sandbox, not 127.0.0.1.",
+                "When set, a server in the sandbox is reachable from this computer: 8080:3000 \
+                 opens sandbox port 3000 at localhost:8080. Otherwise, nothing in the sandbox is \
+                 reachable. The server must listen on 0.0.0.0.",
             ),
             CreateRow::DenyNetwork => Help::new(
                 "blocked hosts",
-                "Optional; most leave it empty. Hosts this sandbox alone may not reach, say \
-                 github.com, which the balanced policy opens: a.example.com, *.example.com, ** \
-                 for all. A deny beats every allow.",
+                "When set, the sandbox cannot reach these hosts, for example api.example.com or \
+                 *.example.com. Otherwise, it reaches every host its network rules allow.",
             ),
             CreateRow::McpNone => Help::new(
-                "no MCP servers",
-                "Optional. The agent gets no MCP server and no tools to find or add one: sbx's \
-                 --static-mcp none. Untick it and tick no server, and the agent finds the host's \
-                 registered servers itself. Later: sbx mcp load <name> --sandbox <sandbox>.",
+                NO_MCP,
+                "When enabled, the agent gets no MCP servers and cannot add any. Otherwise, it can \
+                 use the MCP servers set up on this computer.",
             ),
             CreateRow::Mcp(i) => {
                 let Some(server) = ws.mcp.get(i) else {
@@ -2144,15 +2259,14 @@ impl CreateForm {
                 };
                 let warn = (!server.ready()).then(|| {
                     format!(
-                        "{} is not ready ({}): authorize it on the host with sbx mcp auth {} \
-                         first.",
+                        "{} is not ready ({}): run sbx mcp auth {} on this computer first.",
                         server.name, server.status, server.name
                     )
                 });
                 Help::new(
                     server.name.clone(),
-                    "Reached through sbx's MCP gateway, so the server's credentials stay on the \
-                     host. Fixed at creation; later: sbx mcp load <name> --sandbox <sandbox>.",
+                    "When ticked, the agent gets only the ticked servers. Otherwise, it can use \
+                     every MCP server set up on this computer.",
                 )
                 .warn(warn)
             }
@@ -2184,6 +2298,8 @@ pub enum FieldEffect {
     Ignored,
     /// The row took the key; nothing is left to do.
     Done,
+    /// The row's answer is the step's: on to the next step, as Next goes.
+    Next,
     /// Open the start-folder picker, which moves the whole form into its own screen and hands it
     /// back afterwards.
     OpenStartDir,
@@ -2193,6 +2309,8 @@ pub enum FieldEffect {
     EditConfig(usize),
     /// Drop the edited copy of a config file, by its row's index.
     ResetConfig(usize),
+    /// Open a picker for one more host folder, which comes back as [`CreateRow::Folder`].
+    PickFolder,
 }
 
 #[cfg(test)]
@@ -2211,18 +2329,15 @@ mod tests {
             placeholder: crate::sbx::named_token_placeholder("work"),
             stored,
         };
-        assert_eq!(auth_now(&Auth::Login, 0).0, "/login (OAuth)");
+        assert_eq!(auth_now(&Auth::Login, 0).0, "/login");
         assert_eq!(
             auth_now(&token(false), 1),
             (
                 "setup token “work” — not stored".to_string(),
-                "it cannot authenticate until a token is stored below".to_string()
+                "it cannot sign in until a token is stored below".to_string()
             )
         );
-        assert_eq!(
-            auth_now(&token(true), 1).1,
-            "its own account, independent of the /login"
-        );
+        assert_eq!(auth_now(&token(true), 1).1, "no other sandbox uses it");
         assert_eq!(auth_now(&token(true), 2).1, "shared with 1 other sandbox");
         assert_eq!(auth_now(&token(true), 4).1, "shared with 3 other sandboxes");
     }
@@ -2322,8 +2437,8 @@ mod tests {
         }
     }
 
-    /// Each step opens with a line of its own, never its title alone (the trail shows the title),
-    /// and the Harness step's names the provider picked.
+    /// Each step opens with a line of its own, never its title alone (the trail shows the title);
+    /// the Review's says when the form opened on the last create's answers.
     #[test]
     fn every_step_opens_with_what_it_decides() {
         let mut app = App::for_test(Catalog::load().unwrap(), Vec::new());
@@ -2335,45 +2450,64 @@ mod tests {
             assert!(!heading.is_empty() && heading != step.title(), "{step:?}");
         }
         let (heading, _) = f.step_heading(CreateStep::Harness, &catalog);
-        assert_eq!(heading, "The agent that works with LiteLLM");
-        let anthropic = f
-            .providers(&catalog)
-            .iter()
-            .position(|p| *p == Provider::Anthropic)
-            .expect("Anthropic is a provider");
-        f.pick_provider(&catalog, anthropic);
-        let (heading, _) = f.step_heading(CreateStep::Harness, &catalog);
-        assert_eq!(heading, "The agent that works with Anthropic");
+        assert_eq!(heading, "Choose the coding agent");
         let (_, gloss) = f.step_heading(CreateStep::Kits, &catalog);
         assert!(
             gloss.contains(ONLY_NOW),
             "the Kits step says what its marker means"
         );
+        let (fresh, _) = f.step_heading(CreateStep::Review, &catalog);
+        f.wizard.prefilled = true;
+        let (prefilled, gloss) = f.step_heading(CreateStep::Review, &catalog);
+        assert_ne!(fresh, prefilled);
+        assert!(prefilled.contains("last sandbox"), "{prefilled}");
+        assert!(gloss.contains("change"), "{gloss}");
     }
 
-    /// The harness and account radios say the same in both frontends: the gateway names the
-    /// Anthropic account only for Claude Code; the setup token says why while it is not picked
-    /// and what to do once it is.
+    /// The Provider step names neither the harnesses nor the ways to sign in, and its rows need no
+    /// help of their own; the harness rows say what each agent is, not how it reaches its model.
     #[test]
-    fn the_harness_and_account_radios_say_what_each_way_means() {
+    fn the_provider_and_harness_rows_say_only_what_they_choose() {
         let mut app = App::for_test(Catalog::load().unwrap(), Vec::new());
         app.open_create();
         let catalog = std::sync::Arc::clone(&app.catalog);
-        let backend = |name: &str| {
-            let at = catalog.backend(name);
-            at.unwrap_or_else(|| panic!("{name} is a backend"))
-        };
-        let claude = harness_hint(backend("claude-litellm"));
-        assert!(claude.contains("no Anthropic account needed"), "{claude}");
-        for gateway in ["opencode-litellm", "pi-litellm"] {
-            let hint = harness_hint(backend(gateway));
-            assert!(!hint.contains("Anthropic"), "{gateway}: {hint}");
+        let f = form(&app);
+        let harnesses: Vec<String> = (catalog.backends.iter()).map(harness_label).collect();
+        for (p, provider) in f.providers(&catalog).into_iter().enumerate() {
+            let blurb = provider_blurb(provider);
+            for word in harnesses
+                .iter()
+                .map(String::as_str)
+                .chain(["/login", "token", "key"])
+            {
+                assert!(!blurb.contains(word), "{provider:?}: {blurb}");
+            }
+            assert_eq!(
+                f.help(&app, WizardRow::Provider(p)).text,
+                "",
+                "{provider:?}"
+            );
         }
-        // Any other backend says what its own setup hint says.
-        let codex = backend("codex-openai");
-        assert_eq!(harness_hint(codex), codex.setup_hint());
-        let login = harness_hint(backend("claude-anthropic"));
-        assert!(login.contains("/login or a setup token"), "{login}");
+        for agent in ["claude", "opencode", "codex", "agy", "pi"] {
+            let blurb = harness_blurb(agent);
+            assert!(blurb.contains("agent"), "{agent}: {blurb}");
+            assert!(!blurb.contains("account"), "{agent}: {blurb}");
+        }
+        let claude = (f.harnesses(&catalog).iter())
+            .position(|h| h.agent == "claude")
+            .expect("Claude Code runs on LiteLLM");
+        let help = f.help(&app, WizardRow::Agent(claude)).text;
+        assert!(!help.contains("Anthropic account"), "{help}");
+        assert!(!help.contains("placeholder"), "{help}");
+    }
+
+    /// The account radios say the same in both frontends: the setup token says why while it is
+    /// not picked and what to do once it is.
+    #[test]
+    fn the_account_radios_say_what_each_way_means() {
+        let mut app = App::for_test(Catalog::load().unwrap(), Vec::new());
+        app.open_create();
+        let catalog = std::sync::Arc::clone(&app.catalog);
         let f = form_mut(&mut app);
         assert!(
             f.connection_choices(&catalog).is_empty(),
@@ -2388,34 +2522,29 @@ mod tests {
         assert_eq!(connection_hint(ConnChoice::Login, f, &catalog), LOGIN_HINT);
 
         let token = |f: &CreateForm| connection_hint(ConnChoice::Token, f, &catalog);
-        assert_eq!(token(f), "a second, independent Anthropic subscription");
+        assert_eq!(token(f), "for a second Claude account");
         f.pick_connection(&catalog, ConnChoice::Token);
         f.connection.tokens = Vec::new();
         assert_eq!(token(f), token_hint(true, 0));
-        assert!(token(f).starts_with("name it and paste it in"));
+        assert!(token(f).starts_with("paste a token"));
         f.connection.tokens = vec!["work".into()];
-        assert_eq!(token(f), "pick one below, or add a new one");
+        assert_eq!(token(f), "pick one, or add a new one");
 
         assert_eq!(token_users(0), "");
         assert_eq!(token_users(1), "1 sandbox uses it");
         assert_eq!(token_users(3), "3 sandboxes use it");
     }
 
-    /// The notes that say where to go: a missing key names the host and the connection to pick on
-    /// `S`; a kit that is only for now names what `sbx kit add` does not apply.
+    /// The notes that say where to go: a missing key names the connection and Secrets; a kit that
+    /// is only for now says what adding it later costs.
     #[test]
     fn the_notes_name_what_to_do() {
         let note = missing_key_note(&crate::testkit::acme());
-        assert!(note.contains("litellm.example.com"), "{note}");
         assert!(
             note.contains("Secrets (S)") && note.contains("acme"),
             "{note}"
         );
-        let note = only_now_note("network rules");
-        assert!(
-            note.contains("network rules") && note.contains("rebuild"),
-            "{note}"
-        );
+        assert!(ONLY_NOW_NOTE.contains("rebuild"), "{ONLY_NOW_NOTE}");
     }
 
     /// The Connection step's heading is about the connection alone: the model list and the
@@ -2471,11 +2600,16 @@ mod tests {
             (CreateRow::ModelDefault(slot), CreateStep::Models),
             (CreateRow::ModelPick(slot, 0), CreateStep::Models),
             (CreateRow::ModelOn(0), CreateStep::Models),
+            (CreateRow::ModelsFold, CreateStep::Models),
+            (CreateRow::FilesFold, CreateStep::Models),
             (CreateRow::Addon(0), CreateStep::Kits),
             (CreateRow::Name, CreateStep::Workspace),
             (CreateRow::StartDir, CreateStep::Workspace),
+            (CreateRow::Folder(0), CreateStep::Workspace),
+            (CreateRow::FolderAdd, CreateStep::Workspace),
             (CreateRow::Clone, CreateStep::Workspace),
             (CreateRow::Skills, CreateStep::Workspace),
+            (CreateRow::AdvancedFold, CreateStep::Workspace),
             (CreateRow::Ports, CreateStep::Workspace),
             (CreateRow::DenyNetwork, CreateStep::Workspace),
             (CreateRow::Mcp(0), CreateStep::Workspace),
@@ -2606,11 +2740,7 @@ mod tests {
         assert_eq!(mcp_set(&[]), None);
         let set = ["github".to_string(), "notion".to_string()];
         assert_eq!(mcp_set(&set).as_deref(), Some("github notion"));
-        let none = mcp_set(&["NONE".to_string()]).expect("named");
-        assert!(
-            none.starts_with("none: ") && none.ends_with(NO_MCP),
-            "{none}"
-        );
+        assert_eq!(mcp_set(&["NONE".to_string()]).as_deref(), Some("none"));
     }
 
     /// The row the wizard's one cursor is on.
@@ -2737,9 +2867,6 @@ mod tests {
             values(&app, CreateStep::Workspace),
             format!("Label={label} Clone mode=on Ports=8080:3000")
         );
-        let review = form(&app).review(&app);
-        let clone = review.answers.iter().find(|a| a.label == "Clone mode");
-        assert!(clone.is_some_and(|a| a.value.len() > a.brief().len()));
     }
 
     #[test]
@@ -2790,6 +2917,33 @@ mod tests {
         assert_eq!(f.connection.account, AccountChoice::Named("work".into()));
         let picked = WizardRow::Field(CreateRow::TokenPick(0));
         assert_eq!(focused(f, &catalog), picked);
+    }
+
+    /// The optional answers wait under their folds, closed when the form opens, and are still
+    /// checked there: a step refused over one opens its fold, so the problem is on screen.
+    #[test]
+    fn a_refused_answer_under_a_closed_fold_opens_it() {
+        let mut app = App::for_test(Catalog::load().unwrap(), Vec::new());
+        app.open_create();
+        let catalog = std::sync::Arc::clone(&app.catalog);
+        let f = form_mut(&mut app);
+        assert!(!f.wizard.models_open && !f.wizard.files_open && !f.wizard.advanced_open);
+        f.wizard_set_step(&catalog, CreateStep::Workspace);
+        let shown = |f: &CreateForm| f.wizard_rows(&catalog);
+        let ports = WizardRow::Field(CreateRow::Ports);
+        assert!(!shown(f).contains(&ports), "folded");
+        assert!(f
+            .rows_of(CreateStep::Workspace, &catalog)
+            .contains(&CreateRow::Ports));
+        f.workspace.ports = TextInput::new("nope");
+        assert_eq!(f.wizard_next(&catalog), Err(BAD_PORT.to_string()));
+        assert!(f.wizard.advanced_open, "the refusal opened the fold");
+        assert!(shown(f).contains(&ports));
+        assert_eq!(
+            f.fold_summary(&app_ref(&catalog), CreateRow::AdvancedFold)
+                .as_deref(),
+            Some("ports nope")
+        );
     }
 
     /// A field's problem shows beside it once it is worth saying: not while the field is typed
@@ -2845,12 +2999,13 @@ mod tests {
         assert_eq!(help.problem.as_deref(), Some(NO_VALUE));
     }
 
-    /// More folders are typed on the Workspace step, refused there by the first bad entry, and
-    /// reviewed as typed, with what sbx gets among the mounts.
+    /// Folders are picked on the Workspace step, one row each over *mount a folder…*: read-only at
+    /// first, switched with the keys, dropped with Delete, refused there when a create would be,
+    /// and reviewed in words, among what the sandbox sees.
     #[test]
-    fn more_folders_are_checked_on_their_step_and_reviewed_with_their_targets() {
+    fn picked_folders_are_switched_dropped_checked_and_reviewed() {
         let root = std::env::temp_dir().join(format!("aisbx-tests-more-{}", std::process::id()));
-        for d in ["proj", "data"] {
+        for d in ["proj/sub", "data"] {
             std::fs::create_dir_all(root.join(d)).unwrap();
         }
         let root = std::fs::canonicalize(&root).unwrap();
@@ -2859,39 +3014,65 @@ mod tests {
         app.open_create();
         let catalog = std::sync::Arc::clone(&app.catalog);
         let f = form_mut(&mut app);
+        let data = root.join("data");
+        assert_eq!(f.add_folder(&data), 0);
+        assert_eq!(
+            f.add_folder(&data),
+            0,
+            "a folder picked twice is listed once"
+        );
+        let spec = format!("{}:ro", data.display());
+        assert_eq!(f.workspace.extra_folders, [spec.as_str()]);
         let rows = f.rows_of(CreateStep::Workspace, &catalog);
         let at = |row| rows.iter().position(|r| *r == row);
         assert_eq!(
-            at(CreateRow::ExtraFolders),
+            at(CreateRow::Folder(0)),
+            at(CreateRow::FolderAdd).map(|i| i - 1)
+        );
+        assert_eq!(
+            at(CreateRow::FolderAdd),
             at(CreateRow::Clone).map(|i| i - 1)
         );
-        assert!(CreateRow::ExtraFolders.is_text());
-        assert!(f.focus_field(&catalog, CreateRow::ExtraFolders));
-        for c in "docs".chars() {
-            f.field_key(&catalog, CreateRow::ExtraFolders, key(KeyCode::Char(c)));
-        }
-        let relative = "“docs”: give the host folder as an absolute path or ~/…";
-        let problem = f.field_problem(CreateRow::ExtraFolders, &catalog);
-        assert_eq!(problem.as_deref(), Some(relative));
-        let step = f.step_problem(CreateStep::Workspace, &catalog);
-        assert_eq!(step.as_deref(), Some(relative));
-        assert!(f.wizard_goto(&catalog, CreateStep::Review).is_err());
+        assert!(!CreateRow::Folder(0).is_text());
+        assert!(f.focus_field(&catalog, CreateRow::FolderAdd));
+        let effect = f.field_key(&catalog, CreateRow::FolderAdd, key(KeyCode::Enter));
+        assert_eq!(effect, FieldEffect::PickFolder);
 
-        let typed = format!("{}:/workspace/data:ro", root.join("data").display());
-        f.workspace.extra_folders = TextInput::new(typed.clone());
-        assert_eq!(f.field_problem(CreateRow::ExtraFolders, &catalog), None);
+        assert_eq!(f.choices(CreateRow::Folder(0)), ["read-only", "read-write"]);
+        assert_eq!(f.chosen(CreateRow::Folder(0)), Some(0));
+        f.field_key(&catalog, CreateRow::Folder(0), key(KeyCode::Char(' ')));
+        assert_eq!(f.workspace.extra_folders, [data.display().to_string()]);
+        assert!(f.pick_choice(CreateRow::Folder(0), 0));
+        assert_eq!(f.workspace.extra_folders, [spec.as_str()]);
+        assert_eq!(f.field_problem(CreateRow::Folder(0), &catalog), None);
+
+        assert_eq!(f.add_folder(&root.join("proj").join("sub")), 1);
+        let problem = f.field_problem(CreateRow::Folder(1), &catalog);
+        assert!(
+            problem
+                .as_deref()
+                .is_some_and(|p| p.contains("in the workspace")),
+            "{problem:?}"
+        );
+        assert_eq!(f.step_problem(CreateStep::Workspace, &catalog), problem);
+        assert!(f.focus_field(&catalog, CreateRow::Folder(1)));
+        f.field_key(&catalog, CreateRow::Folder(1), key(KeyCode::Delete));
+        assert_eq!(f.workspace.extra_folders, [spec.as_str()]);
+        assert_eq!(
+            f.wizard_rows(&catalog).get(f.wizard_focus()),
+            Some(&WizardRow::Field(CreateRow::FolderAdd)),
+            "the cursor stays where the row was"
+        );
+
         let review = match &app.screen {
             Screen::Create(form) => form.review(&app),
             _ => panic!("the create form is open"),
         };
-        let more = review.answers.iter().find(|a| a.label == "More folders");
+        let shown = format!("{} (read-only)", crate::model::tilde(&data));
+        let more = review.answers.iter().find(|a| a.label == "Also mounts");
         assert_eq!(
             more.map(|a| (a.value.as_str(), a.default)),
-            Some((typed.as_str(), false))
-        );
-        let shown = format!(
-            "{}:/workspace/data:ro",
-            crate::model::tilde(&root.join("data"))
+            Some((shown.as_str(), false))
         );
         assert_eq!(review.mounts.last(), Some(&shown), "{:?}", review.mounts);
         let _ = std::fs::remove_dir_all(&root);
@@ -2952,19 +3133,62 @@ mod tests {
         let catalog = std::sync::Arc::clone(&app.catalog);
         let view = app_ref(&catalog);
         let subscription = subscription(&app);
+        let says_it_all = |row: WizardRow| {
+            matches!(
+                row,
+                WizardRow::Provider(_) | WizardRow::Edit(_) | WizardRow::Next | WizardRow::Back
+            )
+        };
+        let may_say_more = |row: WizardRow| matches!(row, WizardRow::Agent(_));
+        let option = |row: WizardRow| {
+            matches!(
+                row,
+                WizardRow::Field(
+                    CreateRow::Clone
+                        | CreateRow::GitGuard
+                        | CreateRow::FolderAdd
+                        | CreateRow::ModelsFold
+                        | CreateRow::ModelOn(_)
+                        | CreateRow::Model(_)
+                        | CreateRow::Ports
+                        | CreateRow::DenyNetwork
+                        | CreateRow::McpNone
+                        | CreateRow::Mcp(_)
+                )
+            )
+        };
         let check = |f: &mut CreateForm, state: &str| {
+            for fold in [
+                CreateRow::ModelsFold,
+                CreateRow::FilesFold,
+                CreateRow::AdvancedFold,
+            ] {
+                f.set_fold(fold, true);
+            }
             for step in CreateStep::ALL {
                 f.wizard_set_step(&catalog, step);
                 for row in f.wizard_rows(&catalog) {
                     let help = f.help(&view, row);
-                    assert!(
-                        !help.title.is_empty() && !help.text.is_empty(),
-                        "{state}: {step:?} {row:?} {help:?}"
-                    );
+                    assert!(!help.title.is_empty(), "{state}: {step:?} {row:?} {help:?}");
+                    if !may_say_more(row) {
+                        assert_eq!(
+                            help.text.is_empty(),
+                            says_it_all(row),
+                            "{state}: {step:?} {row:?} {help:?}"
+                        );
+                    }
+                    if option(row) {
+                        let text = &help.text;
+                        assert!(
+                            text.starts_with("When ") && text.contains(" Otherwise, "),
+                            "{state}: {row:?} {text}"
+                        );
+                    }
                 }
             }
         };
         let f = form_mut(&mut app);
+        f.add_folder(Path::new("/srv/docs"));
         check(f, "defaults");
         f.connection.litellm = None;
         check(f, "new connection");
@@ -2992,10 +3216,16 @@ mod tests {
             .position(|a| a.kit.name == "web")
             .expect("web is an addon");
         let help = f.help(&view, WizardRow::Field(CreateRow::Addon(web)));
-        assert!(help.text.contains("Only now"), "{help:?}");
-        f.wizard_set_step(&catalog, CreateStep::Provider);
-        let back = f.help(&view, WizardRow::Back).text;
-        assert!(back.contains("first step"), "{back}");
+        assert!(help.text.contains(ONLY_NOW_NOTE), "{help:?}");
+        for step in CreateStep::ALL {
+            f.wizard_set_step(&catalog, step);
+            for row in f.wizard_rows(&catalog) {
+                let text = f.help(&view, row).text;
+                for word in ["placeholder", "keychain", "--static-mcp", "host-global"] {
+                    assert!(!text.contains(word), "{row:?}: {text}");
+                }
+            }
+        }
     }
 
     const BAD_PORT: &str =

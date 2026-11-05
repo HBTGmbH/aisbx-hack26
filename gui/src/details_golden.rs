@@ -307,19 +307,6 @@ fn a_stopped_sandbox_draws_the_stopped_notes_and_no_chart() {
     let notes = insight::resources_stopped_notes();
     assert_drawn(&w, &prose(&notes));
     assert_offers(&w, &notes);
-    // Core's two lines of one sentence are one paragraph, no wider than `form::PARA_W`.
-    let pieces: Vec<egui::Rect> = (w.drawn_at.iter())
-        .filter(|(t, _)| t.starts_with("CPU, memory and disk") || t.contains("just to measure"))
-        .map(|(_, r)| *r)
-        .collect();
-    assert_eq!(pieces.len(), 2, "{:?}", w.drawn);
-    let paragraph = pieces[0].union(pieces[1]);
-    assert!(w.size.x - crate::shell::LIST_W > crate::form::PARA_W + 100.0);
-    assert!(
-        paragraph.width() <= crate::form::PARA_W + 0.5,
-        "{paragraph:?}"
-    );
-    assert!(paragraph.height() > 30.0, "it wraps: {paragraph:?}");
     assert!(!w.drawn.iter().any(|d| d == "CPU %"), "{:?}", w.drawn);
     let chart = egui::Id::unique(resources::CPU_CHART);
     assert!(w.ctx.read_response(chart).is_none(), "no chart is drawn");
@@ -327,6 +314,32 @@ fn a_stopped_sandbox_draws_the_stopped_notes_and_no_chart() {
     open_tab(&mut w, Tab::Ports);
     let ports = w.app.insight.ports.value.clone().unwrap();
     assert_drawn(&w, &prose(&insight::port_notes(&sandbox(false), &ports)));
+}
+
+/// Core's two lines of one sentence are one paragraph, no wider than `form::PARA_W`: the Mounts
+/// tab of a sandbox that mounts no folder.
+#[test]
+fn a_notes_lines_flow_into_one_paragraph_no_wider_than_a_paragraph() {
+    let mut sb = sandbox(false);
+    sb.workspace = Default::default();
+    let mut w = window(sb);
+    w.app.select(1);
+    w.frame(Vec::new());
+    open_tab(&mut w, Tab::Mounts);
+    let pieces: Vec<egui::Rect> = (w.drawn_at.iter())
+        .filter(|(t, _)| {
+            t.starts_with("No folder of your computer") || t.contains("copies them out")
+        })
+        .map(|(_, r)| *r)
+        .collect();
+    assert!(!pieces.is_empty(), "{:?}", w.drawn);
+    let paragraph = (pieces.iter()).fold(pieces[0], |a, b| a.union(*b));
+    assert!(w.size.x - crate::shell::LIST_W > crate::form::PARA_W + 100.0);
+    assert!(
+        paragraph.width() <= crate::form::PARA_W + 0.5,
+        "{paragraph:?}"
+    );
+    assert!(paragraph.height() > 30.0, "it wraps: {paragraph:?}");
 }
 
 /// Three readings 2.5 s apart; the pointer at the chart's right edge reads the newest back.

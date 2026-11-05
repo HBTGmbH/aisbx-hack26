@@ -638,7 +638,7 @@ fn here(ui: &mut egui::Ui, app: &App, width: f32) {
     let (rect, _) = ui.allocate_exact_size(Vec2::new(width, 40.0), Sense::hover());
     let weak = ui.visuals().weak_text_color();
     let title = ui.painter().layout_no_wrap(
-        "This folder".into(),
+        roster::HERE_HEADING.into(),
         FontId::new(HEADING, theme::strong_family()),
         ui.visuals().strong_text_color(),
     );
@@ -661,16 +661,21 @@ fn here(ui: &mut egui::Ui, app: &App, width: f32) {
         .galley(Pos2::new(x + 12.0, path_y + 1.0), count, weak);
 }
 
-/// The other folders' heading — a button that folds the section away and back (`a`).
+/// The other folders' heading — a button that folds the section away and back (`a`). The count
+/// stands after the title where it fits, else on a line of its own under it.
 fn other(ui: &mut egui::Ui, app: &App, width: f32) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 50.0), Sense::CLICK);
+    let count = roster::other_count(app.elsewhere, app.other_folders());
+    let title_w = measure_strong(ui, roster::OTHER_HEADING, HEADING);
+    let beside = PAD_X + DOT_W + title_w + 12.0 + measure(ui, &count, SECOND) + PAD_X <= width;
+    let height = if beside { 50.0 } else { 50.0 + LINE_H };
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, height), Sense::CLICK);
     let response = response
         .on_hover_cursor(CursorIcon::PointingHand)
         .on_hover_text(match app.show_other {
-            true => "Click to hide the other folders' sandboxes (a)",
-            false => "Click to show the other folders' sandboxes (a)",
+            true => "Click to hide them (a)",
+            false => "Click to show them (a)",
         });
-    response.widget_info(|| WidgetInfo::labeled(Role::Button, true, "Other folders"));
+    response.widget_info(|| WidgetInfo::labeled(Role::Button, true, roster::OTHER_HEADING));
     let visuals = ui.visuals();
     let colour = match response.hovered() {
         true => visuals.strong_text_color(),
@@ -683,11 +688,11 @@ fn other(ui: &mut egui::Ui, app: &App, width: f32) -> egui::Response {
         visuals.widgets.noninteractive.bg_stroke,
     );
     let title = ui.painter().layout_no_wrap(
-        "Other folders".into(),
+        roster::OTHER_HEADING.into(),
         FontId::new(HEADING, theme::strong_family()),
         colour,
     );
-    let line_top = rect.bottom() - 10.0 - title.size().y;
+    let line_top = rect.top() + 50.0 - 10.0 - title.size().y;
     // The disclosure triangle, painted: ▾ open, ▸ folded.
     let tip = Pos2::new(rect.left() + PAD_X + 5.0, line_top + title.size().y / 2.0);
     let triangle = match app.show_other {
@@ -705,59 +710,87 @@ fn other(ui: &mut egui::Ui, app: &App, width: f32) -> egui::Response {
     ui.painter()
         .add(egui::Shape::convex_polygon(triangle, colour, Stroke::NONE));
     let x = rect.left() + PAD_X + DOT_W;
-    let title_w = title.size().x;
     ui.painter().galley(Pos2::new(x, line_top), title, colour);
-    let count = roster::other_count(app.elsewhere, app.other_folders());
     let weak = visuals.weak_text_color();
     let count = ui
         .painter()
         .layout_no_wrap(count, FontId::proportional(SECOND), weak);
-    let count_y = line_top + (HEADING - SECOND) / 2.0 + 1.0;
-    ui.painter()
-        .galley(Pos2::new(x + title_w + 12.0, count_y), count, weak);
+    let at = match beside {
+        true => Pos2::new(
+            x + title_w + 12.0,
+            line_top + (HEADING - SECOND) / 2.0 + 1.0,
+        ),
+        false => Pos2::new(x, rect.top() + 50.0 - 6.0),
+    };
+    ui.painter().galley(at, count, weak);
     response
 }
 
-/// A folder heading in the second section, over the sandboxes that mount it.
+/// How wide `text` is in the strong face at `size`.
+fn measure_strong(ui: &egui::Ui, text: &str, size: f32) -> f32 {
+    let font = FontId::new(size, theme::strong_family());
+    (ui.painter()
+        .layout_no_wrap(text.into(), font, Color32::WHITE))
+    .size()
+    .x
+}
+
+/// A folder heading in the second section, over the sandboxes that mount it: a hairline that
+/// sets it apart from the folder above, the folder's mark and the folder, then how many
+/// sandboxes mount it.
 fn folder(ui: &mut egui::Ui, head: &FolderHead, width: f32) {
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(width, 30.0), Sense::hover());
-    let pos = Pos2::new(rect.left() + PAD_X + DOT_W, rect.bottom() - 21.0);
-    let right = match head.mountless() {
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(width, 40.0), Sense::hover());
+    let visuals = ui.visuals();
+    ui.painter().hline(
+        rect.left() + PAD_X + DOT_W..=rect.right() - PAD_X,
+        rect.top() + 8.0,
+        Stroke::new(
+            1.0,
+            visuals
+                .widgets
+                .noninteractive
+                .bg_stroke
+                .color
+                .gamma_multiply(0.6),
+        ),
+    );
+    let strong = visuals.strong_text_color();
+    let weak = visuals.weak_text_color();
+    let y = rect.bottom() - 22.0;
+    let mark = ui
+        .painter()
+        .layout_no_wrap("🗁".into(), FontId::proportional(14.0), weak);
+    let mark_x = rect.left() + PAD_X + (DOT_W - mark.size().x) / 2.0;
+    ui.painter().galley(Pos2::new(mark_x, y), mark, weak);
+    let pos = Pos2::new(rect.left() + PAD_X + DOT_W, y);
+    let count = roster::count(head.sandboxes);
+    let gone = head.missing.then_some(roster::FOLDER_GONE);
+    let tail =
+        12.0 + measure(ui, &count, SECOND) + gone.map_or(0.0, |g| 10.0 + measure(ui, g, SECOND));
+    let room = rect.right() - PAD_X - pos.x - tail;
+    let mut right = match head.mountless() {
         true => {
-            let weak = ui.visuals().weak_text_color();
-            let galley = ui.painter().layout_no_wrap(
-                "no host folder (mountless)".into(),
-                FontId::proportional(13.5),
-                weak,
-            );
+            let galley = line(ui, roster::NO_FOLDER.into(), 14.0, strong, room);
             let right = pos.x + galley.size().x;
-            ui.painter().galley(pos, galley, weak);
+            ui.painter().galley(pos, galley, strong);
             right
         }
-        false => {
-            let missing = match head.missing {
-                true => 10.0 + measure(ui, "folder missing", SECOND),
-                false => 0.0,
-            };
-            folder_text(
-                ui,
-                &head.path,
-                13.5,
-                pos,
-                rect.right() - PAD_X - pos.x - missing,
-            )
-        }
+        false => folder_text(ui, &head.path, 14.0, pos, room),
     };
-    if head.missing {
-        let colour = theme::danger(ui.visuals().dark_mode);
-        let galley = ui.painter().layout_no_wrap(
-            "folder missing".into(),
-            FontId::proportional(SECOND),
-            colour,
-        );
-        ui.painter()
-            .galley(Pos2::new(right + 10.0, pos.y + 1.0), galley, colour);
+    if let Some(gone) = gone {
+        let colour = theme::danger(visuals.dark_mode);
+        let galley = ui
+            .painter()
+            .layout_no_wrap(gone.into(), FontId::proportional(SECOND), colour);
+        let at = Pos2::new(right + 10.0, pos.y + 1.5);
+        right = at.x + galley.size().x;
+        ui.painter().galley(at, galley, colour);
     }
+    let galley = ui
+        .painter()
+        .layout_no_wrap(count, FontId::proportional(SECOND), weak);
+    ui.painter()
+        .galley(Pos2::new(right + 12.0, pos.y + 1.5), galley, weak);
 }
 
 /// The "+ New sandbox" row closing the current folder's section; it lights up only when
@@ -804,11 +837,9 @@ fn new_row(
         y,
         strong,
     );
-    // What a click does, in words: the key is the tooltip's, as on every button.
-    let hint = match (selected, app.here == 0) {
-        (true, _) => "a click opens the setup wizard",
-        (false, true) => "no sandbox here yet — set one up for this folder",
-        (false, false) => "for this folder",
+    let hint = match app.here == 0 {
+        true => "none here yet",
+        false => "for this folder",
     };
     let weak = ui.visuals().weak_text_color();
     // With no sandbox to size the columns, the first one is narrower than the title.
@@ -974,10 +1005,34 @@ mod tests {
         frame(&ctx, &mut app, 900.0, Vec::new());
         let drawn = frame(&ctx, &mut app, 900.0, Vec::new());
         let y = |t: &str| at(&drawn, t).top();
-        assert!(y("Other folders") < y("api") && y("api") < y("far-0"));
+        let heading = roster::OTHER_HEADING;
+        assert!(y(heading) < y("api") && y("api") < y("far-0"));
         assert!(y("far-1") < y("ui") && y("ui") < y("far-2"));
         at(&drawn, "3 sandboxes in 2 folders");
         assert_eq!(drawn.iter().filter(|(t, _)| t == "api").count(), 1);
+        for (folder, count) in [("api", "2 sandboxes"), ("ui", "1 sandbox")] {
+            let line = |t: &str| {
+                (drawn.iter())
+                    .filter(|(text, r)| text == t && (r.center().y - y(folder)).abs() < 12.0)
+                    .count()
+            };
+            assert_eq!(line(count), 1, "{folder}: {drawn:?}");
+            assert_eq!(line("🗁"), 1, "{folder}: {drawn:?}");
+        }
+    }
+
+    #[test]
+    fn the_other_folders_count_goes_under_its_heading_where_it_has_no_room_beside_it() {
+        let mut app = mixed();
+        let ctx = egui::Context::default();
+        for (width, beside) in [(900.0, true), (300.0, false)] {
+            frame(&ctx, &mut app, width, Vec::new());
+            let drawn = frame(&ctx, &mut app, width, Vec::new());
+            let heading = at(&drawn, roster::OTHER_HEADING);
+            let count = at(&drawn, "3 sandboxes in 2 folders");
+            assert_eq!(count.top() < heading.bottom(), beside, "{width}");
+            assert!(count.right() <= width, "{width}: {count:?}");
+        }
     }
 
     #[test]
@@ -1005,7 +1060,7 @@ mod tests {
         assert_eq!(app.selected().map(|sb| sb.name.as_str()), Some("far-2"));
 
         let drawn = frame(&ctx, &mut app, 900.0, Vec::new());
-        let heading = at(&drawn, "Other folders").center();
+        let heading = at(&drawn, roster::OTHER_HEADING).center();
         click(&ctx, &mut app, heading);
         assert!(!app.show_other, "the heading folded the section");
 

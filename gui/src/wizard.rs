@@ -4,8 +4,8 @@
 
 use aisbx_core::app::{AccountChoice, App, CreateForm, CreateRow, Hit, Screen, TextInput};
 use aisbx_core::create::{
-    self, connection_hint, connection_label, field_gloss, harness_blurb, harness_hint, or_list,
-    provider_blurb, provider_harnesses, ConnChoice, CreateStep, Help, Review, WizardRow,
+    self, connection_hint, connection_label, field_gloss, harness_blurb, provider_blurb,
+    ConnChoice, CreateStep, Help, Review, WizardRow,
 };
 use aisbx_core::models::{self, Slot};
 use aisbx_core::{kits, litellm, model, startdir};
@@ -104,7 +104,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                     CreateStep::Models => models_step(ui, &mut at),
                     CreateStep::Kits => kits_step(ui, &mut at),
                     CreateStep::Workspace => workspace_step(ui, &mut at),
-                    CreateStep::Review => review_step(ui, &review, &mut jump),
+                    CreateStep::Review => review_step(ui, &mut at, &review, &mut jump),
                 }
                 ui.add_space(16.0);
             });
@@ -538,7 +538,8 @@ fn button_label(row: WizardRow) -> &'static str {
         WizardRow::Provider(_)
         | WizardRow::Agent(_)
         | WizardRow::Connection(_)
-        | WizardRow::Field(_) => "",
+        | WizardRow::Field(_)
+        | WizardRow::Edit(_) => "",
     }
 }
 
@@ -574,21 +575,20 @@ fn tile_grid<'t>(
     }
 }
 
-/// Step 1: one tile per provider, saying what it is and which harnesses it runs.
+/// Step 1: one tile per provider, saying what it serves.
 fn provider_step(ui: &mut egui::Ui, at: &mut Draw<'_, '_>) {
     let catalog = &at.app.catalog;
     let dark = dark(ui);
     let picked = at.form.selected_provider_index(catalog);
     let providers = at.form.providers(catalog);
-    // In words (`a, b or c`), not a dotted list: a wrapped line must not start with a dot.
-    let runs: Vec<String> = (providers.iter())
-        .map(|p| format!("Runs {}", or_list(&provider_harnesses(catalog, *p))))
+    let blurbs: Vec<String> = (providers.iter())
+        .map(|p| sentence(provider_blurb(*p)))
         .collect();
     let tiles = (providers.iter().enumerate())
         .map(|(p, provider)| Tile {
             title: provider.label(),
-            blurb: provider_blurb(*provider),
-            detail: &runs[p],
+            blurb: &blurbs[p],
+            detail: "",
             badges: Vec::new(),
             color: theme::accent(dark),
             selected: picked == Some(p),
@@ -605,18 +605,14 @@ fn harness_step(ui: &mut egui::Ui, at: &mut Draw<'_, '_>) {
     let dark = dark(ui);
     let picked = at.form.selected_harness(catalog);
     let harnesses = at.form.harnesses(catalog);
-    let hints: Vec<String> = (harnesses.iter())
-        .map(|h| {
-            (h.backends.first())
-                .map(|b| sentence(&harness_hint(&catalog.backends[*b])))
-                .unwrap_or_default()
-        })
+    let blurbs: Vec<String> = (harnesses.iter())
+        .map(|h| sentence(harness_blurb(&h.agent)))
         .collect();
     let tiles = (harnesses.iter().enumerate())
         .map(|(h, harness)| Tile {
             title: &harness.label,
-            blurb: harness_blurb(&harness.agent),
-            detail: &hints[h],
+            blurb: &blurbs[h],
+            detail: "",
             badges: Vec::new(),
             color: theme::agent_color(&harness.agent, dark),
             selected: picked == Some(h),
@@ -671,8 +667,7 @@ fn harness_step(ui: &mut egui::Ui, at: &mut Draw<'_, '_>) {
             ui,
             Tone::Warn,
             &format!(
-                "{} is not stored on this host, so this sandbox would have no access. Store it \
-                 first:\n{}",
+                "{} is missing on this computer. Store it with:\n{}",
                 missing.join(" and "),
                 commands.join("\n")
             ),
@@ -703,22 +698,11 @@ fn litellm_fields(ui: &mut egui::Ui, at: &mut Draw<'_, '_>) {
     for (n, name) in form.choices(CreateRow::LitellmConn).iter().enumerate() {
         let conn = form.connection.connections.get(n);
         let selected = chosen == Some(n);
-        // The list a sandbox on it read last; the agent picks its model from the gateway's.
-        let models = match at.app.catalog.models.len() {
-            0 => "The sandbox reads the gateway's models".to_string(),
-            1 => "1 model".to_string(),
-            n => format!("{n} models"),
-        };
-        let (title, blurb, detail) = match conn {
-            Some(c) => (
-                c.name.clone(),
-                c.url.clone(),
-                if selected { models } else { String::new() },
-            ),
+        let (title, blurb) = match conn {
+            Some(c) => (c.name.clone(), c.url.clone()),
             None => (
                 sentence(name),
-                "Add a gateway with its URL and key".to_string(),
-                String::new(),
+                "Add a gateway: its address and key".to_string(),
             ),
         };
         let mut badges = Vec::new();
@@ -731,7 +715,7 @@ fn litellm_fields(ui: &mut egui::Ui, at: &mut Draw<'_, '_>) {
         let tile = Tile {
             title: &title,
             blurb: &blurb,
-            detail: &detail,
+            detail: "",
             badges,
             color: theme::accent(dark),
             selected,
@@ -814,7 +798,7 @@ fn token_fields(ui: &mut egui::Ui, at: &mut Draw<'_, '_>) {
     let item = Item {
         mark: Mark::Radio,
         title: "New token…",
-        detail: "Paste a new token and name it",
+        detail: "",
         badges: Vec::new(),
         color: theme::accent(dark),
         checked: form.connection.account == AccountChoice::New,
@@ -883,11 +867,9 @@ fn text_field(
     at.take(response, row);
 }
 
-/// Claude Code's three model aliases: each a select showing what it is pinned to, the open one's
-/// models listed under it.
-/// Step 3, on a LiteLLM connection: the refresh button, the agent's slots each as a select with
-/// the offered models under the open one, the config files the answers make, then every model of
-/// the connection, ticked where the agent is offered it.
+/// Step 4, on a LiteLLM connection: the refresh button, then two folds of optional answers: the
+/// agent's slots each as a select with the offered models under the open one, and every model of
+/// the connection, ticked where the agent is offered it; then the config files the answers make.
 fn models_step(ui: &mut egui::Ui, at: &mut Draw<'_, '_>) {
     let catalog = &at.app.catalog;
     let Some(agent) = at.form.models_agent(catalog) else {
@@ -907,12 +889,38 @@ fn models_step(ui: &mut egui::Ui, at: &mut Draw<'_, '_>) {
     }
     at.take(response, refresh);
     if at.form.models_offered(catalog) {
-        slots(ui, at, agent);
+        let open = at.form.wizard.models_open;
+        fold(ui, at, CreateRow::ModelsFold, "Pick models", open);
+        if open {
+            nested(ui, |ui| {
+                slots(ui, at, agent);
+                offered(ui, at);
+            });
+        }
     }
-    config_files(ui, at);
-    if at.form.models_offered(catalog) {
-        offered(ui, at);
+    if at.app.config_file_row(0).is_some() {
+        let open = at.form.wizard.files_open;
+        fold(ui, at, CreateRow::FilesFold, "Config files", open);
+        if open {
+            nested(ui, |ui| config_files(ui, at));
+        }
     }
+}
+
+/// A fold of optional answers ([`controls::fold`]), handed to the rows like any control.
+fn fold(ui: &mut egui::Ui, at: &mut Draw<'_, '_>, row: CreateRow, title: &str, open: bool) {
+    let summary = at.form.fold_summary(at.app, row);
+    let gloss = sentence(field_gloss(row));
+    let fold = controls::Fold {
+        title,
+        summary: summary.as_deref(),
+        gloss: &gloss,
+        open,
+        focused: at.focused(WizardRow::Field(row)),
+    };
+    let width = ui.available_width().min(FIELD + 120.0);
+    let response = controls::fold(ui, fold, width);
+    at.take(response, WizardRow::Field(row));
 }
 
 /// The config files the connection writes for the agent: each with *Open*, and *Reset* where
@@ -929,11 +937,6 @@ fn config_files(ui: &mut egui::Ui, at: &mut Draw<'_, '_>) {
     if rows.is_empty() {
         return;
     }
-    controls::section(
-        ui,
-        "Config files",
-        "What the harness reads, as these answers make it. Open one to read or change it.",
-    );
     let dark = dark(ui);
     for (i, file, state) in rows {
         let row = WizardRow::Field(CreateRow::ConfigFile(i));
@@ -970,11 +973,7 @@ fn config_files(ui: &mut egui::Ui, at: &mut Draw<'_, '_>) {
 fn slots(ui: &mut egui::Ui, at: &mut Draw<'_, '_>, agent: litellm::Agent) {
     let catalog = &at.app.catalog;
     let dark = dark(ui);
-    controls::section(
-        ui,
-        "Starts on",
-        "Nothing picked leaves it to the agent. Your picks are kept for the next sandbox.",
-    );
+    controls::section(ui, "Starts on", "The agent picks where nothing is picked.");
     let width = ui.available_width().min(FIELD);
     let offered = at.form.enabled_models(catalog);
     for slot in Slot::of(agent).iter().copied() {
@@ -1060,7 +1059,7 @@ fn offered(ui: &mut egui::Ui, at: &mut Draw<'_, '_>) {
     controls::section(
         ui,
         &format!("Offered · {} of {}", offered.len(), catalog.models.len()),
-        "A model switched off here is not offered to the agent, in every sandbox on this connection.",
+        "Untick a model to hide it from the agent, in every sandbox on this connection.",
     );
     const GAP: f32 = 12.0;
     let avail = ui.available_width();
@@ -1166,11 +1165,7 @@ fn kits_step(ui: &mut egui::Ui, at: &mut Draw<'_, '_>) {
     let (hosts, others): (Vec<usize>, Vec<usize>) = order.into_iter().partition(|i| host(*i));
     let add_later = sentence(create::ADD_LATER);
     for (title, gloss, kits) in [
-        (
-            HOST_CACHES,
-            "Read-only, from this host. A cache this host does not have cannot be ticked.",
-            hosts,
-        ),
+        (HOST_CACHES, "Read-only, from this computer.", hosts),
         (ADDITIONAL_KITS, "", others),
     ] {
         if kits.is_empty() {
@@ -1192,9 +1187,7 @@ fn kits_step(ui: &mut egui::Ui, at: &mut Draw<'_, '_>) {
                         Some(found) if found.detected() => {
                             format!("Found {}", found.found().join(", "))
                         }
-                        Some(found) => {
-                            format!("Nothing to mount: {}", found.reason(&addon.kit.name))
-                        }
+                        Some(found) => format!("Not found: {}", found.reason(&addon.kit.name)),
                         None => addon.kit.first_sentence().to_string(),
                     };
                     let mut badges = Vec::new();
@@ -1243,41 +1236,34 @@ fn kits_step(ui: &mut egui::Ui, at: &mut Draw<'_, '_>) {
     }
 }
 
-/// Step 4: the label and the start folder, the options, the network fields and the MCP servers.
+/// Step 6: the label, the start folder and the folders picked to mount, the options, and under a
+/// fold the ports, the blocked hosts and the MCP servers.
 fn workspace_step(ui: &mut egui::Ui, at: &mut Draw<'_, '_>) {
     let catalog = &at.app.catalog;
     let form = at.form;
     let dark = dark(ui);
     let ws = &form.workspace;
-    controls::section(
-        ui,
-        "Name and folders",
-        "Your label, where the agent opens, and more host folders",
-    );
     text_field(
         ui,
         at,
         CreateRow::Name,
         "Label",
         &ws.name,
-        "generated from the agent and kits",
+        "made from your answers",
         false,
     );
     if form.start_dir_offered(catalog) {
         let row = WizardRow::Field(CreateRow::StartDir);
-        let opens = startdir::describe(&at.app.cwd, ws.start_dir.as_deref());
+        let root = form.workspace_root(&at.app.cwd);
+        let opens = startdir::describe(&root, ws.start_dir.as_deref());
         let focused = at.focused(row);
         let gloss = sentence(field_gloss(CreateRow::StartDir));
-        let response = controls::labelled(ui, "Opens in", &gloss, None, |ui| {
+        let response = controls::labelled(ui, "Starts in", &gloss, None, |ui| {
             ui.horizontal(|ui| {
                 let path = RichText::new(opens).monospace().size(13.5);
                 ui.add(egui::Label::new(path).selectable(false));
                 ui.add_space(8.0);
-                let label = match ws.start_dir.is_some() {
-                    true => "Change…",
-                    false => "Choose a subfolder…",
-                };
-                let response = ui.add(egui::Button::new(label).frame_when_inactive(true));
+                let response = ui.add(egui::Button::new("Change…").frame_when_inactive(true));
                 if focused {
                     controls::focus_ring(ui, response.rect);
                 }
@@ -1287,15 +1273,7 @@ fn workspace_step(ui: &mut egui::Ui, at: &mut Draw<'_, '_>) {
         });
         at.take(response, row);
     }
-    text_field(
-        ui,
-        at,
-        CreateRow::ExtraFolders,
-        "More folders",
-        &ws.extra_folders,
-        "~/docs:ro, ~/libs:/workspace/libs",
-        true,
-    );
+    folders(ui, at);
 
     controls::section(ui, "Options", "");
     let width = ui.available_width().min(FIELD + 120.0);
@@ -1355,18 +1333,91 @@ fn workspace_step(ui: &mut egui::Ui, at: &mut Draw<'_, '_>) {
         }
     }
 
-    controls::section(
-        ui,
-        "Network",
-        "Optional. Separate entries with spaces or commas.",
-    );
+    let open = form.wizard.advanced_open;
+    fold(ui, at, CreateRow::AdvancedFold, "More options", open);
+    if !open {
+        return;
+    }
+    nested(ui, |ui| advanced(ui, at));
+}
+
+/// The folders picked to mount, each with its access and *Remove*, then *Mount a folder…*.
+fn folders(ui: &mut egui::Ui, at: &mut Draw<'_, '_>) {
+    let form = at.form;
+    let picked = &form.workspace.extra_folders;
+    let label = "Also mounts";
+    if !picked.is_empty() {
+        ui.add_space(6.0);
+        ui.label(theme::strong(RichText::new(label).size(13.5)));
+    }
+    for (i, spec) in picked.iter().enumerate() {
+        let row = WizardRow::Field(CreateRow::Folder(i));
+        let index = at.index(row);
+        let host = model::tilde(std::path::Path::new(aisbx_core::folders::spec_host(spec).0));
+        let options: Vec<String> = form
+            .choices(CreateRow::Folder(i))
+            .iter()
+            .map(|o| sentence(o))
+            .collect();
+        let focused = at.focused(row);
+        let problem = form.visible_problem(CreateRow::Folder(i), &at.app.catalog);
+        let mut chosen = None;
+        let mut remove = false;
+        let response = ui
+            .horizontal(|ui| {
+                let path = RichText::new(&host).monospace().size(13.5);
+                ui.add(egui::Label::new(path).truncate().selectable(false));
+                ui.add_space(8.0);
+                let (response, clicked) = controls::segmented(
+                    ui,
+                    &format!("folder-{i}"),
+                    &options,
+                    form.chosen(CreateRow::Folder(i)),
+                    focused,
+                );
+                chosen = clicked;
+                ui.add_space(8.0);
+                remove = ui.button("Remove").clicked();
+                response
+            })
+            .inner;
+        if let Some(problem) = problem {
+            let red = theme::danger(dark(ui));
+            ui.label(RichText::new(problem).size(12.5).color(red));
+        }
+        at.take(response, row);
+        if let Some(value) = chosen {
+            at.list.choose(index, value);
+        }
+        if let (true, Some(index)) = (remove, index) {
+            *at.action = Some((index, aisbx_core::input::KeyCode::Delete));
+        }
+    }
+    let row = WizardRow::Field(CreateRow::FolderAdd);
+    let focused = at.focused(row);
+    let gloss = sentence(field_gloss(CreateRow::FolderAdd));
+    let response = controls::labelled(ui, "Mount more folders", &gloss, None, |ui| {
+        let response = ui.add(egui::Button::new("Mount a folder…").frame_when_inactive(true));
+        if focused {
+            controls::focus_ring(ui, response.rect);
+        }
+        response
+    });
+    at.take(response, row);
+}
+
+/// Under the Workspace step's fold: the ports, the blocked hosts and the MCP servers.
+fn advanced(ui: &mut egui::Ui, at: &mut Draw<'_, '_>) {
+    let form = at.form;
+    let dark = dark(ui);
+    let ws = &form.workspace;
     text_field(
         ui,
         at,
         CreateRow::Ports,
         "Ports",
         &ws.ports,
-        "8080:3000, 5173",
+        "8080:3000",
         true,
     );
     text_field(
@@ -1375,20 +1426,16 @@ fn workspace_step(ui: &mut egui::Ui, at: &mut Draw<'_, '_>) {
         CreateRow::DenyNetwork,
         "Blocked hosts",
         &ws.deny_network,
-        "api.example.com, *.example.com",
+        "api.example.com",
         true,
     );
-
-    controls::section(
-        ui,
-        "MCP servers",
-        "The sandbox's fixed set. A server's credentials stay on the host.",
-    );
+    controls::section(ui, "MCP servers", "");
+    let width = ui.available_width().min(FIELD + 120.0);
     let row = WizardRow::Field(CreateRow::McpNone);
     let item = Item {
         mark: Mark::Check,
-        title: "None",
-        detail: aisbx_core::create::NO_MCP,
+        title: &sentence(create::NO_MCP),
+        detail: &sentence(field_gloss(CreateRow::McpNone)),
         badges: Vec::new(),
         color: theme::accent(dark),
         checked: ws.no_mcp,
@@ -1410,7 +1457,7 @@ fn workspace_step(ui: &mut egui::Ui, at: &mut Draw<'_, '_>) {
         let item = Item {
             mark: Mark::Check,
             title: &server.name,
-            detail: &server.transport,
+            detail: "",
             badges,
             color: theme::accent(dark),
             checked: ws.static_mcp.get(i).copied().unwrap_or(false),
@@ -1422,10 +1469,9 @@ fn workspace_step(ui: &mut egui::Ui, at: &mut Draw<'_, '_>) {
     }
 }
 
-/// Step 5: what will be built, under its sbx name: core's answers grouped by the step that owns
-/// them, each group with an Edit button back to it, an answer still at its default muted; then
-/// what is mounted.
-fn review_step(ui: &mut egui::Ui, review: &Review, jump: &mut Option<Hit>) {
+/// Step 7: the answers grouped by the step that owns them, each group with an Edit button back
+/// to it, an answer still at its default muted; then the folders the sandbox sees.
+fn review_step(ui: &mut egui::Ui, at: &mut Draw<'_, '_>, review: &Review, jump: &mut Option<Hit>) {
     let weak = ui.visuals().weak_text_color();
     if review.policy_warning {
         controls::banner(
@@ -1438,21 +1484,15 @@ fn review_step(ui: &mut egui::Ui, review: &Review, jump: &mut Option<Hit>) {
         );
         ui.add_space(8.0);
     }
-    ui.label(RichText::new("Will be created as").size(12.5).color(weak));
-    ui.label(
-        RichText::new(&review.sbx_name)
-            .monospace()
-            .size(20.0)
-            .strong(),
-    );
-    ui.add_space(6.0);
     let steps: Vec<CreateStep> = CreateStep::ALL
         .into_iter()
         .filter(|s| review.answers.iter().any(|a| a.step == *s))
         .collect();
     for step in steps {
         ui.add_space(10.0);
-        egui::Frame::new()
+        let row = WizardRow::Edit(step);
+        let focused = at.focused(row);
+        let group = egui::Frame::new()
             .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
             .corner_radius(controls::RADIUS)
             .inner_margin(egui::Margin::symmetric(14, 10))
@@ -1463,7 +1503,7 @@ fn review_step(ui: &mut egui::Ui, review: &Review, jump: &mut Option<Hit>) {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let edit = ui
                             .add(egui::Button::new("Edit").frame_when_inactive(true))
-                            .on_hover_text(format!("Go back to step {}", step.number()));
+                            .on_hover_text(format!("Go to step {}", step.number()));
                         if edit.clicked() {
                             *jump = Some(Hit::WizardStep(step));
                         }
@@ -1476,7 +1516,7 @@ fn review_step(ui: &mut egui::Ui, review: &Review, jump: &mut Option<Hit>) {
                 let alone = answers.len() == 1 && answers[0].label == step.title();
                 let value = |ui: &mut egui::Ui, a: &create::Answer, jump: &mut Option<Hit>| {
                     let text = match a.default {
-                        true => RichText::new(format!("{} (default)", a.value)).color(weak),
+                        true => RichText::new(&a.value).color(weak),
                         false => RichText::new(&a.value),
                     };
                     let response = ui
@@ -1510,11 +1550,16 @@ fn review_step(ui: &mut egui::Ui, review: &Review, jump: &mut Option<Hit>) {
                         }
                     });
             });
+        if focused {
+            controls::focus_ring(ui, group.response.rect);
+        }
+        let index = at.index(row);
+        at.list.take(&group.response, index);
     }
     ui.add_space(12.0);
-    ui.label(theme::strong(RichText::new("Mounts").size(14.5)));
-    for mount in &review.mounts {
-        ui.label(RichText::new(mount).monospace());
+    ui.label(theme::strong(RichText::new("Folders").size(14.5)));
+    for folder in &review.mounts {
+        ui.label(RichText::new(folder).monospace());
     }
     for note in &review.notes {
         ui.add_space(4.0);

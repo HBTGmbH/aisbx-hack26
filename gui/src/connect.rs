@@ -1,4 +1,4 @@
-//! The Connect screen (`o`): the sandbox's SSH endpoint, *Set up SSH now* until `sbx setup ssh`
+//! The Connect screen (`o`): the sandbox's SSH host, *Set up SSH now* until `sbx setup ssh`
 //! has run, and one item per app that can connect, all in core's words (`App::connect_view`). An
 //! app's *Open* is Enter on it; a click on the app only selects it.
 
@@ -34,9 +34,8 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
         list.buttons(ui, &[("Close", close, false)]);
     });
     let title = format!("Connect to {}", view.label);
-    let subtitle = format!("{} {}", view.workspace[0], view.workspace[1]);
-    page::body(ui, "connect", &title, &subtitle, |ui| {
-        page::heading(ui, "SSH endpoint", "");
+    page::body(ui, "connect", &title, "", |ui| {
+        page::heading(ui, "SSH host", "");
         page::group(ui, |ui| {
             egui::Frame::new()
                 .inner_margin(egui::Margin::symmetric(20, 10))

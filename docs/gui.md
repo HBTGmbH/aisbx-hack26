@@ -38,8 +38,8 @@ aisbx-ui [--here|-a|--all] [--no-update] [FOLDER]
 | Option | Does |
 | --- | --- |
 | `FOLDER` | shows FOLDER's sandboxes first, as if you started the window there |
-| `--here` | starts with the *Other folders* section folded away |
-| `-a`, `--all` | starts with the *Other folders* section open |
+| `--here` | starts with the *Sandboxes in other folders* section folded away |
+| `-a`, `--all` | starts with the *Sandboxes in other folders* section open |
 | `--no-update` | skips the agent update before a start |
 | `-h`, `--help` / `-V`, `--version` | prints the help / the version |
 
@@ -98,7 +98,7 @@ folder headings. Each sandbox has two lines, and a third one when it needs somet
 - Drag the list wider than 560 points to get the dashboard's [columns](dashboard.md#the-screen) back.
 - Tooltips name each marker and the key that fixes the note. They also show a value the row had to cut.
 - Click a row, or use the arrow keys, Home, End and PageUp/PageDown, to select.
-- Click the *Other folders* heading to collapse or expand it. The window remembers this, as with `a`.
+- Click the *Sandboxes in other folders* heading to collapse or expand it. The window remembers this, as with `a`.
 
 ## The sandbox page
 
@@ -156,7 +156,7 @@ The tabs that list things show them as tables, under a heading with their count:
 - Where a row of a tab names something to do, it has a button for it: *Connect* beside the SSH host, *Rebuild*
   beside changed kits.
 - A key inside a tab's sentence is a keycap you can click. Its tooltip names the action.
-- On the *+ New sandbox* row, the page lists the create wizard's seven steps and offers *Set up a sandbox*.
+- On the *+ New sandbox* row, the page names the folder and offers *Set up a sandbox*.
 
 The Resources charts sample every 2.5 s while the tab is open. Hover a chart to read a point.
 

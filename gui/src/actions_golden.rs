@@ -461,7 +461,7 @@ fn click(w: &mut Win, pos: egui::Pos2) {
     w.frame(Vec::new());
 }
 
-/// A click on the SSH endpoint line does nothing; one on an app selects it, and its *Open*
+/// A click on the SSH host line does nothing; one on an app selects it, and its *Open*
 /// connects it.
 #[test]
 fn a_click_on_the_endpoint_line_does_nothing() {
@@ -716,8 +716,10 @@ fn the_page_stops_at_a_readable_width() {
     );
 }
 
+/// The New row's page says only which folder a new sandbox is for, and offers the button: the
+/// wizard says the rest, step by step.
 #[test]
-fn the_new_rows_page_lists_the_wizards_steps() {
+fn the_new_rows_page_names_the_folder_and_offers_the_button() {
     let mut app = on_box();
     app.select(app.here);
     let mut w = Win::new(app);
@@ -728,20 +730,15 @@ fn the_new_rows_page_lists_the_wizards_steps() {
             .unwrap_or_else(|| panic!("{t}: {:?}", w.drawn_at))
             .1
     };
-    let mut above = on_page("New sandbox").bottom();
-    for (step, gloss) in actions::STEP_GLOSSES {
-        let title = on_page(step.title());
-        assert!(title.top() >= above, "{step:?} in order");
-        assert!(on_page(gloss).left() > title.right(), "{gloss}");
-        above = title.bottom();
+    let title = on_page("New sandbox");
+    let folder = on_page(&format!("in {}", aisbx_core::model::tilde(&w.app.cwd)));
+    assert!(folder.top() >= title.bottom());
+    assert!(on_page("Set up a sandbox").top() > folder.bottom());
+    let page =
+        |t: &str| (w.drawn_at.iter()).any(|(d, r)| d == t && r.center().x > crate::shell::LIST_W);
+    for step in aisbx_core::create::CreateStep::ALL {
+        assert!(!page(step.title()), "{step:?} is the wizard's to say");
     }
-    assert!(on_page("Set up a sandbox").top() > above);
-    let steps: Vec<_> = actions::STEP_GLOSSES.iter().map(|(s, _)| *s).collect();
-    assert_eq!(
-        steps,
-        aisbx_core::create::CreateStep::ALL,
-        "every step, once"
-    );
 }
 
 #[test]
@@ -972,7 +969,7 @@ fn no_overview_row_names_a_list_key() {
         // A waiting request is in the head's callout and on the map, so it has no row.
         assert!(!rows.iter().any(|r| r.label == "⚑ Network"));
         assert_eq!(acting("Account").map(|a| a.0), Some(Action::Auth));
-        assert_eq!(acting("Opens in").map(|a| a.0), Some(Action::StartDir));
+        assert_eq!(acting("Starts in").map(|a| a.0), Some(Action::StartDir));
         assert_eq!(acting("Lifecycle").map(|a| a.0), Some(Action::KeepRunning));
     }
 }
@@ -1254,10 +1251,10 @@ fn the_window_draws_cores_code_as_code_never_as_backticks() {
     );
     assert_eq!(ticked(&w), Vec::<String>::new());
     let mut w = Win::new(on_box());
-    w.app.secrets = Some(aisbx_core::testkit::sample_secrets());
+    w.app.secrets = None;
     w.frame(typed('S'));
     w.frame(Vec::new());
-    assert!(mono(&w, "credentials:"), "{:?}", w.mono);
+    assert!(mono(&w, "sbx secret ls"), "{:?}", w.mono);
     assert_eq!(ticked(&w), Vec::<String>::new());
     let mut w = Win::new(on_box());
     w.app

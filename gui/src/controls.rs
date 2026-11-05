@@ -1,4 +1,4 @@
-//! The create wizard's controls: option tiles, check items, input boxes, a segmented choice, chips,
+//! The create wizard's controls: option tiles, check items, input boxes, a segmented choice, folds,
 //! badges and banners. Each is painted from core's form, takes no keyboard, reports its role to the
 //! accessibility tree, and shows core's cursor as a ring outside it.
 
@@ -541,6 +541,80 @@ pub fn banner(ui: &mut egui::Ui, tone: Tone, text: &str) {
     let rect = response.response.rect;
     let bar = Rect::from_min_size(rect.min, Vec2::new(4.0, rect.height()));
     ui.painter().rect_filled(bar, 2.0, color);
+}
+
+/// A fold of a step: a row that shows or hides the answers under it, which are all optional.
+pub struct Fold<'a> {
+    pub title: &'a str,
+    /// What is set under it, drawn in the accent; `None` while nothing is.
+    pub summary: Option<&'a str>,
+    /// What it holds, drawn while nothing under it is set.
+    pub gloss: &'a str,
+    pub open: bool,
+    pub focused: bool,
+}
+
+/// The word after a fold's title.
+pub const OPTIONAL: &str = "Optional";
+
+/// Draw `fold` `width` wide: its triangle (open ▾, folded ▸, painted), the title, *Optional*,
+/// then its summary or gloss on the same line, cut with `…`.
+pub fn fold(ui: &mut egui::Ui, fold: Fold<'_>, width: f32) -> Response {
+    let ink = Ink::of(ui);
+    ui.add_space(10.0);
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 34.0), Sense::CLICK);
+    let painter = ui.painter();
+    if response.hovered() {
+        painter.rect_filled(rect, RADIUS, ui.visuals().widgets.hovered.weak_bg_fill);
+    }
+    let tip = Pos2::new(rect.left() + 14.0, rect.center().y);
+    let triangle = match fold.open {
+        true => vec![
+            tip + Vec2::new(-5.0, -3.0),
+            tip + Vec2::new(5.0, -3.0),
+            tip + Vec2::new(0.0, 4.0),
+        ],
+        false => vec![
+            tip + Vec2::new(-3.0, -5.0),
+            tip + Vec2::new(-3.0, 5.0),
+            tip + Vec2::new(4.0, 0.0),
+        ],
+    };
+    painter.add(egui::Shape::convex_polygon(
+        triangle,
+        ink.text,
+        Stroke::NONE,
+    ));
+    let font = FontId::new(15.5, theme::strong_family());
+    let title = painter.layout_no_wrap(fold.title.to_string(), font, ink.strong);
+    let mut x = rect.left() + 30.0;
+    let y = |g: &egui::Galley| rect.center().y - g.size().y / 2.0;
+    let title_y = y(&title);
+    let title_w = title.size().x;
+    painter.galley(Pos2::new(x, title_y), title, ink.strong);
+    x += title_w + 10.0;
+    let optional = painter.layout_no_wrap(OPTIONAL.into(), FontId::proportional(12.5), ink.weak);
+    let optional_y = y(&optional);
+    let optional_w = optional.size().x;
+    painter.galley(Pos2::new(x, optional_y), optional, ink.weak);
+    x += optional_w + 14.0;
+    let (rest, color) = match fold.summary {
+        Some(summary) => (summary, ink.accent),
+        None => (fold.gloss, ink.weak),
+    };
+    if !rest.is_empty() {
+        let room = rect.right() - PAD - x;
+        let galley = text(ui, rest, 12.5, color, room, 1);
+        let at = Pos2::new(x, y(&galley));
+        ui.painter().galley(at, galley, color);
+    }
+    if fold.focused {
+        focus_ring(ui, rect);
+    }
+    let label = fold.title.to_string();
+    response
+        .widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, fold.open, &label));
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 /// A section of a step: its title, and under it what the section is for.

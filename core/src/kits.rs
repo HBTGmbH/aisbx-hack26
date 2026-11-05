@@ -115,16 +115,13 @@ pub struct Addon {
 }
 
 impl Backend {
-    /// Base for auto-generated sandbox labels, e.g. `OpenCode` → "OpenCode (RTK, JDK25)".
+    /// Base for auto-generated sandbox labels: the agent and its provider, e.g. "OpenCode ·
+    /// LiteLLM" for "OpenCode · LiteLLM acme (RTK, JDK25)".
     pub fn base_label(&self) -> String {
-        match self.kit.name.as_str() {
-            "claude-litellm" => "Claude Code LiteLLM".into(),
-            "claude-anthropic" | "claude-token" => "Claude Code".into(),
-            "opencode-litellm" => "OpenCode".into(),
-            "codex-openai" => "Codex".into(),
-            "agy" => "Antigravity".into(),
-            "pi-litellm" => "Pi".into(),
-            _ => self.kit.display_name.clone(),
+        let harness = crate::create::harness_label(self);
+        match self.provider() {
+            Provider::Other => harness,
+            provider => format!("{harness} · {}", provider.label()),
         }
     }
 
@@ -143,18 +140,14 @@ impl Backend {
         }
     }
 
-    /// One line on what this backend runs on: the difference the choice makes.
+    /// One line on what this backend signs in with: the difference the choice makes.
     pub fn setup_hint(&self) -> &'static str {
         match self.kit.name.as_str() {
-            "claude-litellm" | "opencode-litellm" | "pi-litellm" => {
-                "a LiteLLM gateway of your choice (a connection); no Anthropic account"
-            }
-            "claude-anthropic" => "your own Anthropic account (Pro, Max or Enterprise)",
-            "claude-token" => "your own Anthropic account, via a setup token",
-            "codex-openai" => {
-                "your own OpenAI account — ChatGPT sign-in or API key, kept on the host"
-            }
-            "agy" => "your Google account — signed in once, kept on the host — or a Gemini API key",
+            "claude-litellm" | "opencode-litellm" | "pi-litellm" => "your LiteLLM gateway",
+            "claude-anthropic" => "your Claude subscription",
+            "claude-token" => "your Claude subscription, through a setup token",
+            "codex-openai" => "your ChatGPT account or an OpenAI API key",
+            "agy" => "your Google account or a Gemini API key",
             _ => "",
         }
     }
@@ -1167,12 +1160,9 @@ mod tests {
             .expect("kits/pi-litellm is a backend");
         assert!(pi.kit.is_workload);
         assert_eq!(pi.agent, "pi-litellm", "a workload is its own agent");
-        assert_eq!(pi.base_label(), "Pi");
+        assert_eq!(pi.base_label(), "Pi · LiteLLM");
         assert_eq!(pi.type_label(), "Pi · LiteLLM");
-        assert_eq!(
-            pi.setup_hint(),
-            "a LiteLLM gateway of your choice (a connection); no Anthropic account"
-        );
+        assert_eq!(pi.setup_hint(), "your LiteLLM gateway");
         assert!(!pi.model_overrides());
         assert!(!pi.shares_skills());
         assert_eq!(pi.account(), None);
@@ -1783,14 +1773,13 @@ mod tests {
     }
 
     #[test]
-    fn agy_hint_says_the_sign_in_is_kept_on_the_host() {
+    fn agy_hint_names_both_ways_to_sign_in() {
         let catalog = Catalog::load().expect("kits/ must be discoverable from the crate");
         let hint = catalog
             .backend("agy")
             .expect("the agy backend")
             .setup_hint();
-        assert!(!hint.contains("signed in inside the sandbox"), "{hint}");
-        assert!(hint.contains("kept on the host"), "{hint}");
+        assert!(hint.contains("Google account"), "{hint}");
         assert!(hint.contains("Gemini API key"), "{hint}");
     }
 

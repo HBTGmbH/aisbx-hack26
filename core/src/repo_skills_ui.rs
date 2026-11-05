@@ -31,9 +31,11 @@ impl RepoScope {
 pub struct RepoView {
     pub id: String,
     pub source: String,
+    /// The branch or tag it follows; `None` is the remote's default branch.
+    pub git_ref: Option<String>,
     /// The cached commit; `None` while there is no cache git can read.
     pub commit: Option<String>,
-    /// Why there is no readable cache, with the `aisbx skill-repo fetch` hint.
+    /// Why git cannot read a cache, as [`skill_select::read_cache`] says it.
     pub problem: Option<String>,
     /// The skills the cached commit holds, in discovery order.
     pub skills: Vec<String>,
@@ -143,6 +145,7 @@ impl RepoSkillsForm {
                     Ok(cached) => RepoView {
                         id,
                         source: repo.source.clone(),
+                        git_ref: repo.git_ref.clone(),
                         commit: Some(cached.commit),
                         problem: None,
                         skills: cached.found.into_iter().map(|f| f.name).collect(),
@@ -155,6 +158,7 @@ impl RepoSkillsForm {
                     Err(why) => RepoView {
                         id,
                         source: repo.source.clone(),
+                        git_ref: repo.git_ref.clone(),
                         commit: None,
                         problem: Some(why),
                         skills: Vec::new(),
@@ -204,18 +208,44 @@ impl RepoSkillsForm {
             })
     }
 
-    /// What space and ↵ do to the focused row, unindented.
+    /// What the screen says under its title: where the ticked skills go.
+    pub fn intro(&self) -> &'static str {
+        match self.scope {
+            RepoScope::Global => "Ticked skills go into every sandbox, at its next start.",
+            RepoScope::Sandbox(_) => {
+                "Ticked skills go into this sandbox, beside the ones for all sandboxes (marked \
+                 global)."
+            }
+        }
+    }
+
+    /// Why nothing can be saved, when the selection cannot be read.
+    pub fn error_lines(&self) -> Vec<String> {
+        match &self.error {
+            Some(why) => vec![
+                format!("The skill selection cannot be read: {why}"),
+                "Nothing is saved until you fix or remove the file.".into(),
+            ],
+            None => Vec::new(),
+        }
+    }
+
+    /// What ticking the focused row does, unindented; empty where its label says it.
     pub fn notes(&self, row: &RepoSkillRow) -> Vec<String> {
         match row {
             RepoSkillRow::All(repo) if self.locked(repo, None) => vec![LOCKED_NOTE.into()],
-            RepoSkillRow::All(_) => {
-                vec!["space ticks every skill the cached commit holds at each sync".into()]
-            }
+            RepoSkillRow::All(_) => vec![
+                "When ticked, every skill of this repository goes in, also skills added to it \
+                 later. Otherwise, only the skills ticked below."
+                    .into(),
+            ],
             RepoSkillRow::Skill { locked: true, .. } => vec![LOCKED_NOTE.into()],
             RepoSkillRow::SyncNow => match &self.scope {
-                RepoScope::Sandbox(name) => vec![format!(
-                    "↵ runs `aisbx skill sync {name}`: copies what is saved, removes what is not"
-                )],
+                RepoScope::Sandbox(_) => vec![
+                    "Puts the saved skills into the sandbox now, and removes the ones no longer \
+                     ticked."
+                        .into(),
+                ],
                 RepoScope::Global => Vec::new(),
             },
             _ => Vec::new(),
@@ -248,13 +278,13 @@ impl RepoSkillsForm {
             _ => return Ok(()),
         };
         if self.error.is_some() {
-            return Err("the selection file cannot be read; nothing can be changed".into());
+            return Err("the skill selection cannot be read, so nothing can change".into());
         }
         if self.locked(repo, name.map(String::as_str)) {
             return Err(format!(
-                "{} comes from the global selection; change it in Repo skills for all \
-                 sandboxes (K)",
-                name.map_or(repo.as_str(), String::as_str)
+                "{} is ticked for all sandboxes: {}",
+                name.map_or(repo.as_str(), String::as_str),
+                CHANGE_GLOBAL
             ));
         }
         let discovered: Vec<String> = self
@@ -319,9 +349,57 @@ impl RepoSkillsForm {
     }
 }
 
+/// Where a pick for all sandboxes is changed, by the action's and the row's words.
+const CHANGE_GLOBAL: &str = "change it in Skills (K), under Repo skills for all sandboxes";
+
 /// The note under a row a global pick locks.
 pub const LOCKED_NOTE: &str =
-    "from the global selection — change it in K → Repo skills for all sandboxes";
+    "Ticked for all sandboxes: change it in Skills (K), under Repo skills for all sandboxes.";
+
+/// What the screen says when no skill repository is configured.
+pub const NO_REPOS: &str = "No skill repository yet. Add one in a terminal with `aisbx skill-repo \
+     add SOURCE`, then `aisbx skill-repo fetch`.";
+
+/// What a repo without a readable copy says under its heading.
+pub const NO_COPY: &str = "No readable copy yet: run `aisbx skill-repo fetch` in a terminal.";
+
+impl RepoView {
+    /// The repo's heading: its source, then its branch or tag and whether it is fetched.
+    pub fn heading(&self) -> (String, String) {
+        let mut meta: Vec<&str> = self.git_ref.iter().map(String::as_str).collect();
+        if self.commit.is_none() {
+            meta.push("not fetched");
+        }
+        (self.source.clone(), meta.join("  ·  "))
+    }
+
+    /// The lines under the repo's skills: why it has no readable copy, and each folder that is
+    /// no skill, in words.
+    pub fn footer(&self) -> Vec<String> {
+        let mut out: Vec<String> = self.problem.iter().map(|_| NO_COPY.to_string()).collect();
+        out.extend(self.skipped.iter().map(|(name, why)| {
+            format!(
+                "{} is not offered: {}",
+                name.escape_debug(),
+                skip_words(why)
+            )
+        }));
+        out
+    }
+}
+
+/// A skipped folder's reason ([`skill_select::discover`]'s code) in words.
+pub fn skip_words(why: &str) -> &'static str {
+    match why {
+        "bad-name" => "its name is not a valid skill name",
+        "bad-path" => "its path has characters a skill cannot have",
+        "symlink" => "it is a link",
+        "submodule" => "it is a Git submodule",
+        "too-big" => "it is larger than 20 MiB",
+        "dup" => "another skill has its name",
+        _ => "aisbx cannot use it",
+    }
+}
 
 /// `aisbx skill sync <sandbox>` — this very binary, the owner's full sync (not a start's).
 pub fn sync_argv(sandbox: &str) -> Vec<String> {
@@ -350,6 +428,7 @@ mod tests {
         RepoView {
             id: id.into(),
             source: format!("o/{id}"),
+            git_ref: None,
             commit: Some("0123456789abcdef".into()),
             problem: None,
             skills: strings(skills),
@@ -419,7 +498,10 @@ mod tests {
         );
         let alpha = skill_row(&form, "alpha");
         assert!(form.ticked(&alpha), "a global pick shows ticked");
-        assert!(form.toggle(&alpha).unwrap_err().contains("global"));
+        assert!(form
+            .toggle(&alpha)
+            .unwrap_err()
+            .contains("ticked for all sandboxes"));
         assert!(!form.dirty);
 
         form.toggle(&skill_row(&form, "beta")).unwrap();
@@ -514,14 +596,75 @@ mod tests {
         );
         assert_eq!(form.notes(&RepoSkillRow::All(R.into())), [LOCKED_NOTE]);
         assert_eq!(form.notes(&skill_row(&form, "alpha")), [LOCKED_NOTE]);
-        assert!(form.notes(&RepoSkillRow::All(S.into()))[0].starts_with("space ticks"));
-        assert!(form.notes(&skill_row(&form, "beta")).is_empty());
-        assert_eq!(
-            form.notes(&RepoSkillRow::SyncNow),
-            ["↵ runs `aisbx skill sync box`: copies what is saved, removes what is not"]
+        let all = form.notes(&RepoSkillRow::All(S.into())).join(" ");
+        assert!(
+            all.starts_with("When ticked, ") && all.contains(" Otherwise, "),
+            "{all}"
         );
+        assert!(form.notes(&skill_row(&form, "beta")).is_empty());
+        let sync = form.notes(&RepoSkillRow::SyncNow).join(" ");
+        assert!(sync.starts_with("Puts the saved skills"), "{sync}");
+        for inner in ["aisbx skill sync", "↵", "cached commit", "global selection"] {
+            assert!(!sync.contains(inner) && !all.contains(inner), "{inner}");
+            assert!(!LOCKED_NOTE.contains(inner), "{inner}");
+        }
         let global =
             RepoSkillsForm::from_parts(RepoScope::Global, Vec::new(), Ok(Selection::default()));
         assert!(global.notes(&RepoSkillRow::SyncNow).is_empty());
+    }
+
+    #[test]
+    fn a_heading_names_the_source_and_a_footer_says_in_words_what_was_skipped() {
+        let mut fetched = repo(R, &["alpha"]);
+        assert_eq!(
+            fetched.heading(),
+            ("o/github-com-o-r-0123abcd".into(), String::new())
+        );
+        fetched.git_ref = Some("v2".into());
+        fetched.skipped = vec![("big".into(), "too-big"), ("odd".into(), "new-code")];
+        assert_eq!(fetched.heading().1, "v2");
+        assert_eq!(
+            fetched.footer(),
+            [
+                "big is not offered: it is larger than 20 MiB",
+                "odd is not offered: aisbx cannot use it"
+            ]
+        );
+        let gone = RepoView {
+            commit: None,
+            problem: Some(format!("{R} has no cache git can read")),
+            ..repo(R, &[])
+        };
+        assert_eq!(gone.heading().1, "not fetched");
+        assert_eq!(gone.footer(), [NO_COPY]);
+        for code in [
+            "bad-name",
+            "bad-path",
+            "symlink",
+            "submodule",
+            "too-big",
+            "dup",
+        ] {
+            assert_ne!(skip_words(code), skip_words("new-code"), "{code}");
+        }
+    }
+
+    #[test]
+    fn the_intro_says_where_the_ticks_go() {
+        let global =
+            RepoSkillsForm::from_parts(RepoScope::Global, Vec::new(), Ok(Selection::default()));
+        assert!(global.intro().contains("every sandbox"));
+        let own = RepoSkillsForm::from_parts(
+            RepoScope::Sandbox("box".into()),
+            Vec::new(),
+            Ok(Selection::default()),
+        );
+        assert!(own.intro().contains("this sandbox"));
+        assert!(own.error_lines().is_empty());
+        let broken = RepoSkillsForm::from_parts(RepoScope::Global, Vec::new(), Err("bad".into()));
+        assert_eq!(
+            broken.error_lines()[0],
+            "The skill selection cannot be read: bad"
+        );
     }
 }

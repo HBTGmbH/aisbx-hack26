@@ -22,7 +22,6 @@ const BAD_PORT: &str =
     "“8080:not-a-port” is not a port mapping — use 8080:3000, 3000, or 127.0.0.1:8080:3000/tcp";
 const BAD_HOST: &str =
     "“bad!host” is not a host to deny — use api.example.com, *.example.com or **";
-const NOT_ABSOLUTE: &str = "“docs:ro”: give the host folder as an absolute path or ~/…";
 const BAD_NAME: &str = "name the token in lower-case letters, digits and dashes";
 const TAKEN: &str = "a token of that name exists — pick it in the list";
 const NO_VALUE: &str =
@@ -183,8 +182,14 @@ fn agent(app: &App, agent: &str) -> WizardRow {
     WizardRow::Agent(index.unwrap_or_else(|| panic!("{agent} is offered")))
 }
 
-/// Walk the cursor to `row` on the current step: ↓ to reach it, → along the button line.
+/// Walk the cursor to `row` on the current step: ↓ to reach it, → along the button line. A row
+/// under a closed fold is reached by opening the fold first, with its own ↵.
 fn go(app: &mut App, row: WizardRow) {
+    if let WizardRow::Field(field) = row {
+        if let Some(fold) = field.fold().filter(|f| !form(app).fold_open(*f)) {
+            enter(app, WizardRow::Field(fold));
+        }
+    }
     let buttons = CreateForm::wizard_button_rows(step(app));
     let (target, rights) = match buttons.iter().position(|b| *b == row) {
         Some(i) => (buttons[0], i),
@@ -292,7 +297,7 @@ fn w1_defaults() {
 
     let expected = answered(&mut new_app(), WizardRow::CreateOnly, |_, _| {});
     assert_same_job(&wizard, &expected);
-    assert_eq!(wizard.title, "Creating Claude Code LiteLLM");
+    assert_eq!(wizard.title, "Creating Claude Code · LiteLLM acme");
 }
 
 #[test]
@@ -358,7 +363,10 @@ fn w3_login() {
         space(catalog, form, CreateRow::Addon(jdk));
     });
     assert_same_job(&wizard, &expected);
-    assert_eq!(wizard.title, "Creating Claude Code (JDK25)");
+    assert_eq!(
+        wizard.title,
+        "Creating Claude Code · Anthropic /login (JDK25)"
+    );
 }
 
 #[test]
@@ -487,30 +495,95 @@ fn w7_start_dir() {
 #[test]
 fn w7b_more_folders() {
     let base = std::env::temp_dir().join(format!("aisbx-wizard-more-{}", std::process::id()));
-    std::fs::create_dir_all(base.join("data")).unwrap();
-    let data = std::fs::canonicalize(base.join("data")).unwrap();
-    let typed = format!("{}:/workspace/data:ro", data.display());
-    let cwd = PathBuf::from("/proj-more");
+    let _ = std::fs::remove_dir_all(&base);
+    for d in ["data", "proj-more"] {
+        std::fs::create_dir_all(base.join(d)).unwrap();
+    }
+    let base = std::fs::canonicalize(&base).unwrap();
+    let data = base.join("data");
+    let cwd = base.join("proj-more");
+    let picked = format!("{}:ro", data.display());
 
     let mut app = new_app();
     app.cwd = cwd.clone();
     open(&mut app);
     walk_to(&mut app, CreateStep::Workspace);
-    type_into(&mut app, CreateRow::ExtraFolders, &typed);
+    enter(&mut app, WizardRow::Field(CreateRow::FolderAdd));
+    assert!(
+        matches!(app.screen, Screen::StartDir(_)),
+        "the picker opens"
+    );
+    press(&mut app, KeyCode::Right);
+    press(&mut app, KeyCode::Down);
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(focused(&app), WizardRow::Field(CreateRow::Folder(0)));
+    press(&mut app, KeyCode::Left);
+    assert_eq!(
+        form(&app).workspace.extra_folders,
+        [data.display().to_string()]
+    );
+    press(&mut app, KeyCode::Right);
     let wizard = create_only(&mut app);
 
     let mut app = new_app();
     app.cwd = cwd;
     let expected = answered(&mut app, WizardRow::CreateOnly, |_, form| {
-        form.workspace.extra_folders = TextInput::new(typed.clone());
+        form.workspace.extra_folders = vec![picked.clone()];
     });
     assert_same_job(&wizard, &expected);
     assert!(
-        wizard.steps[0].argv.contains(&typed),
+        wizard.steps[0].argv.contains(&picked),
         "{:?}",
         wizard.steps[0].argv
     );
     let _ = std::fs::remove_dir_all(&base);
+}
+
+/// A folder inside the project is refused where it is picked, and the picker stays open; Esc
+/// goes back to the wizard with nothing added.
+#[test]
+fn a_folder_inside_the_project_is_refused_where_it_is_picked() {
+    let base = std::env::temp_dir().join(format!("aisbx-wizard-inside-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(base.join("proj-in").join("sub")).unwrap();
+    let base = std::fs::canonicalize(&base).unwrap();
+    let mut app = new_app();
+    app.cwd = base.join("proj-in");
+    open(&mut app);
+    walk_to(&mut app, CreateStep::Workspace);
+    enter(&mut app, WizardRow::Field(CreateRow::FolderAdd));
+    press(&mut app, KeyCode::Right);
+    press(&mut app, KeyCode::Right);
+    press(&mut app, KeyCode::Down);
+    press(&mut app, KeyCode::Enter);
+    assert!(
+        matches!(app.screen, Screen::StartDir(_)),
+        "the picker stays"
+    );
+    assert!(
+        error(&app).contains("in the project folder"),
+        "{}",
+        error(&app)
+    );
+    press(&mut app, KeyCode::Esc);
+    assert_eq!(step(&app), CreateStep::Workspace);
+    assert!(form(&app).workspace.extra_folders.is_empty());
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// The generated label follows the answers as they are given: the provider, the account, and a
+/// token's name as it is typed.
+#[test]
+fn the_generated_label_follows_the_provider_and_the_account() {
+    let label = |app: &App| form(app).workspace.name.value.clone();
+    let mut app = new_app();
+    open(&mut app);
+    assert_eq!(label(&app), "Claude Code · LiteLLM acme");
+    choose(&mut app, Provider::Anthropic);
+    assert_eq!(label(&app), "Claude Code · Anthropic /login");
+    enter(&mut app, WizardRow::Connection(ConnChoice::Token));
+    type_into(&mut app, CreateRow::TokenName, "work");
+    assert_eq!(label(&app), "Claude Code · Anthropic token work");
 }
 
 /// Next on the step owning the field: refused with the create's own message, and the wizard
@@ -540,12 +613,6 @@ fn w8_refusals() {
     walk_to(&mut app, CreateStep::Workspace);
     type_into(&mut app, CreateRow::DenyNetwork, "example.com bad!host");
     refused_on(&mut app, CreateStep::Workspace, BAD_HOST);
-
-    let mut app = new_app();
-    open(&mut app);
-    walk_to(&mut app, CreateStep::Workspace);
-    type_into(&mut app, CreateRow::ExtraFolders, "docs:ro");
-    refused_on(&mut app, CreateStep::Workspace, NOT_ABSOLUTE);
 
     let mut app = new_app();
     open(&mut app);
@@ -830,6 +897,35 @@ fn the_trail_goes_back_at_once_and_forward_only_past_good_steps() {
     assert_eq!(step(&app), CreateStep::Review);
     click(&mut app, Hit::WizardStep(CreateStep::Kits));
     assert_eq!(step(&app), CreateStep::Kits);
+}
+
+/// ↵ on the Connection row answers the step on a stored connection, as on a radio; on *new
+/// connection…* it steps into the new connection's fields.
+#[test]
+fn enter_on_a_stored_connection_goes_on_and_on_a_new_one_into_its_fields() {
+    let mut app = new_app();
+    open(&mut app);
+    let litellm = provider(&app, Provider::Litellm);
+    enter(&mut app, litellm);
+    assert_eq!(step(&app), CreateStep::Connection);
+    assert_eq!(focused(&app), WizardRow::Field(CreateRow::LitellmConn));
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(step(&app), CreateStep::Harness, "picked, and on");
+    assert_eq!(form(&app).connection.litellm.as_deref(), Some("acme"));
+
+    let mut app = new_app();
+    open(&mut app);
+    let litellm = provider(&app, Provider::Litellm);
+    enter(&mut app, litellm);
+    press(&mut app, KeyCode::Right);
+    assert_eq!(form(&app).connection.litellm, None, "new connection…");
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(
+        step(&app),
+        CreateStep::Connection,
+        "its fields are to fill in"
+    );
+    assert_eq!(focused(&app), WizardRow::Field(CreateRow::LitellmName));
 }
 
 #[test]

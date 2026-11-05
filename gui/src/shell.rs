@@ -656,7 +656,7 @@ mod tests {
         }
     }
 
-    /// After `a` unfolds *Other folders*, Up goes to the New row, where `s` stops nothing.
+    /// After `a` unfolds *Sandboxes in other folders*, Up goes to the New row, where `s` stops nothing.
     #[test]
     fn the_arrows_after_unfolding_move_over_the_new_rows() {
         let sandboxes = ["one", "two", "three", "four"].map(|n| {

@@ -66,7 +66,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                         let Some(request) = view.approval(id) else {
                             continue;
                         };
-                        let reason = request.reason();
+                        let reason = aisbx_core::app::approval_reason(request);
                         let item = Item {
                             title: &request.title,
                             mark: Some(("⚑", theme::warn(dark))),

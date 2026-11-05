@@ -57,12 +57,9 @@ const HELP: &[(&str, &[(&str, &str)])] = &[
     (
         "Sandboxes",
         &[
-            (
-                "↑↓←→ / hjkl",
-                "move between sandboxes (+ New sandbox closes this folder's)",
-            ),
+            ("↑↓←→ / hjkl", "move between sandboxes"),
             ("g / G", "first / last row (Home / End)"),
-            ("PgUp / PgDn", "a page of rows up / down"),
+            ("PgUp / PgDn", "a page up / down"),
             (
                 "/",
                 "find a sandbox: type part of its name, agent, kit or folder",
@@ -71,105 +68,60 @@ const HELP: &[(&str, &[(&str, &str)])] = &[
                 "",
                 "↑↓ step through the matches, ↵ stays there, esc goes back",
             ),
-            ("↵", "start the selected sandbox — or create one, on + New"),
-            ("x", "open a shell inside it (starts it if stopped)"),
-            ("n", "create a new sandbox for this folder"),
-            (
-                "e",
-                "kits, and which model its opus/sonnet/haiku aliases run",
-            ),
-            ("L", "LiteLLM sandboxes: fetch the gateway's model list now"),
-            (
-                "",
-                "OpenCode picks it up at its next start, the pin list (e) at once",
-            ),
-            ("w", "which folder inside the workspace the agent opens in"),
-            ("", "the whole workspace stays mounted — only the cwd moves"),
-            (
-                "A",
-                "its Anthropic account, or a LiteLLM sandbox's connection",
-            ),
-            ("", "moving to another connection rebuilds the sandbox"),
-            (
-                "S",
-                "every secret stored on this host: store, rotate, delete",
-            ),
+            ("↵", "start the sandbox; on + New sandbox, create one"),
+            ("x", "open a shell in it (starts it if stopped)"),
+            ("n", "create a sandbox for this folder"),
+            ("e", "change its kits, and on a LiteLLM gateway its models"),
+            ("L", "read the LiteLLM gateway's model list again"),
+            ("w", "choose the folder the agent starts in"),
+            ("A", "change its Anthropic account or LiteLLM connection"),
+            ("S", "the stored secrets: tokens, keys, LiteLLM connections"),
+            ("K", "the shared skills"),
+            ("F", "the folders every sandbox mounts"),
+            ("T", "sbx's settings on this computer, such as telemetry"),
+            ("i", "skills from skill repositories, for this sandbox"),
             (
                 "",
-                "LiteLLM connections: n new, ↵ edit URL and key, d delete",
+                "for all sandboxes: K, then Repo skills for all sandboxes",
             ),
-            (
-                "K",
-                "the shared agent-skills store: import, add from a repo, update, remove",
-            ),
-            (
-                "F",
-                "host folders: the folders every sandbox mounts, with what each is for",
-            ),
-            ("T", "settings: sbx's own, for this host, such as telemetry"),
-            (
-                "i",
-                "repo skills: this sandbox's picks from the configured skill repos",
-            ),
-            (
-                "",
-                "for every sandbox: K, then Repo skills for all sandboxes",
-            ),
-            ("r", "rename (label only — the sbx name never changes)"),
-            ("R", "rebuild from its current kits"),
-            ("s", "stop a running sandbox"),
-            ("d / Del", "delete the sandbox"),
-            ("P", "prune — remove every stopped sandbox on this host"),
-            (
-                "",
-                "a running one is never a candidate; it names them first",
-            ),
+            ("r", "rename it"),
+            ("R", "rebuild it from its kits"),
+            ("s", "stop it"),
+            ("d / Del", "delete it"),
+            ("P", "remove every stopped sandbox on this computer"),
+            ("", "it lists them and asks first"),
             ("a", "show / hide the sandboxes of other folders"),
         ],
     ),
     (
         "Network",
         &[
-            ("p", "publish a host port into the sandbox"),
-            ("u", "unpublish one again"),
+            ("p", "make a sandbox port reachable from this computer"),
+            ("u", "stop publishing a port"),
             (
                 "b",
-                "keep it running after its sessions end, so a port keeps answering",
+                "keep it running with no session open, so its ports keep answering",
             ),
-            ("", "sbx's detached mode — b again rebuilds it back"),
-            ("c", "check whether a host is reachable from this sandbox"),
-            (
-                "y",
-                "requests sandboxes are holding for approval: a allows, d dismisses",
-            ),
-            (
-                "",
-                "under balanced / deny-all a request no rule allows waits there",
-            ),
+            ("", "b again turns this off, with a rebuild"),
+            ("c", "check whether the sandbox may reach a host"),
+            ("y", "answer the network requests waiting for approval"),
         ],
     ),
     (
         "Connect",
-        &[
-            (
-                "o",
-                "connect VS Code, Cursor, JetBrains, Claude Desktop or ssh",
-            ),
-            ("", "every sandbox is an SSH host at <sbx name>.sbx"),
-            (
-                "",
-                "an editor installs its server inside — needs the remote-dev kit",
-            ),
-        ],
+        &[(
+            "o",
+            "connect a terminal, VS Code, Cursor, JetBrains or Claude Desktop",
+        )],
     ),
     (
-        "Forms (n, e, A, S, K, i, o, w, y)",
+        "Forms",
         &[
             ("↑↓ / tab", "move between rows"),
-            ("←→", "move between the buttons the form ends with"),
-            ("←→", "on w: out of / into a folder"),
+            ("←→", "move between the buttons"),
+            ("←→", "in a folder picker: out of / into a folder"),
             ("space", "tick a box, pick a radio"),
-            ("↵", "activate the row under the cursor"),
+            ("↵", "act on the row under the cursor"),
             ("esc", "back, changing nothing"),
         ],
     ),
@@ -185,12 +137,12 @@ const HELP: &[(&str, &[(&str, &str)])] = &[
     (
         "Everything else",
         &[
-            ("mouse", "click a row, tab or footer hint; wheel scrolls"),
             (
-                "M",
-                "toggle mouse reporting (off = terminal text selection)",
+                "mouse",
+                "click a row, tab or footer hint; the wheel scrolls",
             ),
-            ("F5 / ctrl-r", "refresh now (auto-refreshes every 5 s)"),
+            ("M", "mouse on / off; off lets you select text"),
+            ("F5 / ctrl-r", "refresh now (it also refreshes every 5 s)"),
             (
                 "ctrl-z",
                 "suspend to the shell; fg brings it back (not on Windows)",
@@ -263,7 +215,7 @@ fn render_help(frame: &mut Frame, scroll: u16, caps: theme::Caps) -> Hits {
         (
             "⚑",
             theme::warn(),
-            "it is holding a network request for approval — y answers it",
+            "a network request waits for your answer (y)",
         ),
         (
             "⚠",
@@ -273,7 +225,7 @@ fn render_help(frame: &mut Frame, scroll: u16, caps: theme::Caps) -> Hits {
         (
             "web",
             Style::default().fg(theme::kit_color("web")),
-            "this sandbox has open egress to every host",
+            "this sandbox can reach every host on the internet",
         ),
     ] {
         lines.push(Line::from(vec![
@@ -968,6 +920,19 @@ mod tests {
     }
 
     #[test]
+    fn the_help_sheet_names_no_inner_workings() {
+        for (_, rows) in HELP {
+            for (key, what) in rows.iter() {
+                for inner in [
+                    "cwd", "egress", "detached", "daemon", "PATH", "proxy", "deny-all",
+                ] {
+                    assert!(!what.contains(inner), "{key}: {what}");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn the_help_sheet_names_every_key_that_moves_the_cursor() {
         let keys: Vec<&str> = HELP[0].1.iter().map(|(key, _)| *key).collect();
         let named = |k: &str| {
@@ -1037,13 +1002,13 @@ mod tests {
             let x = row[..row.find(text).unwrap()].chars().count() as u16;
             (y, x, buffer[(x, y as u16)].fg)
         };
-        let (y, row_x, row_fg) = at("every secret stored");
+        let (y, row_x, row_fg) = at("find a sandbox");
         // The line under it is the rest of the row's text, wrapped at this width.
         let wrap_x = (row_x..60)
             .find(|x| !buffer[(*x, y as u16 + 1)].symbol().trim().is_empty())
             .expect("the row wraps at 60 columns");
         let wrap_fg = buffer[(wrap_x, y as u16 + 1)].fg;
-        let (_, note_x, note_fg) = at("LiteLLM connections:");
+        let (_, note_x, note_fg) = at("↑↓ step through the matches");
         assert_eq!(
             (wrap_x, wrap_fg),
             (row_x, row_fg),

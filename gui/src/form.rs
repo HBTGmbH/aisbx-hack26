@@ -324,11 +324,7 @@ pub fn model_section<R: Copy>(
 ) {
     let catalog = &app.catalog;
     let source = catalog.models_source.label();
-    section(
-        ui,
-        &format!("Claude models · {source}"),
-        "optional — this gateway may not serve Claude Code's own defaults",
-    );
+    section(ui, &format!("Claude models · {source}"), "optional");
     for slot in Slot::ALL {
         let opened = open == Some(slot);
         let pinned = pinned(&catalog.models, over.get(slot));

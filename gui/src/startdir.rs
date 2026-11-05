@@ -22,15 +22,20 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
     let mut list = Rows::new(ui, "startdir", focus);
     let index = |row: StartDirRow| form::index_of(&rows, row);
     let chosen = picker.chosen();
-    let host = matches!(picker.target, StartDirTarget::HostFolder(_));
+    let host = matches!(
+        picker.target,
+        StartDirTarget::HostFolder(_) | StartDirTarget::Folder(_)
+    );
     let target = match &picker.target {
-        StartDirTarget::Sandbox(name) => format!("sandbox {name}"),
-        StartDirTarget::New(_) => "the sandbox being created".to_string(),
-        StartDirTarget::HostFolder(_) => "the host folders list".to_string(),
+        StartDirTarget::Sandbox(name) => format!("For sandbox {name}."),
+        StartDirTarget::New(_) => "For the new sandbox.".to_string(),
+        StartDirTarget::HostFolder(_) => "For the host folders list.".to_string(),
+        StartDirTarget::Folder(_) => "The new sandbox mounts it read-only.".to_string(),
     };
-    let use_label = match host {
-        true => "Use this folder",
-        false => "Use, don't start",
+    let use_label = match &picker.target {
+        StartDirTarget::HostFolder(_) => "Use this folder",
+        StartDirTarget::Folder(_) => "Mount this folder",
+        StartDirTarget::Sandbox(_) | StartDirTarget::New(_) => "Use, don't start",
     };
 
     page::bar(ui, "startdir", |ui| {
@@ -46,23 +51,27 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
         debug_assert_eq!(buttons.len(), picker.buttons());
         list.buttons(ui, &buttons);
     });
-    let title = match host {
-        true => "Pick a host folder".to_string(),
-        false => format!("Start folder — {}", picker.label),
+    let title = match &picker.target {
+        StartDirTarget::HostFolder(_) => "Pick a host folder".to_string(),
+        StartDirTarget::Folder(_) => "Pick a folder to mount".to_string(),
+        StartDirTarget::Sandbox(_) | StartDirTarget::New(_) => {
+            format!("Start folder — {}", picker.label)
+        }
     };
-    page::body(ui, "startdir", &title, &format!("For {target}."), |ui| {
+    page::body(ui, "startdir", &title, &target, |ui| {
         if host {
-            form::section(ui, "Folder", "what Use puts in the field");
+            form::section(ui, "Folder", "");
             ui.label(
                 RichText::new(model::tilde(&picker.here()))
                     .monospace()
                     .strong(),
             );
-            form::para(
-                ui,
-                "Never your home folder itself, a folder above it or one that holds credentials. \
-                 Hidden folders are not listed: type their path instead.",
-            );
+            if matches!(picker.target, StartDirTarget::HostFolder(_)) {
+                form::para(
+                    ui,
+                    "Hidden folders are not listed: type their path in the field instead.",
+                );
+            }
         } else {
             mounted_and_opens(ui, picker, chosen.as_deref());
         }
@@ -93,19 +102,11 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
     }
 }
 
-/// What a sandbox's picker shows above the folders: the mounted folder and where the agent opens.
+/// What a sandbox's picker shows above the folders: the project folder and where the agent starts.
 fn mounted_and_opens(ui: &mut egui::Ui, picker: &StartDirForm, chosen: Option<&Path>) {
-    form::section(
-        ui,
-        "Mounted",
-        "the whole folder — this screen never changes it",
-    );
+    form::section(ui, "Project folder", "");
     ui.label(RichText::new(model::tilde(&picker.root)).monospace());
-    form::section(
-        ui,
-        "Opens in",
-        "the agent's working directory, and its project root",
-    );
+    form::section(ui, "Agent starts in", "");
     let opens = startdir::describe(&picker.root, chosen);
     ui.label(RichText::new(opens).monospace().strong());
 }

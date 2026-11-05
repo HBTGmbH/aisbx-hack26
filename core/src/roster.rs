@@ -29,6 +29,8 @@ pub struct FolderHead {
     pub path: PathBuf,
     /// The folder is gone from the host, which the heading says once for every row under it.
     pub missing: bool,
+    /// How many sandboxes stand under the heading.
+    pub sandboxes: usize,
 }
 
 impl FolderHead {
@@ -52,17 +54,26 @@ impl App {
             return rows;
         }
         rows.push(Row::Other);
-        let mut head: Option<&Path> = None;
+        let mut head: Option<usize> = None;
         for cell in self.here + 1..self.cells.len() {
             let Some(sb) = self.sandbox_at(cell) else {
                 continue;
             };
-            if head != Some(sb.workspace.as_path()) {
-                head = Some(sb.workspace.as_path());
-                rows.push(Row::Folder(FolderHead {
-                    path: sb.workspace.clone(),
-                    missing: sb.workspace_missing,
-                }));
+            let same = |row: &Row| matches!(row, Row::Folder(f) if f.path == sb.workspace);
+            match head.filter(|at| same(&rows[*at])) {
+                Some(at) => {
+                    if let Row::Folder(f) = &mut rows[at] {
+                        f.sandboxes += 1;
+                    }
+                }
+                None => {
+                    head = Some(rows.len());
+                    rows.push(Row::Folder(FolderHead {
+                        path: sb.workspace.clone(),
+                        missing: sb.workspace_missing,
+                        sandboxes: 1,
+                    }));
+                }
             }
             rows.push(Row::Sandbox(cell));
         }
@@ -129,6 +140,18 @@ impl Sandbox {
             || !self.row_markers(waiting).is_empty()
     }
 }
+
+/// The heading of the current folder's section.
+pub const HERE_HEADING: &str = "This folder";
+
+/// The heading of the second section, which `a` folds away and back.
+pub const OTHER_HEADING: &str = "Sandboxes in other folders";
+
+/// What a folder heading of the second section says for the sandboxes that mount no folder.
+pub const NO_FOLDER: &str = "without a folder";
+
+/// What a folder heading says after a folder that is gone from the host.
+pub const FOLDER_GONE: &str = "folder not found";
 
 /// `1 sandbox`, `3 sandboxes`.
 pub fn count(n: usize) -> String {
@@ -224,10 +247,11 @@ mod tests {
         out
     }
 
-    fn folder(path: &str) -> Row {
+    fn folder(path: &str, sandboxes: usize) -> Row {
         Row::Folder(FolderHead {
             path: PathBuf::from(path),
             missing: false,
+            sandboxes,
         })
     }
 
@@ -243,12 +267,12 @@ mod tests {
                 Row::Sandbox(1),
                 Row::New(2),
                 Row::Other,
-                folder(""),
+                folder("", 1),
                 Row::Sandbox(3),
-                folder("/work/api"),
+                folder("/work/api", 2),
                 Row::Sandbox(4),
                 Row::Sandbox(5),
-                folder("/work/ui"),
+                folder("/work/ui", 1),
                 Row::Sandbox(6),
             ]
         );
@@ -290,7 +314,8 @@ mod tests {
             heads,
             [FolderHead {
                 path: PathBuf::from("/gone"),
-                missing: true
+                missing: true,
+                sandboxes: 1,
             }]
         );
     }

@@ -97,8 +97,7 @@ pub fn show_secrets(ui: &mut egui::Ui, app: &mut App) {
         ui,
         "secrets",
         "Stored secrets",
-        "Values live in the host keychain and are shown masked, exactly as sbx prints them. A \
-         sandbox only ever sees a sentinel or a placeholder — the proxy swaps in the rest.",
+        aisbx_core::app::SECRETS_NOTE,
         |ui| {
             let weak = ui.visuals().weak_text_color();
             if view.secrets.is_none() {

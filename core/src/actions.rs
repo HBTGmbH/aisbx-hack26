@@ -103,7 +103,7 @@ impl Action {
             Action::PublishPort => (Char('p'), "Publish port"),
             Action::UnpublishPort => (Char('u'), "Unpublish port"),
             Action::CheckHost => (Char('c'), "Check host"),
-            Action::ToggleOther => (Char('a'), "Other folders"),
+            Action::ToggleOther => (Char('a'), "Sandboxes in other folders"),
             Action::Help => (Char('?'), "Help"),
         }
     }
@@ -135,7 +135,7 @@ impl Action {
     /// What the action does, in one line — for a help sheet or a tooltip, in any frontend.
     pub fn summary(self) -> &'static str {
         match self {
-            Action::Start => "Start the sandbox's agent in a session",
+            Action::Start => "Start the sandbox's agent",
             Action::Shell => "Open a shell inside the sandbox",
             Action::New => "Create a new sandbox for this folder",
             Action::EditKits => "Add or remove the sandbox's kits",
@@ -143,20 +143,20 @@ impl Action {
             Action::Secrets => "Manage the stored tokens, keys and connections",
             Action::Connect => "Connect a terminal, an editor or a desktop app over SSH",
             Action::StartDir => "Choose the folder the agent starts in",
-            Action::Skills => "Manage the shared skills store",
+            Action::Skills => "Manage the shared skills",
             Action::RepoSkills => "Pick the skills from skill repositories this sandbox gets",
-            Action::Folders => "List the host folders every sandbox mounts, and what each is for",
-            Action::Settings => "Change sbx's settings for this host, such as telemetry",
+            Action::Folders => "Choose the folders every sandbox mounts",
+            Action::Settings => "Change sbx's settings on this computer, such as telemetry",
             Action::Approvals => "Answer the network requests waiting for approval",
             Action::KeepRunning => "Keep the sandbox running without a session, or stop doing so",
             Action::RefreshModels => "Fetch the gateway's model list again",
-            Action::Prune => "Remove the stopped sandboxes sbx would prune",
+            Action::Prune => "Remove every stopped sandbox",
             Action::Refresh => "Read the sandboxes from sbx again",
             Action::Rename => "Change the sandbox's label",
             Action::Rebuild => "Rebuild the sandbox from its kits, keeping its settings",
             Action::Stop => "Stop the sandbox",
             Action::Delete => "Remove the sandbox",
-            Action::PublishPort => "Publish a sandbox port on the host",
+            Action::PublishPort => "Make a sandbox port reachable from this computer",
             Action::UnpublishPort => "Stop publishing a sandbox port",
             Action::CheckHost => "Check whether the sandbox may reach a host",
             Action::ToggleOther => "Show or hide the other folders' sandboxes",

@@ -20,7 +20,6 @@ const BAD_PORT: &str =
     "“8080:not-a-port” is not a port mapping — use 8080:3000, 3000, or 127.0.0.1:8080:3000/tcp";
 const BAD_HOST: &str =
     "“bad!host” is not a host to deny — use api.example.com, *.example.com or **";
-const NOT_ABSOLUTE: &str = "“docs:ro”: give the host folder as an absolute path or ~/…";
 const BAD_NAME: &str = "name the token in lower-case letters, digits and dashes";
 const TAKEN: &str = "a token of that name exists — pick it in the list";
 const NO_VALUE: &str =
@@ -131,6 +130,11 @@ fn focused(app: &App) -> WizardRow {
 /// Walk the cursor to `row` on the current step. A step's buttons are one row to ↓, so the ones
 /// after the first are reached from it with →.
 fn go(app: &mut App, row: WizardRow) {
+    if let Some(fold) = field_of(row).and_then(CreateRow::fold) {
+        if !form(app).fold_open(fold) {
+            enter(app, WizardRow::Field(fold));
+        }
+    }
     let buttons = CreateForm::wizard_button_rows(step(app));
     let (target, rights) = match buttons.iter().position(|b| *b == row) {
         Some(i) => (buttons[0], i),
@@ -147,6 +151,14 @@ fn go(app: &mut App, row: WizardRow) {
         press(app, KeyCode::Right);
     }
     assert_eq!(focused(app), row);
+}
+
+/// The form's row a wizard row is, if it is one.
+fn field_of(row: WizardRow) -> Option<CreateRow> {
+    match row {
+        WizardRow::Field(field) => Some(field),
+        _ => None,
+    }
 }
 
 /// ↵ on a row: pick a radio and go on, press a button.
@@ -250,12 +262,12 @@ fn g1_defaults() {
             false,
         )]
     );
-    assert_eq!(job.title, "Creating Claude Code LiteLLM");
+    assert_eq!(job.title, "Creating Claude Code · LiteLLM acme");
     // The connection the form opened on, remembered only once the create succeeded.
     assert_eq!(job.post.last_litellm.as_deref(), Some("acme"));
     let reg = job.post.register.expect("the sandbox is registered");
     assert_eq!(reg.name, "claude-litellm-proj");
-    assert_eq!(reg.label, "Claude Code LiteLLM");
+    assert_eq!(reg.label, "Claude Code · LiteLLM acme");
     assert!(!reg.clone);
     assert_eq!(reg.skills, Some(sbx::SkillsMode::Readonly));
     assert_eq!(reg.start_dir, None);
@@ -361,10 +373,10 @@ fn g3_login() {
             false,
         )]
     );
-    assert_eq!(job.title, "Creating Claude Code (JDK25)");
+    assert_eq!(job.title, "Creating Claude Code · Anthropic /login (JDK25)");
     let reg = job.post.register.expect("the sandbox is registered");
     assert_eq!(reg.name, "claude-anthropic-proj");
-    assert_eq!(reg.label, "Claude Code (JDK25)");
+    assert_eq!(reg.label, "Claude Code · Anthropic /login (JDK25)");
     assert!(!reg.clone);
     assert_eq!(reg.skills, Some(sbx::SkillsMode::Readonly));
     assert_eq!(reg.start_dir, None);
@@ -404,10 +416,10 @@ fn g4_named_token() {
             false,
         )]
     );
-    assert_eq!(job.title, "Creating Claude Code");
+    assert_eq!(job.title, "Creating Claude Code · Anthropic token private");
     let reg = job.post.register.expect("the sandbox is registered");
     assert_eq!(reg.name, "claude-token-proj");
-    assert_eq!(reg.label, "Claude Code");
+    assert_eq!(reg.label, "Claude Code · Anthropic token private");
     assert!(!reg.clone);
     assert_eq!(
         reg.skills,
@@ -475,10 +487,10 @@ fn g5_new_token() {
             .all(|s| s.argv.iter().all(|a| !a.contains(TOKEN_VALUE))),
         "the token goes in on stdin, never in an argv"
     );
-    assert_eq!(job.title, "Creating Claude Code");
+    assert_eq!(job.title, "Creating Claude Code · Anthropic token personal");
     let reg = job.post.register.expect("the sandbox is registered");
     assert_eq!(reg.name, "claude-token-proj");
-    assert_eq!(reg.label, "Claude Code");
+    assert_eq!(reg.label, "Claude Code · Anthropic token personal");
     assert!(!reg.clone);
     assert_eq!(reg.skills, Some(sbx::SkillsMode::Readonly));
     assert_eq!(reg.start_dir, None);
@@ -525,12 +537,12 @@ fn g6_mcp() {
             false,
         )]
     );
-    assert_eq!(job.title, "Creating Claude Code LiteLLM");
+    assert_eq!(job.title, "Creating Claude Code · LiteLLM acme");
     // The connection the form opened on, remembered only once the create succeeded.
     assert_eq!(job.post.last_litellm.as_deref(), Some("acme"));
     let reg = job.post.register.expect("the sandbox is registered");
     assert_eq!(reg.name, "claude-litellm-proj");
-    assert_eq!(reg.label, "Claude Code LiteLLM");
+    assert_eq!(reg.label, "Claude Code · LiteLLM acme");
     assert!(!reg.clone);
     assert_eq!(reg.skills, Some(sbx::SkillsMode::Readonly));
     assert_eq!(reg.start_dir, None);
@@ -620,12 +632,12 @@ fn g7_start_dir() {
             false,
         )]
     );
-    assert_eq!(job.title, "Creating Claude Code LiteLLM");
+    assert_eq!(job.title, "Creating Claude Code · LiteLLM acme");
     // The connection the form opened on, remembered only once the create succeeded.
     assert_eq!(job.post.last_litellm.as_deref(), Some("acme"));
     let reg = job.post.register.expect("the sandbox is registered");
     assert_eq!(reg.name, "claude-litellm-proj");
-    assert_eq!(reg.label, "Claude Code LiteLLM");
+    assert_eq!(reg.label, "Claude Code · LiteLLM acme");
     assert!(!reg.clone);
     assert_eq!(reg.skills, Some(sbx::SkillsMode::Readonly));
     assert_eq!(reg.start_dir, Some(PathBuf::from("sub")));
@@ -633,22 +645,36 @@ fn g7_start_dir() {
     let _ = std::fs::remove_dir_all(&base);
 }
 
-/// A host folder for this sandbox alone, typed read-only at a target of its own: sbx gets it after
-/// the workspace, the generated `folders-<sandbox>` kit names it for the agent, and the create
-/// records it for a rebuild.
+/// A host folder for this sandbox alone, picked with the keys: ↵ on *mount a folder…* opens the
+/// picker on the folder above the workspace, → goes into `data`, and its first button adds it,
+/// read-only. sbx gets it after the workspace, the generated `folders-<sandbox>` kit names it for
+/// the agent, and the create records it for a rebuild.
 #[test]
 fn g7b_more_folders() {
     let base = std::env::temp_dir().join(format!("aisbx-golden-more-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&base);
-    std::fs::create_dir_all(base.join("data")).unwrap();
-    let data = std::fs::canonicalize(base.join("data")).unwrap();
-    let spec = format!("{}:/workspace/data:ro", path(&data));
+    for d in ["data", "proj-more"] {
+        std::fs::create_dir_all(base.join(d)).unwrap();
+    }
+    let base = std::fs::canonicalize(&base).unwrap();
+    let (workspace, data) = (base.join("proj-more"), base.join("data"));
+    let spec = format!("{}:ro", path(&data));
 
     let mut app = new_app();
-    app.cwd = PathBuf::from("/proj-more");
+    app.cwd = workspace.clone();
     app.open_create();
     walk_to(&mut app, CreateStep::Workspace);
-    type_into(&mut app, CreateRow::ExtraFolders, &format!(" {spec} ,"));
+    enter(&mut app, WizardRow::Field(CreateRow::FolderAdd));
+    let Screen::StartDir(picker) = &app.screen else {
+        panic!("↵ opens the folder picker")
+    };
+    assert_eq!(picker.here(), base, "on the folder above the workspace");
+    assert_eq!(picker.dirs, ["data", "proj-more"]);
+    press(&mut app, KeyCode::Right);
+    press(&mut app, KeyCode::Down);
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(form(&app).workspace.extra_folders, [spec.as_str()]);
+    assert_eq!(focused(&app), WizardRow::Field(CreateRow::Folder(0)));
     let job = create_only(&mut app);
     assert_eq!(
         steps(&job),
@@ -670,7 +696,7 @@ fn g7b_more_folders() {
                 "-m",
                 "4g",
                 &kit(&app, "claude-litellm"),
-                "/proj-more",
+                &path(&workspace),
                 &spec,
             ]),
             false,
@@ -694,12 +720,6 @@ fn g8_refusals() {
     walk_to(&mut app, CreateStep::Workspace);
     type_into(&mut app, CreateRow::DenyNetwork, "example.com bad!host");
     refused(&mut app, BAD_HOST);
-
-    let mut app = new_app();
-    app.open_create();
-    walk_to(&mut app, CreateStep::Workspace);
-    type_into(&mut app, CreateRow::ExtraFolders, "docs:ro");
-    refused(&mut app, NOT_ABSOLUTE);
 
     let mut app = new_app();
     app.open_create();

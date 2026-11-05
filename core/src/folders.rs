@@ -49,6 +49,14 @@ impl Access {
             Access::Write => "read-write",
         }
     }
+
+    /// What the access means for the folder, as the forms say it.
+    pub fn meaning(self) -> &'static str {
+        match self {
+            Access::Read => "nothing in the sandbox can change it",
+            Access::Write => "the agent can change and delete what is in it",
+        }
+    }
 }
 
 /// One folder of the host's list.
@@ -322,11 +330,6 @@ pub fn spec_host(spec: &str) -> (&str, bool) {
 
 /// Where sbx mounts a clone-mode sandbox's source, a target no folder may take.
 pub const CLONE_SOURCE: &str = "/run/sandbox/source";
-
-/// The folders typed into the create wizard for one sandbox, comma-separated: see [`extras_of`].
-pub fn extras(text: &str, plan: &Plan, home: Option<&Path>) -> (Vec<Folder>, Vec<String>) {
-    extras_of(text.split(','), plan, home)
-}
 
 /// The folders one sandbox mounts beside `plan`'s, each `PATH`, `PATH:ro`, `PATH:TARGET` or
 /// `PATH:TARGET:ro`, with TARGET an absolute path inside the sandbox. Each is checked like the
@@ -720,6 +723,10 @@ fn descriptor(sandbox: &str, folders: &[Folder], git_guard: bool) -> String {
 mod tests {
     use super::*;
 
+    fn extras(text: &str, plan: &Plan, home: Option<&Path>) -> (Vec<Folder>, Vec<String>) {
+        extras_of(text.split(','), plan, home)
+    }
+
     fn scratch(name: &str) -> PathBuf {
         let dir =
             std::env::temp_dir().join(format!("aisbx-tests-folders-{name}-{}", std::process::id()));
@@ -863,7 +870,7 @@ mod tests {
     }
 
     #[test]
-    fn typed_folders_parse_with_their_targets_and_follow_sbxs_rules() {
+    fn own_folders_parse_with_their_targets_and_follow_sbxs_rules() {
         let root = std::env::temp_dir().join(format!("aisbx-extras-{}", std::process::id()));
         let (ws, data, docs, home) = (
             root.join("ws"),

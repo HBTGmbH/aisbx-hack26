@@ -88,46 +88,35 @@ impl Target {
     pub fn steps(self, sandbox: &str, workspace: &Path) -> Vec<String> {
         let host = sbx::ssh_host(sandbox);
         let path = workspace.display().to_string();
-        // A mountless sandbox's workspace is the image's own folder, not a host path.
-        let mountless = workspace == Path::new(crate::model::MOUNTLESS_WORKDIR);
         match self {
-            // Worded for both frontends: the TUI runs it in its own terminal, the window opens one.
             Target::Terminal => vec![
-                format!("Runs `ssh {host}` in a terminal, starting in the workspace."),
-                match mountless {
-                    true => format!("The workspace is at {path}."),
-                    false => format!("The workspace is at {path}, its host path."),
-                },
-                format!("Also usable as `sftp {host}` and `scp file {host}:{path}`."),
+                format!("Opens a shell in the sandbox, in {path}."),
+                format!("Or run `ssh {host}` yourself; `scp` and `sftp` work too."),
             ],
             Target::VsCode => vec![
-                "Needs the Remote - SSH extension (ms-vscode-remote.remote-ssh).".into(),
-                format!("Runs:  code --remote ssh-remote+{host} {path}"),
-                "The first connect downloads the VS Code server inside the sandbox.".into(),
+                format!("Opens {path} in VS Code. Needs its Remote - SSH extension."),
+                "The first time, VS Code installs its server in the sandbox.".into(),
             ],
             Target::Cursor => vec![
-                "Needs Cursor's Remote - SSH extension.".into(),
-                format!("Runs:  cursor --remote ssh-remote+{host} {path}"),
+                format!("Opens {path} in Cursor. Needs its Remote - SSH extension."),
+                "The first time, Cursor installs its server in the sandbox.".into(),
             ],
             Target::Jetbrains => vec![
                 "In JetBrains Gateway: New connection → SSH.".into(),
                 format!("Host  {host}      User  agent      Port  22"),
                 format!("Project  {path}"),
-                "Gateway downloads the IDE backend into the sandbox on first connect.".into(),
+                "The first time, Gateway installs the IDE in the sandbox.".into(),
             ],
             Target::ClaudeDesktop => {
                 let mut steps = vec![
                     "In Claude Desktop: environment drop-down → + Add SSH connection.".into(),
-                    format!("SSH Host  {host}   — leave SSH Port and Identity File empty."),
-                    format!("Then pick the folder {path} in the remote picker."),
+                    format!("SSH Host  {host}; leave SSH Port and Identity File empty."),
+                    format!("Then pick the folder {path}."),
                 ];
                 if cfg!(any(target_os = "macos", windows)) {
                     steps.push(
-                        "Or quit it and run `sbx setup ssh --auto-create`, which adds a managed"
-                            .into(),
-                    );
-                    steps.push(
-                        "“Docker Sandbox (Claude)” to its own mountless sandbox, ssh-claude."
+                        "Or close Claude Desktop and run `sbx setup ssh --auto-create`: it \
+                         connects Claude Desktop to a separate sandbox, ssh-claude, not to this one."
                             .into(),
                     );
                 }
@@ -181,15 +170,22 @@ mod tests {
         let steps = Target::Terminal
             .steps("s", Path::new("/Users/bob/src/my-project"))
             .join(" ");
-        assert!(steps.contains("starting in the workspace"), "{steps}");
+        assert!(
+            steps.contains("a shell in the sandbox, in /Users/bob/src/my-project"),
+            "{steps}"
+        );
         assert!(!steps.contains("/home/agent"), "{steps}");
-        assert!(steps.contains("Runs `ssh s.sbx` in a terminal"), "{steps}");
+        assert!(steps.contains("`ssh s.sbx`"), "{steps}");
         assert!(!steps.contains("this terminal"), "{steps}");
-        assert!(steps.contains("its host path"), "{steps}");
-        let mountless = Target::Terminal
-            .steps("s", Path::new(crate::model::MOUNTLESS_WORKDIR))
-            .join(" ");
-        assert!(!mountless.contains("host path"), "{mountless}");
+    }
+
+    #[test]
+    fn no_step_names_a_command_line_the_app_runs_for_you() {
+        for target in [Target::Terminal, Target::VsCode, Target::Cursor] {
+            let steps = target.steps("s", Path::new("/p")).join(" ");
+            assert!(!steps.contains("Runs:"), "{target:?}: {steps}");
+            assert!(!steps.contains("--remote"), "{target:?}: {steps}");
+        }
     }
 
     #[test]

@@ -415,7 +415,7 @@ mod tests {
                     mark: None,
                     meta: "opens `~/proj` over SSH",
                     state: Some(State {
-                        text: "`cursor` is not on this host's PATH".into(),
+                        text: "`cursor` command not found".into(),
                         color: Color32::RED,
                         value: false,
                     }),

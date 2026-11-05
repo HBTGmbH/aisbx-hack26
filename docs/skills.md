@@ -137,7 +137,8 @@ no rebuild.
 
 ### In the dashboard
 
-- Press `i` on a sandbox to pick its skills. Global picks show ticked and locked.
+- Press `i` on a sandbox to pick its skills. Global picks show ticked and marked *global*; you change them only in
+  the global picks.
 - Press `K`, then *Repo skills for all sandboxes*, to edit the global picks.
 - Press `space` to tick a repo (*all skills*) or one skill. Then choose *Save*.
 - Choose *Sync now* to copy the skills in at once. Otherwise they arrive at the next start.

@@ -352,9 +352,6 @@ pub fn resources_stopped_notes() -> Vec<Note> {
     vec![
         Note::plain("The sandbox is stopped."),
         Note::blank(),
-        Note::plain("CPU, memory and disk are read from inside the sandbox, which needs it to be"),
-        Note::plain("running — starting one just to measure it would be worse than saying so."),
-        Note::blank(),
         Note::of(&[
             (Key, "↵"),
             (Plain, "  start it, or  "),
@@ -367,8 +364,7 @@ pub fn resources_stopped_notes() -> Vec<Note> {
 /// Beside the vCPU count while there is no CPU share: the first reading has no interval.
 pub const LOAD_NEEDS_SECOND: &str = "load needs a second reading";
 /// Under the Resources tab's readings.
-pub const RESOURCES_SCOPE: &str =
-    "The sandbox microVM's own CPUs, memory and root filesystem — not the host's.";
+pub const RESOURCES_SCOPE: &str = "The sandbox's own CPUs, memory and disk, not your computer's.";
 
 /// The last reading failed while an older one is still shown.
 pub fn reading_failed(err: &str) -> String {
@@ -391,45 +387,27 @@ pub fn mount_notes(sb: &Sandbox) -> MountNotes {
     let mut about = Vec::new();
     if sb.mountless() {
         about.push(Note::plain(&format!(
-            "No host folder is mounted (a mountless sandbox): the agent works in \
-             {MOUNTLESS_WORKDIR},"
+            "No folder of your computer is mounted: the agent works in {MOUNTLESS_WORKDIR},"
         )));
         about.push(Note::plain(
-            "inside the sandbox. Those files survive a stop, and are deleted with the sandbox —",
-        ));
-        about.push(Note::plain(
-            "`sbx cp` copies them out (sandbox paths must be absolute).",
+            "inside the sandbox. Deleting the sandbox deletes those files; `sbx cp` copies them out.",
         ));
     } else if sb.clone {
         about.push(Note::plain(
-            "Clone mode: the agent works on a private in-container clone. Fetch its commits",
+            "Clone mode: the agent works on its own Git clone. Get its commits with",
         ));
-        about.push(Note::plain(&format!("with  git fetch sandbox-{}", sb.name)));
+        about.push(Note::plain(&format!("git fetch sandbox-{}", sb.name)));
     } else {
         about.push(Note::plain(
-            "The workspace is bind-mounted: edits inside the sandbox change these files.",
-        ));
-    }
-    let no_extra = match &sb.host_mounts {
-        Some(mounts) => !mounts.iter().any(|m| m.kind == MountKind::Folder),
-        None => sb.ro_mounts.is_empty() && sb.rw_mounts.is_empty(),
-    };
-    if no_extra {
-        about.push(Note::plain(
-            "No extra mounts. The host-gradle and host-maven kits add read-only cache mounts.",
+            "What the agent changes in these folders changes your files.",
         ));
     }
     let added = (!sb.runtime_mounts.is_empty()).then(|| {
-        Note::plain(
-            "Added with sbx mount after creation; restored on every start, and mounted again by R.",
-        )
+        Note::plain("Added with sbx mount after it was created; a rebuild mounts them again.")
     });
-    let missing = sb.workspace_missing.then(|| {
-        Note::of(&[(
-            Danger,
-            "⚠ the workspace folder no longer exists on this host",
-        )])
-    });
+    let missing = sb
+        .workspace_missing
+        .then(|| Note::of(&[(Danger, "⚠ this folder no longer exists on this computer")]));
     MountNotes {
         about,
         added,
@@ -523,7 +501,7 @@ pub fn skills_row(sb: &Sandbox) -> Option<&'static str> {
 }
 
 /// The Mounts tab's `skills` row: what is mounted, beside [`skills_mount_text`].
-pub const SKILLS_STORE: &str = "the host's shared agent-skills store";
+pub const SKILLS_STORE: &str = "the shared skills";
 
 /// How the shared agent-skills store is mounted. It is not among the workspace mounts because it
 /// is host state shared with every other sharing sandbox, and `K` is where it is managed.
@@ -531,10 +509,8 @@ pub fn skills_mount_text(skills: Skills) -> &'static str {
     match skills {
         Skills::Known(SkillsMode::Off) => "not mounted",
         // A read-only store is linked into a writable folder, so a kit can add skills beside it.
-        Skills::Known(SkillsMode::Readonly) => "read-only, linked into the agent's skills folder",
-        Skills::Known(SkillsMode::Readwrite) => {
-            "read-write, mounted over the agent's skills folder"
-        }
+        Skills::Known(SkillsMode::Readonly) => "read-only",
+        Skills::Known(SkillsMode::Readwrite) => "read-write",
         Skills::Unrecorded => "mode not recorded",
     }
 }
@@ -564,7 +540,7 @@ pub fn port_notes(sb: &Sandbox, list: &[Port]) -> Vec<Note> {
     let mut notes = Vec::new();
     if list.is_empty() {
         notes.push(Note::plain(
-            "No ports published — nothing on the host can reach into this sandbox.",
+            "No ports published: nothing in the sandbox is reachable from your computer.",
         ));
         notes.push(Note::blank());
         notes.push(Note::of(&[
@@ -584,22 +560,21 @@ pub fn port_notes(sb: &Sandbox, list: &[Port]) -> Vec<Note> {
     }
     notes.push(Note::blank());
     notes.push(Note::plain(
-        "The service inside must listen on 0.0.0.0 (or [::]), not 127.0.0.1, to be reachable.",
+        "A server in the sandbox must listen on 0.0.0.0, not 127.0.0.1.",
     ));
     if !sb.running {
         notes.push(Note::plain(
-            "The sandbox is stopped. Published ports are restored when it starts again;",
+            "The sandbox is stopped. Its ports come back when it starts; publishing one starts it.",
         ));
-        notes.push(Note::plain("publishing a new one starts it first."));
     }
     if !list.is_empty() && !sb.keep_running {
-        notes.push(Note::plain(
-            "It stops itself shortly after its last session ends, and these stop answering with it",
-        ));
         notes.push(Note::of(&[
-            (Plain, "— "),
+            (
+                Plain,
+                "It stops after its last session, and its ports with it — ",
+            ),
             (Key, "b"),
-            (Plain, " keeps it running in the background."),
+            (Plain, " keeps it running."),
         ]));
     }
     notes
@@ -610,7 +585,7 @@ pub fn network_warning(sb: &Sandbox) -> Option<&'static str> {
     sb.addons
         .iter()
         .any(|a| a == "web")
-        .then_some("⚠ the web kit allows ** — every host is reachable from this sandbox")
+        .then_some("⚠ the web kit lets this sandbox reach every host on the internet")
 }
 
 /// Beside the proxy on the Network tab.
@@ -1025,8 +1000,8 @@ mod tests {
     fn the_stopped_resources_say_which_keys_start_it() {
         let got = resources_stopped_notes();
         assert_eq!(got[0].text(), "The sandbox is stopped.");
-        assert!(got[1].is_blank() && got[4].is_blank());
-        let keys: Vec<&str> = got[5]
+        assert!(got[1].is_blank());
+        let keys: Vec<&str> = got[2]
             .0
             .iter()
             .filter(|p| p.kind == PieceKind::Key)
@@ -1112,7 +1087,11 @@ mod tests {
             Some("not mounted"),
             "sbx reports no store mount, whatever the registry says"
         );
-        assert_eq!(notes(&mount_notes(&sb).about).len(), 3, "no extra mounts");
+        assert_eq!(
+            notes(&mount_notes(&sb).about).len(),
+            2,
+            "clone mode's two lines"
+        );
 
         // No answer from sbx: the folders `sbx ls` lists.
         sb.host_mounts = None;
@@ -1139,10 +1118,7 @@ mod tests {
         let bind = mount_notes(&sb);
         assert_eq!(
             notes(&bind.about),
-            [
-                "The workspace is bind-mounted: edits inside the sandbox change these files.",
-                "No extra mounts. The host-gradle and host-maven kits add read-only cache mounts."
-            ]
+            ["What the agent changes in these folders changes your files."]
         );
         assert_eq!((bind.added, bind.missing), (None, None));
 
@@ -1150,8 +1126,8 @@ mod tests {
         sb.ro_mounts = vec!["/cache".into()];
         sb.workspace_missing = true;
         let clone = mount_notes(&sb);
-        assert_eq!(notes(&clone.about)[1], "with  git fetch sandbox-s");
-        assert_eq!(clone.about.len(), 2, "an extra mount: no 'no extra mounts'");
+        assert_eq!(notes(&clone.about)[1], "git fetch sandbox-s");
+        assert_eq!(clone.about.len(), 2);
         let missing = clone.missing.unwrap();
         assert_eq!(missing.0[0].kind, PieceKind::Danger);
         assert!(missing.text().contains("no longer exists"));
@@ -1171,14 +1147,8 @@ mod tests {
     fn the_skills_store_text_names_each_mode() {
         let all = [
             (Skills::Known(SkillsMode::Off), "not mounted"),
-            (
-                Skills::Known(SkillsMode::Readonly),
-                "read-only, linked into the agent's skills folder",
-            ),
-            (
-                Skills::Known(SkillsMode::Readwrite),
-                "read-write, mounted over the agent's skills folder",
-            ),
+            (Skills::Known(SkillsMode::Readonly), "read-only"),
+            (Skills::Known(SkillsMode::Readwrite), "read-write"),
             (Skills::Unrecorded, "mode not recorded"),
         ];
         for (skills, want) in all {
@@ -1194,12 +1164,15 @@ mod tests {
         let empty = port_notes(&sb, &[]);
         assert!(empty[0].text().starts_with("No ports published"));
         assert_eq!(empty[2].0[2].kind, PieceKind::Value);
-        assert!(!notes(&empty).iter().any(|n| n.contains("stops itself")));
+        assert!(!notes(&empty).iter().any(|n| n.contains("last session")));
 
         let listed = notes(&port_notes(&sb, &ports));
         assert_eq!(listed[1], "p  publish another   u  unpublish");
         assert!(listed[3].contains("0.0.0.0"));
-        assert_eq!(listed[5], "— b keeps it running in the background.");
+        assert_eq!(
+            listed[4],
+            "It stops after its last session, and its ports with it — b keeps it running."
+        );
 
         sb.keep_running = true;
         assert_eq!(
@@ -1223,7 +1196,7 @@ mod tests {
     #[test]
     fn the_network_tab_flags_web_protocols_and_inactive_rules() {
         let web = crate::model::sample("s", Some("claude-anthropic"), &["web"]);
-        assert!(network_warning(&web).unwrap().contains("**"));
+        assert!(network_warning(&web).unwrap().contains("every host"));
         let plain = crate::model::sample("s", Some("claude-anthropic"), &[]);
         assert_eq!(network_warning(&plain), None);
 

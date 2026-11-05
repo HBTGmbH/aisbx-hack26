@@ -4,7 +4,6 @@
 
 use aisbx_core::actions::{Action, Refusal};
 use aisbx_core::app::App;
-use aisbx_core::create::CreateStep;
 use aisbx_core::input::{KeyCode, KeyEvent, KeyModifiers};
 use aisbx_core::model::{self, CardNote};
 use eframe::egui::{self, RichText};
@@ -12,7 +11,7 @@ use eframe::egui::{self, RichText};
 use crate::{page, roster, theme};
 
 /// The header's actions: the host's, which no selected sandbox changes. *Approvals* shows as a
-/// count while a request waits (`shell`), and *Other folders* is the list's heading.
+/// count while a request waits (`shell`), and *Sandboxes in other folders* is the list's heading.
 pub const HOST: [Action; 8] = [
     Action::New,
     Action::Secrets,
@@ -54,7 +53,7 @@ pub const GROUPS: [(&str, &[Action]); 3] = [
 ];
 
 /// The host's actions as a row's menu and the help sheet list them under [`HOST_LABEL`]: the
-/// header's, *Approvals* and *Other folders*, the most used first.
+/// header's, *Approvals* and *Sandboxes in other folders*, the most used first.
 pub const HOST_GROUP: [Action; 10] = [
     Action::New,
     Action::Secrets,
@@ -418,8 +417,8 @@ fn state_pill(ui: &mut egui::Ui, sb: &model::Sandbox) -> egui::Response {
 }
 
 /// The page's head: the label with its state pill, the agent line, the kits, and a callout while
-/// the sandbox needs something, with the fix as a button. On the New row: what a new sandbox is
-/// and the button that starts one. Returns what a click asked for.
+/// the sandbox needs something, with the fix as a button. On the New row: the folder a new sandbox
+/// is for, and the button that starts one. Returns what a click asked for.
 pub fn head(ui: &mut egui::Ui, app: &App, busy: bool) -> Option<Asked> {
     let dark = ui.visuals().dark_mode;
     let Some(sb) = app.selected() else {
@@ -427,19 +426,8 @@ pub fn head(ui: &mut egui::Ui, app: &App, busy: bool) -> Option<Asked> {
             RichText::new("New sandbox").size(theme::TITLE),
         ));
         ui.add_space(2.0);
-        ui.scope(|ui| {
-            ui.set_max_width(crate::form::PARA_W);
-            ui.add(
-                egui::Label::new(format!(
-                    "Set up a sandbox for {}: the agent, how it reaches its model, and its kits. \
-                     Nothing is created until the last step.",
-                    model::tilde(&app.cwd)
-                ))
-                .wrap(),
-            );
-        });
-        ui.add_space(14.0);
-        steps(ui);
+        let folder = format!("in {}", model::tilde(&app.cwd));
+        ui.label(RichText::new(folder).color(ui.visuals().weak_text_color()));
         ui.add_space(14.0);
         let set_up = labelled(
             ui,
@@ -617,52 +605,6 @@ fn approvals_callout(
     asked
 }
 
-/// What each of the wizard's steps asks, in its order: the New row's page lists them.
-pub const STEP_GLOSSES: [(CreateStep, &str); 7] = [
-    (CreateStep::Provider, "who serves the model"),
-    (
-        CreateStep::Connection,
-        "which LiteLLM gateway, and its model list",
-    ),
-    (CreateStep::Harness, "the agent, and its account"),
-    (
-        CreateStep::Models,
-        "which models a gateway offers the agent",
-    ),
-    (CreateStep::Kits, "what is built into the sandbox"),
-    (CreateStep::Workspace, "its label, start folder and options"),
-    (
-        CreateStep::Review,
-        "what sbx will create, before anything is",
-    ),
-];
-
-/// The wizard's steps as its rail numbers them — an outlined mark with the step's number — each
-/// with its title and what it asks ([`STEP_GLOSSES`]).
-fn steps(ui: &mut egui::Ui) {
-    let weak = ui.visuals().weak_text_color();
-    let text = ui.visuals().text_color();
-    for (step, gloss) in STEP_GLOSSES {
-        ui.horizontal(|ui| {
-            let (rect, _) = ui.allocate_exact_size(egui::vec2(22.0, 22.0), egui::Sense::hover());
-            let painter = ui.painter();
-            painter.circle_stroke(rect.center(), 10.0, egui::Stroke::new(1.2, weak));
-            let number = step.number().to_string();
-            let font = egui::FontId::proportional(theme::SMALL);
-            painter.text(
-                rect.center(),
-                egui::Align2::CENTER_CENTER,
-                number,
-                font,
-                text,
-            );
-            ui.add_space(4.0);
-            ui.label(theme::strong(RichText::new(step.title())));
-            ui.label(RichText::new(gloss).color(weak));
-        });
-    }
-}
-
 /// A group's menu on the page's toolbar: its label, and a mark that it opens.
 pub fn group_menu(label: &str) -> String {
     format!("{label} ▾")
@@ -825,7 +767,7 @@ mod tests {
     }
 
     /// The places: the header, the page's first row, its groups, the approvals count and the
-    /// *Other folders* heading.
+    /// *Sandboxes in other folders* heading.
     #[test]
     fn every_action_has_one_place() {
         let groups: Vec<Action> = secondary().collect();

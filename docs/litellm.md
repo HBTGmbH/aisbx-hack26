@@ -45,8 +45,8 @@ host proxy puts in the key on requests to the connection's host only. The rest o
 
 ## Choosing a connection
 
-- **In the create wizard**, pick the connection with ←→ on the Connection step. It opens on the one you used last.
-  A connection without a stored key shows `key missing`.
+- **In the create wizard**, pick the connection on the Connection step: `←→`, then `↵` to go on, or a click. It
+  opens on the one you used last. A connection without a stored key shows a warning.
 - **With `aisbx up`**, give `--litellm <name>`. With one connection, `aisbx up` takes it. With several and no
   `--litellm`, it exits 2.
 - **On a sandbox**, `A` [moves it to another connection](accounts.md#accounts-a). This is a rebuild.
@@ -76,9 +76,9 @@ $ sbx run --kit ~/.local/state/aisbx/litellm/acme/litellm-acme-claude ./kits/cla
 
 ## Seeing and editing the config files
 
-The wizard's Models step lists the files the connection writes for the agent. To change one:
+The wizard's Models step lists the files the connection writes for the agent, under *Config files*. To change one:
 
-1. Select the file and press `↵` (*Open* in `aisbx-ui`).
+1. Open *Config files*, select the file and press `↵` (*Open* in `aisbx-ui`).
 2. Edit the copy in your editor (`$VISUAL`, `$EDITOR`, else `vi` or Notepad) and save it.
 
 The edited copy then replaces the generated file for every sandbox of that agent on that connection.
@@ -112,9 +112,9 @@ first. Each row shows the model's name and, where the gateway gives them, its ro
 Claude Code maps `opus`, `sonnet` and `haiku` (background work) to Anthropic model names, which the gateway may not
 serve. Pin each alias to one of the [connection's models](#the-gateways-model-list):
 
-1. Open the wizard's Models step, or the kits editor (`e`) on a sandbox.
+1. Open *Pick models* on the wizard's Models step, or the kits editor (`e`) on a sandbox.
 2. Press `↵` on an alias and pick a model. All pins are optional.
-3. Pick *leave to Claude Code* to remove a pin.
+3. Pick *default* to remove a pin.
 
 The wizard opens on the pins you used last on that connection. The first pin is added in place. **A change or a
 removal rebuilds the sandbox**; the session history stays. Without the dashboard, add the generated kit

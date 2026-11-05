@@ -22,11 +22,11 @@ pub enum Input {
 pub const WINDOW_KEYS: [(&str, Input); 9] = [
     ("Move the selection", Input::Keys(&["←", "→", "↑", "↓"])),
     (
-        "Jump to the first or last sandbox, or a page on",
+        "Jump to the first or last sandbox, or a page up or down",
         Input::Keys(&["Home", "End", "PageUp", "PageDown"]),
     ),
     (
-        "Show a details tab, in the strip's order",
+        "Show a details tab",
         Input::Keys(&["1", "2", "3", "4", "5", "6", "7"]),
     ),
     ("Start a sandbox", Input::Pointer("Double-click its row")),
@@ -38,10 +38,7 @@ pub const WINDOW_KEYS: [(&str, Input); 9] = [
         "Show another folder's sandboxes first",
         Input::Keys(&["Cmd-O"]),
     ),
-    (
-        "Go back, close, or give the keyboard back to the list",
-        Input::Keys(&["Esc"]),
-    ),
+    ("Go back or close", Input::Keys(&["Esc"])),
     (
         "Move between a form's rows",
         Input::Keys(&["Tab", "Shift-Tab"]),

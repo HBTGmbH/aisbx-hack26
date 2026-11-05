@@ -720,16 +720,15 @@ mod tests {
         assert_eq!(
             joined,
             [
-                "Clone mode: the agent works on a private in-container clone. Fetch its commits \
-                 with  git fetch sandbox-s",
-                "No extra mounts. The host-gradle and host-maven kits add read-only cache mounts."
+                "Clone mode: the agent works on its own Git clone. Get its commits with git fetch \
+              sandbox-s"
             ]
         );
         let stopped = paragraphs(&insight::resources_stopped_notes());
         let texts: Vec<String> = stopped.iter().map(Note::text).collect();
-        assert_eq!(texts.len(), 5, "{texts:?}");
-        assert!(texts[2].starts_with("CPU, memory") && texts[2].ends_with("saying so."));
-        assert_eq!(stopped[4], insight::resources_stopped_notes()[5]);
+        assert_eq!(texts.len(), 3, "{texts:?}");
+        assert_eq!(texts[0], "The sandbox is stopped.");
+        assert_eq!(stopped[2], insight::resources_stopped_notes()[2]);
         let mut sb = model::sample("s", Some("claude-anthropic"), &[]);
         sb.running = true;
         let ports = [aisbx_core::sbx::Port {
@@ -748,8 +747,7 @@ mod tests {
         let last = notes.last().unwrap();
         assert_eq!(
             last.text(),
-            "It stops itself shortly after its last session ends, and these stop answering with \
-             it — b keeps it running in the background."
+            "It stops after its last session, and its ports with it — b keeps it running."
         );
         assert!(last
             .0

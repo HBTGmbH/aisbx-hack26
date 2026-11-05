@@ -112,25 +112,24 @@ pub fn map(app: &App, sb: &Sandbox) -> Map {
 fn workspace(sb: &Sandbox) -> Crossing {
     if sb.mountless() {
         let how = format!("it works in {MOUNTLESS_WORKDIR}");
-        return crossing("No host folder", how, Way::None, Tab::Mounts)
+        return crossing("No folder mounted", how, Way::None, Tab::Mounts)
             .tone(Tone::Weak)
-            .tip("A mountless sandbox: its files live inside it and are deleted with it.");
+            .tip("Its files live only in the sandbox: deleting the sandbox deletes them.");
     }
     let what = sb.folder_label();
     if sb.workspace_missing {
         return crossing(what, "folder missing", Way::Both, Tab::Mounts)
             .tone(Tone::Danger)
-            .tip("The workspace folder no longer exists on this host.");
+            .tip("This folder no longer exists on this computer.");
     }
     // How sbx mounted it, in the Mounts tab's words.
     let how = sb.mounts().first().map_or("read-write", |(_, mode)| *mode);
     match sb.clone {
         true => crossing(what, how, Way::In, Tab::Mounts).tip(
-            "Clone mode: the agent works on a private clone inside the sandbox, and your files \
-             stay as they are.",
+            "Clone mode: the agent works on its own Git clone, and your files stay unchanged.",
         ),
         false => crossing(what, how, Way::Both, Tab::Mounts)
-            .tip("Bind-mounted: edits inside the sandbox change these files."),
+            .tip("What the agent changes here changes your files."),
     }
 }
 
@@ -166,7 +165,7 @@ fn skills(sb: &Sandbox) -> Option<Crossing> {
             "read-only",
             Way::In,
             Tone::Plain,
-            "The host's shared skills, which it cannot change.",
+            "The shared skills; the agent cannot change them.",
         ),
         Skills::Known(SkillsMode::Readwrite) => (
             "read-write",
@@ -203,7 +202,7 @@ fn ports(sb: &Sandbox) -> Crossing {
     }
     let tip = |pairs: &[(String, u16, u16)]| -> String {
         let lines: Vec<String> = (pairs.iter())
-            .map(|(host, h, s)| format!("{host}:{h} on the host → port {s} inside"))
+            .map(|(host, h, s)| format!("{host}:{h} on your computer → port {s} in the sandbox"))
             .collect();
         lines.join("\n")
     };
@@ -213,7 +212,7 @@ fn ports(sb: &Sandbox) -> Crossing {
             .tip("A stopped sandbox lists no ports; the published ones come back when it starts."),
         [] => crossing(
             "No ports published",
-            "nothing on the host reaches in",
+            "nothing on your computer reaches in",
             Way::None,
             Tab::Ports,
         )
@@ -224,7 +223,7 @@ fn ports(sb: &Sandbox) -> Crossing {
         }
         many => crossing(
             format!("{} ports", many.len()),
-            "published on the host",
+            "published on your computer",
             Way::In,
             Tab::Ports,
         )
@@ -239,7 +238,7 @@ fn network(app: &App, sb: &Sandbox) -> Crossing {
         Some(_) => (
             "Every host",
             Tone::Warn,
-            "The web kit allows ** — every host is reachable from this sandbox.",
+            "The web kit lets this sandbox reach every host on the internet.",
         ),
         None => (
             "Allowed hosts",
@@ -732,7 +731,7 @@ mod tests {
                 ),
                 (
                     "No ports published",
-                    "nothing on the host reaches in",
+                    "nothing on your computer reaches in",
                     Way::None,
                     Tone::Weak,
                     Tab::Ports
@@ -752,6 +751,52 @@ mod tests {
     }
 
     #[test]
+    fn no_crossing_calls_your_computer_the_host() {
+        let base = model::sample("box", Some("claude-anthropic"), &[]);
+        let running = Sandbox {
+            running: true,
+            ..base.clone()
+        };
+        let mut cases = vec![base.clone(), running.clone()];
+        for ports in [
+            vec![port("127.0.0.1", 8080, 3000)],
+            vec![port("127.0.0.1", 8080, 3000), port("0.0.0.0", 9090, 4000)],
+        ] {
+            cases.push(Sandbox {
+                ports,
+                ..running.clone()
+            });
+        }
+        cases.push(model::sample("box", Some("claude-anthropic"), &["web"]));
+        let mut clone = base.clone();
+        clone.clone = true;
+        clone.skills = Some(Skills::Known(SkillsMode::Readwrite));
+        cases.push(clone);
+        let mut gone = base.clone();
+        gone.workspace_missing = true;
+        cases.push(gone);
+        let mut bare = base;
+        bare.workspace = PathBuf::new();
+        cases.push(bare);
+        for sb in &cases {
+            let map = map(&app(sb), sb);
+            for c in map.host.iter().chain([&map.out]) {
+                let said = format!("{} | {} | {}", c.what, c.how, c.tip);
+                for inner in [
+                    "on the host",
+                    "this host",
+                    "host's",
+                    "host folder",
+                    "**",
+                    "Bind-mount",
+                ] {
+                    assert!(!said.contains(inner), "{inner}: {said}");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn the_workspace_crossing_follows_how_it_is_mounted() {
         let mut sb = model::sample("box", Some("claude-anthropic"), &[]);
         sb.clone = true;
@@ -762,7 +807,7 @@ mod tests {
         assert_eq!(workspace(&sb).tone, Tone::Danger);
         sb.workspace = PathBuf::new();
         let c = workspace(&sb);
-        assert_eq!((c.what.as_str(), c.way), ("No host folder", Way::None));
+        assert_eq!((c.what.as_str(), c.way), ("No folder mounted", Way::None));
     }
 
     #[test]

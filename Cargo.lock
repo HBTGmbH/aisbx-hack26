@@ -140,7 +140,7 @@ dependencies = [
 
 [[package]]
 name = "aisbx"
-version = "0.51.0+0"
+version = "0.51.0+1"
 dependencies = [
  "aisbx-core",
  "anyhow",
@@ -152,7 +152,7 @@ dependencies = [
 
 [[package]]
 name = "aisbx-core"
-version = "0.51.0+0"
+version = "0.51.0+1"
 dependencies = [
  "anyhow",
  "ctrlc",
@@ -165,7 +165,7 @@ dependencies = [
 
 [[package]]
 name = "aisbx-ui"
-version = "0.51.0+0"
+version = "0.51.0+1"
 dependencies = [
  "aisbx-core",
  "anyhow",

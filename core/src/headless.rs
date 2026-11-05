@@ -699,9 +699,14 @@ fn up(raw: &[String]) -> Outcome {
 
     // What sbx bakes in and reports nowhere — the same split the dashboard keeps.
     let mut registry = state::Registry::load();
-    let label = args
-        .one("label")?
-        .unwrap_or_else(|| model::auto_label(&catalog, &backend.kit.name, &addons));
+    let account = model::label_account(
+        backend,
+        token.as_deref(),
+        connection.as_ref().map(|(c, _)| c.name.as_str()),
+    );
+    let label = args.one("label")?.unwrap_or_else(|| {
+        model::auto_label(&catalog, &backend.kit.name, account.as_deref(), &addons)
+    });
     registry.set_display_name(&name, Some(label));
     registry.set_clone(&name, args.has("clone"));
     registry.set_skills(&name, skills);
