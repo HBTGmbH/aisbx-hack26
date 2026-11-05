@@ -101,6 +101,7 @@ Give the workspace folder as the last argument: `aisbx up --backend <kit> [optio
 | `--ssh-agent` | forwards the host's SSH agent (off by default) |
 | `--git-readonly` | also mounts the workspace's `.git` read-only: the agent reads the history but cannot commit or change hooks |
 | `--tmpfs-volumes` | keeps the kits' volumes in RAM (see below) |
+| `--no-mcp` | no MCP servers and no tools to find the host's (`sbx create --static-mcp none`, as the dashboard's "none"); applied at creation only: on an existing sandbox it warns on stderr and changes nothing |
 
 #### Extra folders
 

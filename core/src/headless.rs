@@ -57,6 +57,8 @@ HEADLESS USE — the same kits and names as the dashboard, for scripts:
                                reads the history but cannot commit or change hooks
         --no-host-folders      mount neither the folders of `aisbx folders` nor those the
                                workspace's companion.json names (mounted by default)
+        --no-mcp               no MCP servers and no tools to find the host's; applied at
+                               creation only (an existing sandbox keeps what it has)
 
     aisbx run NAME (--prompt TEXT | --prompt-file FILE|-) [options] [-- AGENT_ARGS]
         Run the agent once, non-interactively, and exit with its exit code.
@@ -388,6 +390,7 @@ fn up(raw: &[String]) -> Outcome {
             "tmpfs-volumes",
             "git-readonly",
             "no-host-folders",
+            "no-mcp",
         ],
         &[
             "backend",
@@ -555,6 +558,12 @@ fn up(raw: &[String]) -> Outcome {
             }
             Err(_) => {}
         }
+        if args.has("no-mcp") {
+            eprintln!(
+                "aisbx: warning: --no-mcp only applies when a sandbox is created; it cannot be \
+                 checked or changed on the existing {name}"
+            );
+        }
         eprintln!("aisbx: {name} exists ({}) — reusing it", existing.status);
         match inspected {
             Ok(inspected) => approve_credentials(&inspected.kits),
@@ -659,6 +668,7 @@ fn up(raw: &[String]) -> Outcome {
     };
     approve_credentials(&kit_dirs);
     let kit_refs: Vec<&Path> = kit_dirs.iter().map(PathBuf::as_path).collect();
+    let static_mcp = static_mcp_for(&args);
     let argv = sbx::create_argv(sbx::Create {
         name: &name,
         agent: &backend.agent,
@@ -671,7 +681,7 @@ fn up(raw: &[String]) -> Outcome {
         ports: &[],
         skills,
         deny_network: &deny_network,
-        static_mcp: &[],
+        static_mcp: &static_mcp,
         cpus,
         memory: memory.as_deref(),
         template: template.as_deref(),
@@ -695,6 +705,10 @@ fn up(raw: &[String]) -> Outcome {
     registry.set_display_name(&name, Some(label));
     registry.set_clone(&name, args.has("clone"));
     registry.set_skills(&name, skills);
+    if !static_mcp.is_empty() {
+        // The same record the dashboard keeps, so a rebuild repeats the choice.
+        registry.set_static_mcp(&name, static_mcp);
+    }
     if let Some(token) = &token {
         registry.set_last_token(token);
     }
@@ -717,6 +731,14 @@ fn up(raw: &[String]) -> Outcome {
     }
     println!("{name}");
     Ok(0)
+}
+
+/// The fixed MCP set `up` asks sbx for: none at all with `--no-mcp`, else sbx's default (no flag).
+fn static_mcp_for(args: &Args) -> Vec<String> {
+    match args.has("no-mcp") {
+        true => vec![sbx::STATIC_MCP_NONE.to_string()],
+        false => Vec::new(),
+    }
 }
 
 /// `up`'s sync: its status lines go to stderr (stdout is the name), and a failure is a warning.
@@ -3885,6 +3907,71 @@ mod tests {
         assert!(HELP
             .lines()
             .any(|l| l.trim_start().starts_with("--tmpfs-volumes ")));
+    }
+
+    fn parse_up(raw: &[&str]) -> Args {
+        Args::parse(&strings(raw), &["no-mcp"], &[]).unwrap()
+    }
+
+    fn create_argv_for(args: &Args) -> Vec<String> {
+        let static_mcp = static_mcp_for(args);
+        let kit = Path::new("/kits/claude-anthropic");
+        sbx::create_argv(sbx::Create {
+            name: "box",
+            agent: "claude-anthropic",
+            agent_kit: Some(kit),
+            kit_dirs: &[kit],
+            workspace: Path::new("/work"),
+            mounts: &[],
+            clone: false,
+            ports: &[],
+            skills: None,
+            deny_network: &[],
+            static_mcp: &static_mcp,
+            cpus: None,
+            memory: None,
+            template: None,
+        })
+    }
+
+    #[test]
+    fn no_mcp_passes_static_mcp_none_once() {
+        let args = parse_up(&["--no-mcp"]);
+        let argv = create_argv_for(&args);
+        let at: Vec<usize> = (0..argv.len())
+            .filter(|&i| argv[i] == "--static-mcp")
+            .collect();
+        assert_eq!(at.len(), 1, "{argv:?}");
+        assert_eq!(argv[at[0] + 1], sbx::STATIC_MCP_NONE);
+        assert_eq!(argv.iter().filter(|a| a.as_str() == "none").count(), 1);
+    }
+
+    #[test]
+    fn without_no_mcp_the_argv_has_no_static_mcp() {
+        let args = parse_up(&[]);
+        assert!(static_mcp_for(&args).is_empty());
+        let argv = create_argv_for(&args);
+        let has_flag = argv.iter().any(|a| a == "--static-mcp");
+        assert!(!has_flag, "{argv:?}");
+    }
+
+    #[test]
+    fn no_mcp_is_a_switch() {
+        let args = parse_up(&["--no-mcp", "dir"]);
+        assert!(args.has("no-mcp"));
+        assert_eq!(args.positional, vec!["dir".to_string()]);
+        let raw = strings(&["--backend", "claude-anthropic", "--no-mcp=x"]);
+        let fail = up(&raw).expect_err("refused");
+        assert_eq!(fail.code, EXIT_USAGE);
+        let message = &fail.message;
+        assert!(message.contains("--no-mcp takes no value"), "{message}");
+    }
+
+    #[test]
+    fn no_mcp_is_documented() {
+        assert!(HELP.contains("\n        --no-mcp "));
+        let docs = include_str!("../../docs/headless.md");
+        assert!(docs.contains("`--no-mcp`"));
     }
 
     #[test]
