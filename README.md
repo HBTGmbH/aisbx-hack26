@@ -5,27 +5,59 @@
 [![sbx 0.51.0 or later](https://img.shields.io/badge/sbx-0.51.0%2B-2496ED)](https://docs.docker.com/ai/sandboxes/)
 ![Platforms: macOS, Linux, Windows](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey)
 
-Run AI coding agents in a [Docker Sandbox](https://docs.docker.com/ai/sandboxes/) (`sbx`), on your own
-accounts and gateways, and manage every sandbox from one dashboard.
+aisbx is a wrapper around [Docker Sandboxes](https://docs.docker.com/ai/sandboxes/) (`sbx`). sbx runs AI
+coding agents in isolated sandboxes. aisbx adds ready kits for agents on your own accounts and gateways, and
+manages every sandbox from one dashboard. Each action in aisbx runs plain `sbx` commands, so you need sbx first.
 
 The agents are Claude Code, OpenCode, Codex, [Pi](https://pi.dev) and the Antigravity CLI. Each runs in its own
 sandbox with your project folder in it.
 
-**Contents:** [What you get](#what-you-get) · [How it fits together](#how-it-fits-together) ·
-[Requirements](#requirements) · [Install](#install) · [Your first sandbox](#your-first-sandbox) ·
-[Everyday use](#everyday-use) · [Headless](#headless-aisbx-from-scripts) · [Backends](#backends) ·
-[Addons](#addons) · [Without aisbx](#without-aisbx) · [Documentation](#documentation) ·
-[Help and contributing](#help-and-contributing) · [License](#license)
+**Contents:** [What sbx provides](#what-sbx-provides) · [What aisbx adds](#what-aisbx-adds) ·
+[How it fits together](#how-it-fits-together) · [Requirements](#requirements) · [Install](#install) ·
+[Your first sandbox](#your-first-sandbox) · [Everyday use](#everyday-use) ·
+[Headless](#headless-aisbx-from-scripts) · [Backends](#backends) · [Addons](#addons) ·
+[Without aisbx](#without-aisbx) · [Documentation](#documentation) · [Help and contributing](#help-and-contributing) ·
+[License](#license)
 
-## What you get
+## What sbx provides
 
-- **Your own accounts:** a LiteLLM gateway, your Anthropic, OpenAI or Google account, or a setup token.
-- **Many sandboxes per project**, one or more per agent.
-- **No secret in the sandbox:** keys and tokens stay in the host keychain
+aisbx builds on these sbx features. It does not replace them.
+
+- **Isolation:** each sandbox is a small VM with your project folder mounted. The agent cannot reach the rest of
+  the host.
+- **Agents in the sandbox:** sbx runs the agent harness inside the VM and builds its image from **kits**.
+- **Keys stay on the host:** `sbx secret` stores keys and tokens in the host keychain. The sbx proxy on the host puts
+  them into the agent's requests, so the agent never sees them ([Credentials](docs/accounts.md#credentials)).
+- **Egress control:** the network policy blocks every host that no rule allows, and holds a blocked request for
+  your approval ([Network policy](docs/network.md#network-policy)).
+- **A skills store:** one store of agent skills on the host, shared by the sandboxes
+  ([The sbx skills store](docs/skills.md#the-sbx-skills-store)).
+- **An MCP gateway:** MCP servers registered on the host, with their OAuth tokens kept there
+  ([MCP servers](docs/sandboxes.md#mcp-servers)).
+- **Sandbox tools:** ports, SSH for editors, CPU and memory limits ([Working with sandboxes](docs/sandboxes.md)).
+
+## What aisbx adds
+
+- **Backend kits for five agents on your own accounts:** a LiteLLM gateway, your Anthropic, OpenAI or Google
+  account, or a setup token ([Backends](#backends)).
+- **LiteLLM connections:** add a gateway once, read its model list, and pin models per sandbox
+  ([LiteLLM connections](docs/litellm.md)).
+- **Two Anthropic accounts at once**, through named setup tokens
+  ([Two Anthropic accounts](docs/accounts.md#two-anthropic-accounts-at-once)).
+- **Addons** that stack onto every backend: JDK, Rust, read-only host caches, host skills, RTK and more
+  ([Addons](#addons)).
+- **Tight allow-lists:** each kit opens only the hosts its agent needs, and turns the agents' telemetry off
+  ([Telemetry](docs/network.md#telemetry-and-non-essential-traffic)).
+- **Credential bindings set for you:** without a binding, sbx silently withholds a credential. aisbx adds it before
+  each create, rebuild or start ([Credentials](docs/accounts.md#credentials)).
+- **Skill repositories:** Git repositories of skills that aisbx mirrors, with skills picked per sandbox
+  ([Skill repositories](docs/skills.md#skill-repositories-aisbx-skill-repo)).
+- **A dashboard** in the terminal (`aisbx`) and as a desktop window (`aisbx-ui`): many sandboxes per project, a
+  create wizard, approvals, rebuilds that keep your settings, and update detection ([The aisbx dashboard](docs/dashboard.md)).
+- **Headless commands** for scripts and CI ([Headless use](docs/headless.md)).
+- **No telemetry** from the agents, and sbx's own telemetry off unless you turned it on
+  ([sbx's own telemetry](docs/network.md#sbxs-own-telemetry-t)). Keys stay in the host keychain
   ([one exception](docs/agents.md#antigravity-agy)).
-- **A closed network:** a sandbox reaches only the hosts its kits allow; any other request waits for your approval.
-- **No telemetry** from the agents ([Telemetry](docs/network.md#telemetry-and-non-essential-traffic)), and sbx's own
-  telemetry off unless you turned it on ([sbx's own telemetry](docs/network.md#sbxs-own-telemetry-t)).
 
 ## How it fits together
 
@@ -39,17 +71,56 @@ sandbox with your project folder in it.
 
 ## Requirements
 
-- [sbx](https://docs.docker.com/ai/sandboxes/) **0.51.0** or later. The dashboard refuses an older version
-  ([why](docs/development.md#sbx-version)).
+- [sbx](https://docs.docker.com/ai/sandboxes/) **0.51.0** or later, signed in to Docker
+  ([Install](#1-install-sbx)). The dashboard refuses an older version ([why](docs/development.md#sbx-version)).
 - Docker with Buildx on the host. sbx uses it to build the image of each kit.
 - To build from source only: a Rust toolchain. The launcher builds aisbx with it. `aisbx-ui` needs Rust 1.95 or
   later ([Requirements](docs/gui.md#requirements)).
 
 ## Install
 
-Install with Homebrew, install a release, or build from source. Then set the network policy of the host.
+Install sbx, sign in to Docker, set the network policy, then install aisbx.
 
-### With Homebrew
+### 1. Install sbx
+
+Install the `sbx` CLI from Docker. Check it with `sbx version`: aisbx needs 0.51.0 or later.
+
+| Platform      | Command                                                         |
+|---------------|-----------------------------------------------------------------|
+| macOS         | `brew trust docker/tap && brew install docker/tap/sbx`          |
+| Windows       | `winget install -h Docker.sbx`                                  |
+| Ubuntu        | `curl -fsSL https://get.docker.com \| sudo SBX=1 sh` (with Docker Engine) |
+
+sbx has its own platform requirements: Apple silicon on macOS, Windows Hypervisor Platform on Windows, and KVM on
+Linux. [Install Docker Sandboxes](https://docs.docker.com/ai/sandboxes/install/) lists them and the other ways to
+install.
+
+### 2. Sign in to Docker
+
+sbx needs a Docker sign-in. Run this once; it opens a browser:
+
+```console
+$ sbx login
+```
+
+### 3. Set the network policy
+
+Turn off every online connection by default, once:
+
+```console
+$ sbx policy init deny-all
+```
+
+aisbx manages the connections itself: each kit opens only the hosts its agent and tools need. Any other request
+waits for your approval. If sbx already has a policy, run `sbx policy reset --force && sbx policy init deny-all`
+instead. **This command stops every sandbox.** Do not choose the `balanced` preset: it opens GitHub, npm and more to
+every sandbox, whatever the kits say ([Network policy](docs/network.md#network-policy)).
+
+### 4. Install aisbx
+
+Install with Homebrew, install a release, or build from source.
+
+#### With Homebrew
 
 On macOS and Linux, install both binaries from the tap:
 
@@ -59,7 +130,7 @@ $ brew install ilja82/tap/aisbx
 
 To update, run `brew upgrade aisbx`. Homebrew does not quarantine the binaries.
 
-### From a release
+#### From a release
 
 1. Download the archive for your platform from the
    [latest release](https://github.com/ilja82/aisbx/releases/latest):
@@ -89,7 +160,7 @@ To update, run `brew upgrade aisbx`. Homebrew does not quarantine the binaries.
 The Linux binaries need the glibc of Ubuntu 24.04 or newer. `aisbx-ui` on Linux also needs X11 or Wayland.
 To update, unpack the new release and change the `PATH` entry.
 
-### From source
+#### From source
 
 1. Clone the repository:
 
@@ -119,18 +190,6 @@ To update, unpack the new release and change the `PATH` entry.
 
 The launcher builds aisbx on the first run and after each `git pull`
 ([The `aisbx` launcher](docs/dashboard.md#the-aisbx-launcher)).
-
-### Network policy
-
-Set the network policy of the host, once:
-
-```console
-$ sbx policy init deny-all
-```
-
-If sbx already has a policy, run `sbx policy reset --force && sbx policy init deny-all` instead.
-**This command stops every sandbox.** [Network policy](docs/network.md#network-policy) tells why `deny-all`
-is recommended.
 
 ## Your first sandbox
 
