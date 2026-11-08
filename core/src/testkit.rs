@@ -88,6 +88,7 @@ pub fn connection(name: &str, url: &str) -> crate::litellm::Connection {
     crate::litellm::Connection {
         name: name.into(),
         url: url.into(),
+        engine: None,
     }
 }
 

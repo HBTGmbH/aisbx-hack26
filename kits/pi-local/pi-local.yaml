@@ -1,0 +1,42 @@
+# syntax=docker/sandbox-kit:3
+# Pi (pi.dev) against an inference engine on this computer: a v3 workload, its image built from
+# pi-local.dockerfile.
+schemaVersion: "3"
+kind: workload
+displayName: Pi (local engine)
+description: Run Pi (pi.dev), a minimal coding agent, against an inference engine on this computer (llama.cpp, Ollama, LM Studio, MLX, vLLM). The engine, its models and the key's placeholder come from the engine kit aisbx generates and stacks next to this one, which writes Pi's ~/.pi/agent/models.json (one provider, `local-<engine>`) and settings.json; a key, if the engine has one, stays in the host keychain and the host proxy swaps it in. Pi runs every tool call without asking. aisbx writes the engine's model list and the default model into models.json and settings.json before each session; pick another model with `/model`.
+
+# No credential and no engine on purpose: the generated engine kit writes Pi's models.json and
+# settings.json with the key's placeholder (docs/local.md).
+
+capabilities:
+  - type: com.docker.sandbox/sbx@1
+
+  - type: com.docker.sandbox/network-policy@1
+    config:
+      install:
+        allow:
+          - registry.npmjs.org       # files/pi/update.sh create: npm metadata and tarballs
+      runtime:
+        allow:
+          # No gateway host here: the connection kit allows it. Not allowed on purpose: pi.dev, any
+          # model provider's own API, GitHub.
+          - registry.npmjs.org       # the dashboard's pre-start update (npm)
+          - plugins.gradle.org
+          - plugins-artifacts.gradle.org
+          - ports.ubuntu.com
+          - archive.ubuntu.com
+          - security.ubuntu.com
+          - download.docker.com
+
+  - type: com.docker.sandbox/lifecycle@1
+    config:
+      # No model-list hook on purpose: aisbx writes the list before each session.
+      install:
+        - command: ["sh", "/usr/local/lib/aisbx/pi/update.sh", "create"]
+          user: agent
+          description: Update Pi to the current release
+
+  - type: com.docker.sandbox/agent-context@1
+    config:
+      filename: AGENTS.md

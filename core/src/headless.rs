@@ -37,6 +37,7 @@ HEADLESS USE — the same kits and names as the dashboard, for scripts:
         --token NAME           the named setup token, for --backend claude-token
         --litellm NAME         the LiteLLM connection, for the LiteLLM backends (default: the
                                only one; with several, required — never the dashboard's last)
+        --local NAME           the local engine, for the *-local backends (the same rule)
         --clone                clone mode: the agent works on its own clone, your repo is read-only
         --skills MODE          off | readonly | readwrite (default: the host's skills.defaultMode)
         --deny-network HOST    keep this sandbox off a host (repeatable; deny beats every allow)
@@ -88,6 +89,18 @@ HEADLESS USE — the same kits and names as the dashboard, for scripts:
     aisbx litellm rm NAME [--force]
         Remove a connection and its key; refused (exit 2) while a sandbox uses it, unless --force.
 
+    aisbx local discover [--json]  the inference engines answering on this computer: the ports
+                                   engine processes name, and 8080, 11434, 1234, 8000, 11234
+    aisbx local add [NAME] [--port N] [--key-stdin] [--replace]
+        Add the engine found on port N (without --port: the only one found that no engine
+        connection is on yet) and print its name. The key: --key-stdin reads it from stdin,
+        else the one the engine's process was started with (--api-key, --api-key-file), if
+        any; sbx stores it for localhost. Its model list is read then.
+    aisbx local ls [--json]        the local engines: name, URL, engine, models, key stored
+    aisbx local fetch NAME [--key-stdin]
+        Read the engine's model list now, on the host (no sandbox).
+    aisbx local rm NAME [--force]  as litellm rm
+
     aisbx folders ls [--json]      the host folders every sandbox mounts beside its workspace
     aisbx folders add DIR [--write] [--purpose TEXT]
         Add a folder, or change one listed: read-only unless --write. The purpose goes into the
@@ -137,8 +150,41 @@ HEADLESS USE — the same kits and names as the dashboard, for scripts:
 pub fn is_subcommand(arg: &str) -> bool {
     matches!(
         arg,
-        "up" | "run" | "status" | "stop" | "rm" | "litellm" | "folders" | "skill-repo" | "skill"
+        "up" | "run"
+            | "status"
+            | "stop"
+            | "rm"
+            | "litellm"
+            | "local"
+            | "folders"
+            | "skill-repo"
+            | "skill"
     )
+}
+
+/// The command lines core's own jobs run as this very binary ([`job_argv`]), by their first
+/// words. `aisbx` takes every subcommand; `aisbx-ui` hands only these to [`exit`].
+pub const JOB_COMMANDS: [&[&str]; 2] = [&["skill"], &["local", "fetch"]];
+
+/// Whether `args` start with one of [`JOB_COMMANDS`].
+pub fn is_job_command<S: AsRef<str>>(args: &[S]) -> bool {
+    JOB_COMMANDS.iter().any(|words| {
+        args.len() >= words.len() && words.iter().zip(args).all(|(w, a)| a.as_ref() == *w)
+    })
+}
+
+/// A job step's command line that runs this very binary with `args`, one of [`JOB_COMMANDS`].
+pub fn job_argv(args: &[&str]) -> Vec<String> {
+    debug_assert!(
+        is_job_command(args),
+        "{args:?} is not in JOB_COMMANDS: aisbx-ui would take it for its FOLDER"
+    );
+    let exe = std::env::current_exe()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| "aisbx".to_string());
+    std::iter::once(exe)
+        .chain(args.iter().map(|a| a.to_string()))
+        .collect()
 }
 
 /// Run [`main`], then exit the process with its code.
@@ -159,6 +205,7 @@ pub fn main(args: &[String]) -> u8 {
         "stop" => stop(rest),
         "rm" => rm(rest),
         "litellm" => litellm_cmd(rest),
+        "local" => local_cmd(rest),
         "folders" => folders_cmd(&state::state_dir(), rest, &mut std::io::stdout()),
         "skill-repo" => skill_repo(rest),
         "skill" => skill(rest),
@@ -398,6 +445,7 @@ fn up(raw: &[String]) -> Outcome {
             "kit",
             "token",
             "litellm",
+            "local",
             "skills",
             "deny-network",
             "mount",
@@ -466,27 +514,31 @@ fn up(raw: &[String]) -> Outcome {
         }
         _ => {}
     }
-    let wanted_litellm = args.one("litellm")?;
-    let connection = match litellm::Agent::of_backend(&backend.kit.name) {
-        None if wanted_litellm.is_some() => {
-            return Err(Fail::usage(format!(
-                "--litellm is only for the LiteLLM backends, not {backend_name}"
-            )))
-        }
-        None => None,
-        Some(agent) => {
-            let all = litellm::load_all();
+    let kind = litellm::kind_of_backend(&backend.kit.name);
+    let wanted = connection_flag(
+        kind,
+        args.one("litellm")?,
+        args.one("local")?,
+        &backend_name,
+    )?;
+    let connection = match (litellm::Agent::of_backend(&backend.kit.name), kind) {
+        (Some(agent), Some(kind)) => {
+            let all: Vec<litellm::Connection> = (litellm::load_all().into_iter())
+                .filter(|c| c.kind() == kind)
+                .collect();
             // Read only to name it in the "pick one" message.
             let registry = (all.len() > 1).then(state::Registry::load);
             let last = registry.as_ref().and_then(|r| r.last_litellm());
-            let conn = pick_connection(&all, wanted_litellm.as_deref(), last)?;
+            let conn = pick_connection(&all, wanted.as_deref(), last, kind)?;
             eprintln!(
-                "aisbx: connection: {} ({})",
+                "aisbx: {}: {} ({})",
+                kind.noun(),
                 conn.name,
-                litellm::host(&conn.url)
+                litellm::place(&conn.url)
             );
             Some((conn, agent))
         }
+        _ => None,
     };
 
     let workspace = match args.positional.as_slice() {
@@ -772,7 +824,7 @@ fn warn_about_host(
 ) {
     match sbx::secrets() {
         Ok(secrets) => {
-            if let Some(conn) = connection {
+            if let Some(conn) = connection.filter(|c| !c.is_local()) {
                 if key_stored(Some(&secrets), conn) != Some(true) {
                     eprintln!(
                         "aisbx: warning: no key is stored for connection {} on {}, so the agent \
@@ -1552,7 +1604,9 @@ fn litellm_ls(raw: &[String]) -> Outcome {
     if !args.positional.is_empty() {
         return Err(Fail::usage("litellm ls takes no arguments"));
     }
-    let all = litellm::load_all();
+    let all: Vec<litellm::Connection> = (litellm::load_all().into_iter())
+        .filter(|c| !c.is_local())
+        .collect();
     // Nothing to look up without a connection, so an empty list needs no daemon.
     let secrets = match all.is_empty() {
         true => Ok(sbx::Secrets::default()),
@@ -1652,6 +1706,8 @@ struct ConnectionFile {
     name: String,
     url: String,
     #[serde(default)]
+    engine: Option<String>,
+    #[serde(default)]
     default_model: Option<serde_json::Value>,
     #[serde(default)]
     models: Option<serde_json::Value>,
@@ -1672,7 +1728,8 @@ fn parse_connection(text: &str) -> Result<(litellm::Connection, bool), Fail> {
     let models = file.has_models();
     let conn = litellm::Connection {
         name: file.name,
-        url: file.url,
+        url: litellm::normalize_url(&file.url),
+        engine: file.engine,
     };
     litellm::validate(&conn).map_err(|e| Fail::usage(format!("connection refused: {e:#}")))?;
     Ok((conn, models))
@@ -1742,6 +1799,11 @@ fn litellm_add(raw: &[String]) -> Outcome {
     };
     let text = std::fs::read_to_string(&file).map_err(|e| Fail::usage(format!("{file}: {e}")))?;
     let (conn, models) = parse_connection(&text)?;
+    if conn.is_local() {
+        return Err(Fail::usage(
+            "that is an engine on this computer — add it with `aisbx local add --port PORT`",
+        ));
+    }
     if models {
         eprintln!(
             "aisbx: note: the file's \"models\" and \"default_model\" are ignored — every \
@@ -1806,8 +1868,323 @@ fn litellm_fetch(raw: &[String]) -> Outcome {
     let name = args.name()?;
     let conn =
         litellm::load(&name).ok_or_else(|| Fail::usage(format!("no LiteLLM connection {name}")))?;
-    fetch_models(&conn)?;
+    match conn.is_local() {
+        true => fetch_local(&conn, None)?,
+        false => fetch_models(&conn)?,
+    }
     Ok(0)
+}
+
+// --- local engines ---------------------------------------------------------------------------
+
+fn local_cmd(raw: &[String]) -> Outcome {
+    let Some((sub, rest)) = raw.split_first() else {
+        return Err(Fail::usage("local needs discover, ls, add, fetch or rm"));
+    };
+    match sub.as_str() {
+        "discover" => local_discover(rest),
+        "ls" => local_ls(rest),
+        "add" => local_add(rest),
+        "fetch" => local_fetch(rest),
+        "rm" => litellm_rm(rest),
+        other => Err(Fail::usage(format!(
+            "unknown local command: {other} (discover, ls, add, fetch or rm)"
+        ))),
+    }
+}
+
+/// The local connection on `port`, among `all`.
+fn engine_on(all: &[litellm::Connection], port: u16) -> Option<&litellm::Connection> {
+    all.iter().find(|c| litellm::port(&c.url) == Some(port))
+}
+
+fn local_discover(raw: &[String]) -> Outcome {
+    let args = Args::parse(raw, &["json"], &[])?;
+    if !args.positional.is_empty() {
+        return Err(Fail::usage("local discover takes no arguments"));
+    }
+    let found = crate::local::discover();
+    let all = litellm::load_all();
+    print!("{}", discover_output(&found, &all, args.has("json")));
+    if found.is_empty() && !args.has("json") {
+        eprintln!(
+            "aisbx: no engine answers on this computer — start one, or name its port: aisbx \
+             local add --port PORT"
+        );
+    }
+    Ok(0)
+}
+
+/// `local discover`'s stdout: one line per engine found, or one JSON array. Never a key.
+fn discover_output(
+    found: &[crate::local::Found],
+    all: &[litellm::Connection],
+    json: bool,
+) -> String {
+    if json {
+        let rows: Vec<serde_json::Value> = (found.iter())
+            .map(|f| {
+                serde_json::json!({
+                    "engine": f.engine.slug(),
+                    "port": f.port,
+                    "url": f.url(),
+                    "models": f.models.iter().map(|m| m.id.clone()).collect::<Vec<_>>(),
+                    "context": f.models.iter().filter_map(|m| m.limits.context).min(),
+                    "anthropic_api": f.engine.anthropic(),
+                    "needs_key": f.needs_key,
+                    "key_found": f.key.is_some(),
+                    "connection": engine_on(all, f.port).map(|c| c.name.clone()),
+                })
+            })
+            .collect();
+        return format!(
+            "{}\n",
+            serde_json::to_string_pretty(&rows).unwrap_or_default()
+        );
+    }
+    let mut out = String::new();
+    for f in found {
+        let key = match (&f.key_source, f.needs_key) {
+            (Some(source), _) => format!("  key from {source}"),
+            (None, true) => "  wants a key".to_string(),
+            (None, false) => String::new(),
+        };
+        let added = match engine_on(all, f.port) {
+            Some(c) => format!("  (engine {})", c.name),
+            None => String::new(),
+        };
+        out.push_str(&format!("{}{key}{added}\n", f.summary()));
+    }
+    out
+}
+
+fn local_ls(raw: &[String]) -> Outcome {
+    let args = Args::parse(raw, &["json"], &[])?;
+    if !args.positional.is_empty() {
+        return Err(Fail::usage("local ls takes no arguments"));
+    }
+    let all: Vec<litellm::Connection> = (litellm::load_all().into_iter())
+        .filter(litellm::Connection::is_local)
+        .collect();
+    let secrets = match all.is_empty() {
+        true => Ok(sbx::Secrets::default()),
+        false => sbx::secrets(),
+    };
+    let (secrets, outcome) = match secrets {
+        Ok(s) => (Some(s), Ok(0)),
+        Err(e) => (
+            None,
+            Err(Fail::sandbox(format!(
+                "could not read the stored secrets ({e:#}) — key state unknown"
+            ))),
+        ),
+    };
+    print!(
+        "{}",
+        local_ls_output(&all, secrets.as_ref(), args.has("json"))
+    );
+    if all.is_empty() && !args.has("json") {
+        eprintln!("aisbx: no local engine — add one: aisbx local add");
+    }
+    outcome
+}
+
+/// `local ls`'s stdout: one line per engine, or one JSON array.
+fn local_ls_output(
+    all: &[litellm::Connection],
+    secrets: Option<&sbx::Secrets>,
+    json: bool,
+) -> String {
+    if json {
+        let rows: Vec<serde_json::Value> = (all.iter())
+            .map(|c| {
+                serde_json::json!({
+                    "name": c.name,
+                    "url": c.url,
+                    "engine": c.engine,
+                    "models": litellm::harvested_models(&c.name),
+                    "key_stored": key_stored(secrets, c),
+                })
+            })
+            .collect();
+        return format!(
+            "{}\n",
+            serde_json::to_string_pretty(&rows).unwrap_or_default()
+        );
+    }
+    let mut out = String::new();
+    for c in all {
+        let key = match key_stored(secrets, c) {
+            Some(true) => "key stored",
+            Some(false) => "no key",
+            None => "key ?",
+        };
+        let engine = (c.engine.as_deref())
+            .and_then(crate::local::Engine::parse)
+            .map_or("engine ?", crate::local::Engine::label);
+        out.push_str(&format!(
+            "{}  {}  {engine}  {} model(s)  {key}\n",
+            c.name,
+            c.url,
+            litellm::harvested_models(&c.name)
+        ));
+    }
+    out
+}
+
+/// Store a connection's key with sbx, on stdin: the half that must succeed before
+/// `connection.json` is written.
+fn store_key(conn: &litellm::Connection, key: &str) -> Result<(), Fail> {
+    let argv = sbx::secret_set_litellm_key_argv(
+        litellm::host(&conn.url),
+        &litellm::placeholder(&conn.name),
+    );
+    eprintln!("aisbx: {} (the key on stdin)", argv.join(" "));
+    match step_with_stdin(&argv, key) {
+        Ok(s) if s.success() => Ok(()),
+        Ok(s) => Err(Fail::sandbox(format!(
+            "sbx secret set-custom failed ({s}) — {} not written",
+            conn.name
+        ))),
+        Err(e) => Err(Fail::sandbox(format!("could not run sbx: {e}"))),
+    }
+}
+
+fn local_add(raw: &[String]) -> Outcome {
+    let args = Args::parse(raw, &["key-stdin", "replace"], &["port"])?;
+    let wanted = match args.positional.as_slice() {
+        [] => None,
+        [name] if litellm::valid_name(name) => Some(name.clone()),
+        [_] => return Err(Fail::usage("a name is 1–32 of a–z, 0–9 and “-”")),
+        _ => return Err(Fail::usage("one engine at a time")),
+    };
+    let port = match args.one("port")? {
+        Some(p) => Some(
+            p.parse::<u16>()
+                .ok()
+                .filter(|p| *p > 0)
+                .ok_or_else(|| Fail::usage(format!("--port {p:?}: a port of 1–65535")))?,
+        ),
+        None => None,
+    };
+    let all = litellm::load_all();
+    let found = crate::local::discover();
+    let found = pick_found(&found, &all, port, args.has("replace"))?;
+    let key = match args.has("key-stdin") {
+        true => Some(read_key(&mut std::io::stdin())?),
+        false => found.key.clone(),
+    };
+    if found.needs_key && key.is_none() {
+        return Err(Fail::usage(format!(
+            "the engine on localhost:{} wants a key that aisbx could not read — pass it with \
+             --key-stdin",
+            found.port
+        )));
+    }
+    let taken = |n: &str| all.iter().any(|c| c.name == n);
+    let name = wanted.unwrap_or_else(|| found.default_name(&taken));
+    let existed = litellm::exists(&name);
+    add_refusal(&name, existed, args.has("replace"))?;
+    if let Some(old) = all
+        .iter()
+        .find(|c| c.name == name)
+        .filter(|c| !c.is_local())
+    {
+        return Err(Fail::usage(format!(
+            "{} is a LiteLLM connection — pick another name",
+            old.name
+        )));
+    }
+    let mut conn = litellm::Connection::new(&name, found.url());
+    conn.engine = Some(found.engine.slug().to_string());
+    litellm::validate(&conn).map_err(|e| Fail::usage(format!("{e:#}")))?;
+    if let Some(key) = &key {
+        if let Some(source) = found.key_source.as_ref().filter(|_| !args.has("key-stdin")) {
+            eprintln!("aisbx: the key comes from {source}");
+        }
+        store_key(&conn, key)?;
+    }
+    litellm::save(&conn).map_err(|e| Fail::failed(format!("{e:#}")))?;
+    eprintln!(
+        "aisbx: engine {name} saved: {} on {}",
+        found.engine.label(),
+        litellm::place(&conn.url)
+    );
+    if let Err(e) = fetch_local(&conn, key.as_deref()) {
+        eprintln!(
+            "aisbx: {} — `aisbx local fetch {name}` tries again",
+            e.message
+        );
+    }
+    println!("{name}");
+    Ok(0)
+}
+
+/// The engine `local add` adds: the one on `port`, else the only one found that no engine is on
+/// yet (with `--replace`, also one already added).
+fn pick_found(
+    found: &[crate::local::Found],
+    all: &[litellm::Connection],
+    port: Option<u16>,
+    replace: bool,
+) -> Result<crate::local::Found, Fail> {
+    if let Some(port) = port {
+        if let Some(f) = found.iter().find(|f| f.port == port) {
+            return Ok(f.clone());
+        }
+        let probed = crate::local::discover_with(&[], &[port], &|_| None);
+        return probed.into_iter().next().ok_or_else(|| {
+            Fail::usage(format!(
+                "no engine answers OpenAI's /v1/models on localhost:{port}"
+            ))
+        });
+    }
+    let new: Vec<&crate::local::Found> = (found.iter())
+        .filter(|f| replace || engine_on(all, f.port).is_none())
+        .collect();
+    match new.as_slice() {
+        [only] => Ok((*only).clone()),
+        [] => Err(Fail::usage(
+            "no engine found that is not added yet — name its port: --port PORT",
+        )),
+        more => Err(Fail::usage(format!(
+            "{} engines found: {} — pick one: --port PORT",
+            more.len(),
+            more.iter()
+                .map(|f| format!("{} on {}", f.engine.label(), f.port))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))),
+    }
+}
+
+fn local_fetch(raw: &[String]) -> Outcome {
+    let args = Args::parse(raw, &["key-stdin"], &[])?;
+    let name = args.name()?;
+    let conn = (litellm::load(&name).filter(litellm::Connection::is_local))
+        .ok_or_else(|| Fail::usage(format!("no local engine {name}")))?;
+    let key = match args.has("key-stdin") {
+        true => Some(read_key(&mut std::io::stdin())?),
+        false => None,
+    };
+    fetch_local(&conn, key.as_deref())?;
+    Ok(0)
+}
+
+/// Read a local engine's model list on the host and keep it, as the dashboard's fetch does.
+fn fetch_local(conn: &litellm::Connection, key: Option<&str>) -> Result<(), Fail> {
+    let root = litellm::dir();
+    let now = state::now_epoch();
+    let _ = crate::model_fetch::mark_in(&root, &conn.name, now);
+    let models = crate::local::fetch(conn, key).map_err(|e| Fail::failed(format!("{e:#}")))?;
+    let count = models.len();
+    crate::local::store(&root, conn, models, now as i64)
+        .map_err(|e| Fail::failed(format!("{e:#}")))?;
+    match count {
+        1 => eprintln!("aisbx: engine {}: 1 model", conn.name),
+        n => eprintln!("aisbx: engine {}: {n} models", conn.name),
+    }
+    Ok(())
 }
 
 /// Fetch a connection's model list through its fetcher sandbox ([`crate::model_fetch`]) and keep
@@ -1856,7 +2233,7 @@ fn claude_pins_kit(
     if agent != litellm::Agent::Claude {
         return Ok(None);
     }
-    let offer = litellm::Offer::read(root, &conn.name, agent);
+    let offer = litellm::Offer::read(root, conn, agent);
     crate::models::ensure_kit(sandbox, &offer.slots, &offer.models)
         .map_err(|e| Fail::sandbox(format!("{e:#}")))
 }
@@ -1995,30 +2372,37 @@ fn pick_connection(
     all: &[litellm::Connection],
     wanted: Option<&str>,
     last: Option<&str>,
+    kind: litellm::Kind,
 ) -> Result<litellm::Connection, Fail> {
+    let (what, flag, add) = match kind {
+        litellm::Kind::Gateway => (
+            "LiteLLM connection",
+            "--litellm",
+            "aisbx litellm add <file.json> --key-stdin",
+        ),
+        litellm::Kind::Local => ("local engine", "--local", "aisbx local add"),
+    };
     let names: Vec<&str> = all.iter().map(|c| c.name.as_str()).collect();
     if let Some(name) = wanted {
         if !litellm::valid_name(name) {
-            return Err(Fail::usage(
-                "--litellm: a connection name is 1–32 of a–z, 0–9 and “-”",
-            ));
+            return Err(Fail::usage(format!(
+                "{flag}: a {} name is 1–32 of a–z, 0–9 and “-”",
+                kind.noun()
+            )));
         }
         if let Some(c) = all.iter().find(|c| c.name == name) {
             return Ok(c.clone());
         }
         let hint = match names.is_empty() {
-            true => "add one: aisbx litellm add <file.json> --key-stdin".to_string(),
+            true => format!("add one: {add}"),
             false => format!("one of: {}", names.join(", ")),
         };
-        return Err(Fail::usage(format!(
-            "no LiteLLM connection {name} — {hint}"
-        )));
+        return Err(Fail::usage(format!("no {what} {name} — {hint}")));
     }
     match all {
-        [] => Err(Fail::usage(
-            "no LiteLLM connection on this host — add one: aisbx litellm add <file.json> \
-             --key-stdin",
-        )),
+        [] => Err(Fail::usage(format!(
+            "no {what} on this host — add one: {add}"
+        ))),
         [only] => Ok(only.clone()),
         _ => {
             let last = last
@@ -2026,11 +2410,38 @@ fn pick_connection(
                 .map(|l| format!(" (last used: {l})"))
                 .unwrap_or_default();
             Err(Fail::usage(format!(
-                "{} LiteLLM connections: {}{last} — pick one: --litellm <name>",
+                "{} {what}s: {}{last} — pick one: {flag} <name>",
                 names.len(),
                 names.join(", ")
             )))
         }
+    }
+}
+
+/// The connection `up` was asked for: `--litellm` on a gateway backend, `--local` on a local
+/// one, neither on any other.
+fn connection_flag(
+    kind: Option<litellm::Kind>,
+    litellm_flag: Option<String>,
+    local_flag: Option<String>,
+    backend: &str,
+) -> Result<Option<String>, Fail> {
+    use litellm::Kind;
+    match (kind, litellm_flag, local_flag) {
+        (Some(Kind::Gateway), wanted, None) | (Some(Kind::Local), None, wanted) => Ok(wanted),
+        (None, None, None) => Ok(None),
+        (Some(Kind::Gateway), _, Some(_)) => Err(Fail::usage(format!(
+            "--local is only for the *-local backends, not {backend}"
+        ))),
+        (Some(Kind::Local), Some(_), _) => Err(Fail::usage(format!(
+            "{backend} runs on a local engine: pass --local NAME, not --litellm"
+        ))),
+        (None, Some(_), _) => Err(Fail::usage(format!(
+            "--litellm is only for the LiteLLM backends, not {backend}"
+        ))),
+        (None, None, Some(_)) => Err(Fail::usage(format!(
+            "--local is only for the *-local backends, not {backend}"
+        ))),
     }
 }
 
@@ -3563,6 +3974,7 @@ mod tests {
         litellm::Connection {
             name: name.into(),
             url: url.into(),
+            engine: None,
         }
     }
 
@@ -3603,10 +4015,7 @@ mod tests {
         let (conn, models) = parse_connection(good).expect("a good file parses");
         assert_eq!(
             conn,
-            litellm::Connection {
-                name: "acme".into(),
-                url: "https://litellm.example.com".into()
-            }
+            litellm::Connection::new("acme", "https://litellm.example.com")
         );
         assert!(!models);
         let old = r#"{"name": "acme", "url": "https://h", "default_model": "m-1",
@@ -3694,7 +4103,8 @@ mod tests {
     fn up_picks_the_named_or_the_only_connection_never_the_last_used() {
         let acme = connection("acme", "https://litellm.example.com");
         let beta = connection("beta", "https://gw.example.org");
-        let none = pick_connection(&[], None, Some("acme")).expect_err("none");
+        use litellm::Kind::Gateway as Gw;
+        let none = pick_connection(&[], None, Some("acme"), Gw).expect_err("none");
         assert_eq!(none.code, EXIT_USAGE);
         assert!(
             none.message.contains("aisbx litellm add"),
@@ -3702,11 +4112,11 @@ mod tests {
             none.message
         );
 
-        let one = pick_connection(std::slice::from_ref(&beta), None, Some("acme")).unwrap();
+        let one = pick_connection(std::slice::from_ref(&beta), None, Some("acme"), Gw).unwrap();
         assert_eq!(one.name, "beta");
 
         let two = [acme, beta.clone()];
-        let several = pick_connection(&two, None, Some("beta")).expect_err("several");
+        let several = pick_connection(&two, None, Some("beta"), Gw).expect_err("several");
         assert_eq!(several.code, EXIT_USAGE);
         for want in [
             "acme",
@@ -3721,19 +4131,155 @@ mod tests {
             );
         }
         // A remembered name that is gone is not named.
-        let stale = pick_connection(&two, None, Some("gone")).expect_err("several");
+        let stale = pick_connection(&two, None, Some("gone"), Gw).expect_err("several");
         assert!(!stale.message.contains("gone"), "{}", stale.message);
 
-        assert_eq!(pick_connection(&two, Some("beta"), None).unwrap(), beta);
-        let unknown = pick_connection(&two, Some("gamma"), Some("acme")).expect_err("unknown");
+        assert_eq!(pick_connection(&two, Some("beta"), None, Gw).unwrap(), beta);
+        let unknown = pick_connection(&two, Some("gamma"), Some("acme"), Gw).expect_err("unknown");
         assert_eq!(unknown.code, EXIT_USAGE);
         assert!(unknown.message.contains("gamma"), "{}", unknown.message);
         assert_eq!(
-            pick_connection(&two, Some("Bad_Name"), None)
+            pick_connection(&two, Some("Bad_Name"), None, Gw)
                 .unwrap_err()
                 .code,
             EXIT_USAGE
         );
+    }
+
+    #[test]
+    fn a_job_command_is_a_subcommand_named_by_its_first_words() {
+        for args in [
+            &["skill"][..],
+            &["skill", "sync", "box"],
+            &["local", "fetch", "llama-server"],
+            &["local", "fetch", "llama-server", "--key-stdin"],
+        ] {
+            assert!(is_job_command(args), "{args:?}");
+            assert!(is_subcommand(args[0]), "{args:?}");
+            assert_eq!(job_argv(args)[1..], *args);
+        }
+        for args in [
+            &[][..],
+            &["local"],
+            &["local", "ls"],
+            &["local", "--here"],
+            &["locals", "fetch"],
+            &["up", "x"],
+        ] {
+            assert!(!is_job_command(args), "{args:?}");
+        }
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "not in JOB_COMMANDS")]
+    fn a_job_runs_this_binary_only_with_a_job_command() {
+        job_argv(&["up", "x"]);
+    }
+
+    /// On a local backend, `up` picks among the local engines and names `--local` and
+    /// `aisbx local add`.
+    #[test]
+    fn up_picks_a_local_engine_by_its_own_flag() {
+        use litellm::Kind::Local;
+        let none = pick_connection(&[], None, None, Local).unwrap_err();
+        assert!(none.message.contains("no local engine"), "{}", none.message);
+        assert!(none.message.contains("aisbx local add"), "{}", none.message);
+        let k2 = connection("k2", "http://localhost:8095");
+        let ol = connection("ollama", "http://localhost:11434");
+        let several = pick_connection(&[k2.clone(), ol], None, None, Local).unwrap_err();
+        assert!(
+            several.message.contains("--local <name>"),
+            "{}",
+            several.message
+        );
+        assert_eq!(
+            pick_connection(std::slice::from_ref(&k2), None, None, Local).unwrap(),
+            k2
+        );
+
+        let flag = |kind, litellm: Option<&str>, local: Option<&str>| {
+            connection_flag(kind, litellm.map(Into::into), local.map(Into::into), "b")
+        };
+        use litellm::Kind::Gateway;
+        assert_eq!(
+            flag(Some(Local), None, Some("k2")).unwrap().as_deref(),
+            Some("k2")
+        );
+        assert_eq!(
+            flag(Some(Gateway), Some("acme"), None).unwrap().as_deref(),
+            Some("acme")
+        );
+        assert_eq!(flag(None, None, None).unwrap(), None);
+        let wrong = flag(Some(Local), Some("acme"), None).unwrap_err();
+        assert!(
+            wrong.message.contains("pass --local NAME"),
+            "{}",
+            wrong.message
+        );
+        assert!(flag(Some(Gateway), None, Some("k2")).is_err());
+        assert!(flag(None, None, Some("k2")).is_err());
+        assert!(flag(None, Some("acme"), None).is_err());
+    }
+
+    /// `local discover` prints what it found, and never a key; `local ls` names each engine.
+    #[test]
+    fn the_local_listings_say_what_answers_and_never_a_key() {
+        let found = crate::local::Found {
+            engine: crate::local::Engine::LlamaServer,
+            port: 8095,
+            key: Some("k-secret".into()),
+            key_source: Some("its key file /x/api-keys".into()),
+            needs_key: false,
+            models: vec![crate::models::Model {
+                id: "k2-horizon-7b".into(),
+                name: "k2-horizon-7b".into(),
+                limits: crate::models::Limits {
+                    context: Some(32768),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }],
+        };
+        let mut k2 = connection("k2", "http://localhost:8095");
+        k2.engine = Some("llama-server".into());
+        let text = discover_output(
+            std::slice::from_ref(&found),
+            std::slice::from_ref(&k2),
+            false,
+        );
+        assert_eq!(
+            text,
+            "llama-server on localhost:8095 · 1 model · 32k context  key from its key file \
+             /x/api-keys  (engine k2)\n"
+        );
+        let json = discover_output(std::slice::from_ref(&found), &[], true);
+        assert!(!json.contains("k-secret") && !text.contains("k-secret"));
+        let rows: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(rows[0]["url"], "http://localhost:8095");
+        assert_eq!(rows[0]["context"], 32768);
+        assert_eq!(rows[0]["key_found"], true);
+        assert_eq!(rows[0]["anthropic_api"], true);
+        assert_eq!(rows[0]["connection"], serde_json::Value::Null);
+        let ls = local_ls_output(
+            std::slice::from_ref(&k2),
+            Some(&sbx::Secrets::default()),
+            false,
+        );
+        assert_eq!(
+            ls,
+            "k2  http://localhost:8095  llama-server  0 model(s)  no key\n"
+        );
+        let picked = pick_found(std::slice::from_ref(&found), &[], None, false).unwrap();
+        assert_eq!(picked.port, 8095);
+        let taken = pick_found(
+            std::slice::from_ref(&found),
+            std::slice::from_ref(&k2),
+            None,
+            false,
+        );
+        assert!(taken.unwrap_err().message.contains("not added yet"));
+        assert!(pick_found(std::slice::from_ref(&found), &[k2], None, true).is_ok());
     }
 
     /// No connection exists under `cargo test`, so a LiteLLM backend is refused also without

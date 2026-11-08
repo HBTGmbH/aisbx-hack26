@@ -659,7 +659,7 @@ pub fn kit_hue(kit: &str) -> Hue {
 /// Backend badge family, keyed on the CLI the agent runs ([`crate::kits::agent_command`]).
 pub fn agent_hue(agent: &str) -> Hue {
     match crate::kits::agent_command(agent).unwrap_or(agent) {
-        "claude" => Hue::Magenta,
+        "claude" | crate::kits::CLAUDE_BARE => Hue::Magenta,
         "opencode" => Hue::Cyan,
         // Pi gets a colour none of the others has.
         "pi" => Hue::LightGreen,

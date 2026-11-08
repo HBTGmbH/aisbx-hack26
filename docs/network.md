@@ -57,6 +57,7 @@ A kit's allow-list can only open hosts, never close one. Under `deny-all`, these
 | `codex-openai` | `api.openai.com`, `openai.com`, `auth.openai.com`, `chatgpt.com`, `files.openai.com`, the npm registry (also at install) ([Codex](agents.md#codex)) |
 | `agy` | Google's sign-in, model, picture, plugin and updater hosts, `storage.googleapis.com`; **denies** `play.googleapis.com`, agy's log sink ([Antigravity](agents.md#antigravity-agy)) |
 | `pi-litellm` | the npm registry (updates; also at install); the gateway host ([Pi](agents.md#pi)) |
+| `pi-local`, `claude-bare-local`, `opencode-local`, `claude-local` | what `pi-litellm`, `claude-litellm`, `opencode-litellm` and `claude-litellm` allow; the engine's port on this computer instead of a gateway host ([Local inference engines](local.md#the-key-and-the-network)) |
 | `rust` | at install only: Ubuntu's mirrors and `download.docker.com` |
 | `headroom` | at install only: `pypi.org`, `files.pythonhosted.org` |
 | `ponytail` | at install only: `github.com` |
@@ -64,7 +65,8 @@ A kit's allow-list can only open hosts, never close one. Under `deny-all`, these
 | `remote-dev` | the editors' server download hosts, see [Editor and app integrations](sandboxes.md#editor-and-app-integrations-vs-code-intellij-claude-desktop) |
 | `jdk25`, `rtk`, `host-gradle`, `host-maven`, `host-npm`, `host-pip`, `host-skills`, `pkg-cache`, `statusline` | nothing |
 
-- A connection's kit allows exactly `<host>:443` of its URL.
+- A connection's kit allows exactly `<host>:443` of its URL. A local engine's kit allows exactly `localhost:<port>`,
+  the name sbx checks a sandbox's request to `host.docker.internal:<port>` against.
 - Every backend also allows `plugins.gradle.org`, `plugins-artifacts.gradle.org`, the Ubuntu apt mirrors and
   `download.docker.com`.
 - The image build downloads the tools (JDK, rtk, Rust, OpenCode, Pi, ponytail) on your host's Docker, outside the

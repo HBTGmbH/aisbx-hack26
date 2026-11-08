@@ -1,6 +1,7 @@
-//! LiteLLM connections: one gateway shared by any number of sandboxes. `connection.json` holds the
-//! name and URL; the key is a global sbx custom secret under [`placeholder`], never in a file.
-//! [`ensure_kit`] writes the generated mixin that wires a sandbox to a connection.
+//! Connections: one model endpoint shared by any number of sandboxes. A connection is a LiteLLM
+//! gateway or an inference engine on this computer ([`Kind`], [`crate::local`]). `connection.json`
+//! holds the name and URL; the key is a global sbx custom secret under [`placeholder`], never in a
+//! file. [`ensure_kit`] writes the generated mixin that wires a sandbox to a connection.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -10,8 +11,18 @@ use serde::{Deserialize, Serialize};
 
 use crate::state::state_dir;
 
-/// A generated connection kit's directory (and so its kit name): `litellm-<name>-<agent>`.
+/// A generated gateway kit's directory (and so its kit name): `litellm-<name>-<agent>`.
 pub const KIT_PREFIX: &str = "litellm-";
+
+/// A generated local engine kit's directory and kit name: `local-<name>-<agent>`.
+pub const LOCAL_KIT_PREFIX: &str = "local-";
+
+/// A local engine's URL up to its port: `http://localhost:<port>`.
+pub const LOCAL_URL: &str = "http://localhost:";
+
+/// The name a sandbox reaches the host by. The sbx proxy sends such a request to `localhost` and
+/// checks it against the policy as `localhost:<port>`.
+pub const SANDBOX_HOST: &str = "host.docker.internal";
 
 /// The custom-secret placeholder of a connection's key: `sbx-cs-aisbx-llm-<name>`.
 pub const PLACEHOLDER_PREFIX: &str = "sbx-cs-aisbx-llm-";
@@ -28,15 +39,80 @@ pub const PI_SETTINGS_TEMPLATE: &str = include_str!("../assets/pi-litellm-settin
 /// Pi's `models.json` schema (Pi 1.4.0 docs/models.md).
 const PI_MODELS_SCHEMA: &str = "https://pi.dev/schemas/models.schema.json";
 
+/// Pi's `compat` for a local engine: the `system` role, never `developer`, and no
+/// `reasoning_effort`, which a local chat template may not take.
+fn pi_local_compat() -> serde_json::Value {
+    serde_json::json!({"supportsDeveloperRole": false, "supportsReasoningEffort": false})
+}
+
 /// The longest connection name (`[a-z0-9][a-z0-9-]{0,31}`).
 const MAX_NAME: usize = 32;
 
-/// A LiteLLM gateway the user added. **No key, ever**: that is the custom secret. No models: the
-/// sandboxes read them from the gateway. Old files' `models` and `default_model` are ignored.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+/// A gateway or local engine the user added. **No key, ever**: that is the custom secret. No
+/// models: the host reads them from the endpoint. Old files' `models` and `default_model` are
+/// ignored.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
 pub struct Connection {
     pub name: String,
     pub url: String,
+    /// The engine a local connection runs on, as aisbx recognized it ([`crate::local::Engine`]):
+    /// for its label and for whether it serves Claude Code's API. `None` on a gateway.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine: Option<String>,
+}
+
+/// What a connection reaches.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind {
+    /// A LiteLLM gateway: `https://<host>`.
+    Gateway,
+    /// An inference engine on this computer: `http://localhost:<port>` ([`crate::local`]).
+    Local,
+}
+
+impl Kind {
+    /// The kind a URL names: [`LOCAL_URL`] is a local engine, anything else a gateway.
+    pub fn of(url: &str) -> Kind {
+        match url.starts_with(LOCAL_URL) {
+            true => Kind::Local,
+            false => Kind::Gateway,
+        }
+    }
+
+    /// What the dashboard calls a connection of this kind.
+    pub fn noun(self) -> &'static str {
+        match self {
+            Kind::Gateway => "connection",
+            Kind::Local => "engine",
+        }
+    }
+}
+
+impl Connection {
+    pub fn new(name: impl Into<String>, url: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            url: url.into(),
+            engine: None,
+        }
+    }
+
+    pub fn kind(&self) -> Kind {
+        Kind::of(&self.url)
+    }
+
+    pub fn is_local(&self) -> bool {
+        self.kind() == Kind::Local
+    }
+
+    /// The connection as the lists name it: `acme` for a gateway, `llama-server k2` for a local
+    /// engine aisbx recognized.
+    pub fn title(&self) -> String {
+        match self.engine.as_deref().and_then(crate::local::Engine::parse) {
+            Some(engine) => format!("{} {}", engine.label(), self.name),
+            None => self.name.clone(),
+        }
+    }
 }
 
 /// The agent a generated kit wires a connection into.
@@ -65,16 +141,27 @@ impl Agent {
         }
     }
 
-    /// The agent a LiteLLM backend kit runs, or `None` for any other backend — what makes a
-    /// backend need a connection.
+    /// The agent a gateway or local engine backend kit runs, or `None` for any other backend —
+    /// what makes a backend need a connection. `claude-bare-local` is Claude Code too: its image
+    /// starts it in bare mode, the connection's kit is the same.
     pub fn of_backend(kit_name: &str) -> Option<Agent> {
         match kit_name {
-            "claude-litellm" => Some(Agent::Claude),
-            "opencode-litellm" => Some(Agent::Opencode),
-            "pi-litellm" => Some(Agent::Pi),
+            "claude-litellm" | "claude-local" | "claude-bare-local" => Some(Agent::Claude),
+            "opencode-litellm" | "opencode-local" => Some(Agent::Opencode),
+            "pi-litellm" | "pi-local" => Some(Agent::Pi),
             _ => None,
         }
     }
+}
+
+/// The kind of connection a backend kit is built on: `*-local` on a local engine, the other
+/// connection backends on a gateway. `None` for a backend without a connection.
+pub fn kind_of_backend(kit_name: &str) -> Option<Kind> {
+    Agent::of_backend(kit_name)?;
+    Some(match kit_name.ends_with("-local") {
+        true => Kind::Local,
+        false => Kind::Gateway,
+    })
 }
 
 /// Where the connections live: `state_dir()/litellm/<name>/`.
@@ -155,9 +242,13 @@ pub fn valid_model_id(id: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || "._:/@+-".contains(c))
 }
 
-/// Check a URL against `https://<host>[:443][/<path>]`: https only, and port 443 only, because the
+/// Check a URL against `https://<host>[:443][/<path>]`, or a local engine's
+/// `http://localhost:<port>`: on a gateway https only, and port 443 only, because the
 /// custom-secret swap on another port is unmeasured.
 pub fn check_url(url: &str) -> Result<()> {
+    if let Some(port) = url.strip_prefix(LOCAL_URL) {
+        return local_port(port).map(drop);
+    }
     let rest = url
         .strip_prefix("https://")
         .ok_or_else(|| anyhow!("the URL must start with https://"))?;
@@ -188,6 +279,38 @@ pub fn check_url(url: &str) -> Result<()> {
     Ok(())
 }
 
+/// A local engine's port, as the URL writes it after [`LOCAL_URL`]: 1 to 65535, digits only, no
+/// path.
+fn local_port(text: &str) -> Result<u16> {
+    let digits = !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit());
+    (digits && !text.starts_with('0'))
+        .then(|| text.parse::<u16>().ok())
+        .flatten()
+        .ok_or_else(|| anyhow!("a local engine is http://localhost:PORT, with a port of 1–65535"))
+}
+
+/// The URL a typed address stands for. A port, `localhost:PORT`, `127.0.0.1:PORT`, or either with
+/// `http://`, a trailing `/` or `/v1`, is the local engine `http://localhost:PORT`. Anything else
+/// comes back trimmed, for [`check_url`] to judge.
+pub fn normalize_url(typed: &str) -> String {
+    let typed = typed.trim();
+    let rest = typed.strip_prefix("http://").unwrap_or(typed);
+    let rest = rest.trim_end_matches('/');
+    let rest = rest
+        .strip_suffix("/v1")
+        .unwrap_or(rest)
+        .trim_end_matches('/');
+    let port = match rest.split_once(':') {
+        Some(("localhost" | "127.0.0.1", port)) => Some(port),
+        None if rest == typed => Some(rest),
+        _ => None,
+    };
+    match port.map(local_port) {
+        Some(Ok(port)) => format!("{LOCAL_URL}{port}"),
+        _ => typed.to_string(),
+    }
+}
+
 /// Every check of a connection, before anything is written or sbx is called.
 pub fn validate(c: &Connection) -> Result<()> {
     if !valid_name(&c.name) {
@@ -195,14 +318,55 @@ pub fn validate(c: &Connection) -> Result<()> {
             "the connection name must be 1–32 of a–z, 0–9 and “-”, starting with a letter or digit"
         );
     }
-    check_url(&c.url)
+    check_url(&c.url)?;
+    match (&c.engine, c.kind()) {
+        (None, _) => Ok(()),
+        (Some(e), Kind::Local) if crate::local::Engine::parse(e).is_some() => Ok(()),
+        (Some(e), Kind::Local) => bail!("“{e}” is no engine aisbx knows"),
+        (Some(_), Kind::Gateway) => bail!("only a local connection names an engine"),
+    }
 }
 
-/// The host a URL names, without port or path. Only meaningful for a URL [`check_url`] accepted.
+/// The host a URL names, without port or path: for a local engine `localhost`, where its key
+/// goes. Only meaningful for a URL [`check_url`] accepted.
 pub fn host(url: &str) -> &str {
+    if Kind::of(url) == Kind::Local {
+        return "localhost";
+    }
     let rest = url.strip_prefix("https://").unwrap_or(url);
     let authority = rest.split('/').next().unwrap_or(rest);
     authority.split(':').next().unwrap_or(authority)
+}
+
+/// A local engine's port; `None` on a gateway.
+pub fn port(url: &str) -> Option<u16> {
+    url.strip_prefix(LOCAL_URL).and_then(|p| local_port(p).ok())
+}
+
+/// Where the lists show a connection: a gateway's host, a local engine's `localhost:PORT`.
+pub fn place(url: &str) -> String {
+    match port(url) {
+        Some(port) => format!("localhost:{port}"),
+        None => host(url).to_string(),
+    }
+}
+
+/// The base URL the agent in a sandbox uses: the gateway's URL, or
+/// `http://host.docker.internal:PORT` for a local engine.
+pub fn sandbox_url(c: &Connection) -> String {
+    match port(&c.url) {
+        Some(port) => format!("http://{SANDBOX_HOST}:{port}"),
+        None => base(&c.url).to_string(),
+    }
+}
+
+/// The runtime allow-list entry of a connection's kit: `<host>:443`, or `localhost:PORT` for a
+/// local engine, the name sbx checks a request to [`SANDBOX_HOST`] against.
+pub fn allow_entry(c: &Connection) -> String {
+    match port(&c.url) {
+        Some(port) => format!("localhost:{port}"),
+        None => format!("{}:443", host(&c.url)),
+    }
 }
 
 /// Does saving `new` over `old` move the connection to another host? Then the key must be given
@@ -261,22 +425,33 @@ pub fn name_of_placeholder(p: &str) -> Option<&str> {
         .filter(|name| valid_name(name))
 }
 
+/// The generated kit's prefix for a connection: [`KIT_PREFIX`] on a gateway, [`LOCAL_KIT_PREFIX`]
+/// on a local engine.
+fn kit_prefix(c: &Connection) -> &'static str {
+    match c.kind() {
+        Kind::Gateway => KIT_PREFIX,
+        Kind::Local => LOCAL_KIT_PREFIX,
+    }
+}
+
 /// The generated kit's directory name for a connection and agent.
-pub fn kit_name(name: &str, agent: Agent) -> String {
-    format!("{KIT_PREFIX}{name}-{}", agent.as_str())
+pub fn kit_name(c: &Connection, agent: Agent) -> String {
+    format!("{}{}-{}", kit_prefix(c), c.name, agent.as_str())
 }
 
 /// The connection and agent a kit directory name wires, or `None` for any other kit.
 pub fn of_kit(dir_name: &str) -> Option<(&str, Agent)> {
-    let rest = dir_name.strip_prefix(KIT_PREFIX)?;
+    let rest =
+        (dir_name.strip_prefix(KIT_PREFIX)).or_else(|| dir_name.strip_prefix(LOCAL_KIT_PREFIX))?;
     let (name, agent) = rest.rsplit_once('-')?;
     let agent = Agent::parse(agent)?;
     valid_name(name).then_some((name, agent))
 }
 
-/// The marker variable of a generated kit: `SBX_KIT_LITELLM_<NAME>_<AGENT>`.
-fn marker(name: &str, agent: Agent) -> String {
-    format!("SBX_KIT_LITELLM_{name}_{}", agent.as_str())
+/// The marker variable of a generated kit: `SBX_KIT_LITELLM_<NAME>_<AGENT>`, on a local engine
+/// `SBX_KIT_LOCAL_<NAME>_<AGENT>`.
+fn marker(c: &Connection, agent: Agent) -> String {
+    format!("SBX_KIT_{}{}_{}", kit_prefix(c), c.name, agent.as_str())
         .to_ascii_uppercase()
         .replace('-', "_")
 }
@@ -294,12 +469,13 @@ pub fn ensure_kit(c: &Connection, agent: Agent) -> Result<PathBuf> {
 
 pub fn ensure_kit_in(root: &Path, c: &Connection, agent: Agent) -> Result<PathBuf> {
     validate(c)?;
-    let kit = kit_dir_in(root, &c.name, agent);
+    let kit = kit_dir_in(root, c, agent);
     fs::create_dir_all(&kit).with_context(|| format!("creating {}", kit.display()))?;
     let files = agent_files_in(root, c, agent)?;
+    let context = Offer::read(root, c, agent).smallest_context();
     fs::write(
         crate::kits::descriptor_path(&kit),
-        descriptor(c, agent, &files)?,
+        descriptor(c, agent, &files, context)?,
     )
     .with_context(|| format!("writing the kit for connection “{}”", c.name))?;
     Ok(kit)
@@ -307,13 +483,23 @@ pub fn ensure_kit_in(root: &Path, c: &Connection, agent: Agent) -> Result<PathBu
 
 /// Where [`ensure_kit_in`] writes a connection's kit for `agent` — known before it is written, so
 /// a create can name it while the connection's key is still being stored.
-pub fn kit_dir_in(root: &Path, name: &str, agent: Agent) -> PathBuf {
-    root.join(name).join(kit_name(name, agent))
+pub fn kit_dir_in(root: &Path, c: &Connection, agent: Agent) -> PathBuf {
+    root.join(&c.name).join(kit_name(c, agent))
 }
 
-/// The provider id a connection's agent config names: `litellm-<name>`.
-pub fn provider_id(name: &str) -> String {
-    format!("{KIT_PREFIX}{name}")
+/// The provider id a connection's agent config names: `litellm-<name>`, on a local engine
+/// `local-<name>`.
+pub fn provider_id(c: &Connection) -> String {
+    format!("{}{}", kit_prefix(c), c.name)
+}
+
+/// The provider's name in OpenCode's and Pi's config: `LiteLLM acme`, `llama-server k2`.
+fn provider_name(c: &Connection) -> String {
+    match c.kind() {
+        Kind::Gateway => format!("LiteLLM {}", c.name),
+        Kind::Local if c.engine.is_some() => c.title(),
+        Kind::Local => format!("Local engine {}", c.name),
+    }
 }
 
 /// The models a connection offers its agent, and what the agent starts on: the fetched list
@@ -330,23 +516,56 @@ pub struct Offer {
 impl Offer {
     /// What `root` holds for a connection and agent: its fetched list ([`harvest_file`]) and its
     /// picks ([`crate::model_picks`]).
-    pub fn read(root: &Path, name: &str, agent: Agent) -> Self {
-        let (models, _) = crate::models::catalog_for(Some(&root.join(name).join("models.json")));
-        let picks = crate::model_picks::load_in(root, name, agent);
-        Self::of(&models, &picks, agent)
+    pub fn read(root: &Path, c: &Connection, agent: Agent) -> Self {
+        let (models, _) = crate::models::catalog_for(Some(&root.join(&c.name).join("models.json")));
+        let picks = crate::model_picks::load_in(root, &c.name, agent);
+        Self::of(c, &models, &picks, agent)
     }
 
-    /// The offer of a fetched list under a set of picks.
+    /// The offer of a fetched list under a set of picks. On a local engine an unpicked slot is
+    /// on the first offered model ([`engine_slots`]).
     pub fn of(
+        c: &Connection,
         models: &[crate::models::Model],
         picks: &crate::model_picks::Picks,
         agent: Agent,
     ) -> Self {
+        let offered: Vec<crate::models::Model> =
+            picks.enabled(models).into_iter().cloned().collect();
+        let slots = engine_slots(c, agent, &offered, &picks.live_slots(agent, models));
         Self {
-            models: picks.enabled(models).into_iter().cloned().collect(),
-            slots: picks.live_slots(agent, models),
+            models: offered,
+            slots,
             sonnet: newest_sonnet(models).map(str::to_string),
         }
+    }
+}
+
+/// `slots` with every slot of `agent` they leave open on the first of `offered`, on a local
+/// engine: it answers only to the names it serves, and Claude Code's own model names are none of
+/// them. A gateway's slots come back unchanged.
+pub fn engine_slots(
+    c: &Connection,
+    agent: Agent,
+    offered: &[crate::models::Model],
+    slots: &crate::models::Overrides,
+) -> crate::models::Overrides {
+    let mut out = slots.clone();
+    if let (true, Some(first)) = (c.is_local(), offered.first()) {
+        for slot in crate::models::Slot::of(agent) {
+            if out.get(*slot).is_none() {
+                out.set(*slot, Some(first.id.clone()));
+            }
+        }
+    }
+    out
+}
+
+impl Offer {
+    /// The smallest context window among the offered models that say theirs: the window Claude
+    /// Code is told on a local engine, which it cannot know for a model id of its own.
+    pub fn smallest_context(&self) -> Option<u64> {
+        self.models.iter().filter_map(|m| m.limits.context).min()
     }
 }
 
@@ -395,7 +614,7 @@ pub fn opencode_config(c: &Connection, offer: &Offer) -> Result<serde_json::Valu
     let obj = config
         .as_object_mut()
         .context("the OpenCode template is not an object")?;
-    let provider = provider_id(&c.name);
+    let provider = provider_id(c);
     let mut models = Map::new();
     for m in &offer.models {
         models.insert(m.id.clone(), opencode_model(m));
@@ -404,10 +623,10 @@ pub fn opencode_config(c: &Connection, offer: &Offer) -> Result<serde_json::Valu
     providers.insert(
         provider.clone(),
         json!({
-            "name": format!("LiteLLM {}", c.name),
+            "name": provider_name(c),
             "package": OPENCODE_PACKAGE,
             "settings": {
-                "baseURL": format!("{}/v1", base(&c.url)),
+                "baseURL": format!("{}/v1", sandbox_url(c)),
                 "apiKey": placeholder(&c.name),
             },
             "models": models,
@@ -577,17 +796,18 @@ pub fn pi_models(c: &Connection, offer: &Offer) -> serde_json::Value {
             Value::Object(entry)
         })
         .collect();
+    let mut provider = json!({
+        "name": provider_name(c),
+        "api": "openai-completions",
+        "baseUrl": format!("{}/v1", sandbox_url(c)),
+        "apiKey": placeholder(&c.name),
+        "models": models,
+    });
+    if c.is_local() {
+        provider["compat"] = pi_local_compat();
+    }
     let mut providers = Map::new();
-    providers.insert(
-        provider_id(&c.name),
-        json!({
-            "name": format!("LiteLLM {}", c.name),
-            "api": "openai-completions",
-            "baseUrl": format!("{}/v1", base(&c.url)),
-            "apiKey": placeholder(&c.name),
-            "models": models,
-        }),
-    );
+    providers.insert(provider_id(c), provider);
     json!({ "$schema": PI_MODELS_SCHEMA, "providers": Value::Object(providers) })
 }
 
@@ -599,7 +819,7 @@ pub fn pi_settings(c: &Connection, offer: &Offer) -> Result<serde_json::Value> {
     let obj = settings
         .as_object_mut()
         .context("the Pi settings template is not an object")?;
-    obj.insert("defaultProvider".into(), provider_id(&c.name).into());
+    obj.insert("defaultProvider".into(), provider_id(c).into());
     if let Some(id) = offer.slots.get(crate::models::Slot::PiDefault) {
         obj.insert("defaultModel".into(), id.into());
     }
@@ -679,7 +899,7 @@ fn whole_files(files: Vec<ConfigFile>) -> Vec<(String, serde_json::Value)> {
 /// [`config_files`] with the offer `root` holds for the connection, and the user's edited copies
 /// in place of the generated files ([`effective`]).
 pub fn config_files_in(root: &Path, c: &Connection, agent: Agent) -> Result<Vec<ConfigFile>> {
-    let files = config_files(c, agent, &Offer::read(root, &c.name, agent))?;
+    let files = config_files(c, agent, &Offer::read(root, c, agent))?;
     Ok(effective(root, &c.name, agent, files))
 }
 
@@ -845,16 +1065,26 @@ fn descriptor(
     c: &Connection,
     agent: Agent,
     agent_files: &[(String, serde_json::Value)],
+    context: Option<u64>,
 ) -> Result<String> {
-    let (name, url) = (c.name.as_str(), base(&c.url));
-    let host = host(url);
+    let (name, url) = (c.name.as_str(), sandbox_url(c));
+    let host = host(&c.url);
     let ph = placeholder(name);
-    let mut env = format!("  ENV {}=\"1\"\n", marker(name, agent));
+    let mut env = format!("  ENV {}=\"1\"\n", marker(c, agent));
     match agent {
         Agent::Claude => {
             env.push_str(&format!("  ENV ANTHROPIC_BASE_URL=\"{url}\"\n"));
             env.push_str(&format!("  ENV ANTHROPIC_AUTH_TOKEN=\"{ph}\"\n"));
             env.push_str(&format!("  ENV AISBX_LITELLM_URL=\"{url}\"\n"));
+            // Without it Claude Code runs a pinned engine id as `<id>[1m]` and ignores the window.
+            if c.is_local() {
+                env.push_str("  ENV CLAUDE_CODE_DISABLE_1M_CONTEXT=\"1\"\n");
+            }
+            if let (Kind::Local, Some(window)) = (c.kind(), context) {
+                env.push_str(&format!(
+                    "  ENV CLAUDE_CODE_MAX_CONTEXT_TOKENS=\"{window}\"\n"
+                ));
+            }
         }
         Agent::Opencode => {
             env.push_str(&format!(
@@ -881,19 +1111,39 @@ fn descriptor(
              \x20     files:\n{files}"
         );
     }
+    let allow = allow_entry(c);
+    let (about, display, description) = match c.kind() {
+        Kind::Gateway => (
+            format!(
+                "# Points a sandbox at the LiteLLM connection \"{name}\" ({url}). The bearer below is only a\n\
+                 # placeholder: the key stays in the host keychain and the sbx proxy swaps it in on requests\n\
+                 # to {host}. Storing the key again rotates it for every sandbox on this connection.\n"
+            ),
+            format!("LiteLLM connection: {name}"),
+            format!("LiteLLM gateway {host}, connection {name}."),
+        ),
+        Kind::Local => (
+            format!(
+                "# Points a sandbox at the local engine \"{name}\" ({}), which it reaches as {url}.\n\
+                 # The bearer below is only a placeholder: a key, if the engine has one, stays in the host\n\
+                 # keychain and the sbx proxy swaps it in on requests to {host}.\n",
+                c.url
+            ),
+            format!("Local engine: {name}"),
+            format!("Inference engine on this computer, {}, engine {name}.", place(&c.url)),
+        ),
+    };
     Ok(format!(
         "# syntax=docker/sandbox-kit:3\n\
          # Generated by aisbx — do not edit; rewritten whenever a sandbox is built on this connection.\n\
          #\n\
-         # Points a sandbox at the LiteLLM connection \"{name}\" ({url}). The bearer below is only a\n\
-         # placeholder: the key stays in the host keychain and the sbx proxy swaps it in on requests\n\
-         # to {host}. Storing the key again rotates it for every sandbox on this connection.\n\
+         {about}\
          #\n\
          #   sbx secret set-custom --host {host} --placeholder {ph}\n\
          schemaVersion: \"3\"\n\
          kind: mixin\n\
-         displayName: \"LiteLLM connection: {name}\"\n\
-         description: \"LiteLLM gateway {host}, connection {name}.\"\n\
+         displayName: \"{display}\"\n\
+         description: \"{description}\"\n\
          \n\
          build: |\n\
          \x20 FROM scratch\n\
@@ -904,7 +1154,7 @@ fn descriptor(
          \x20   config:\n\
          \x20     runtime:\n\
          \x20       allow:\n\
-         \x20         - \"{host}:443\"\n\
+         \x20         - \"{allow}\"\n\
          {files}"
     ))
 }
@@ -953,6 +1203,7 @@ mod tests {
         Connection {
             name: name.into(),
             url: url.into(),
+            engine: None,
         }
     }
 
@@ -1024,7 +1275,16 @@ mod tests {
 
     #[test]
     fn a_kit_name_carries_connection_and_agent() {
-        assert_eq!(kit_name("acme", Agent::Claude), "litellm-acme-claude");
+        assert_eq!(
+            kit_name(&conn("acme", "https://h"), Agent::Claude),
+            "litellm-acme-claude"
+        );
+        let k2 = conn("k2", "http://localhost:8095");
+        assert_eq!(kit_name(&k2, Agent::Pi), "local-k2-pi");
+        assert_eq!(of_kit("local-k2-pi"), Some(("k2", Agent::Pi)));
+        assert_eq!(of_kit("local-my-gw-claude"), Some(("my-gw", Agent::Claude)));
+        assert_eq!(of_kit("pi-local"), None);
+        assert_eq!(marker(&k2, Agent::Claude), "SBX_KIT_LOCAL_K2_CLAUDE");
         assert_eq!(of_kit("litellm-acme-claude"), Some(("acme", Agent::Claude)));
         assert_eq!(
             of_kit("litellm-my-gw-opencode"),
@@ -1036,7 +1296,7 @@ mod tests {
         assert_eq!(of_kit("claude-litellm"), None);
         assert_eq!(of_kit("token-acme"), None);
         assert_eq!(
-            marker("my-gw", Agent::Opencode),
+            marker(&conn("my-gw", "https://h"), Agent::Opencode),
             "SBX_KIT_LITELLM_MY_GW_OPENCODE"
         );
         assert_eq!(Agent::of_backend("claude-litellm"), Some(Agent::Claude));
@@ -1051,7 +1311,7 @@ mod tests {
     /// capabilities by type.
     fn parsed(c: &Connection, agent: Agent) -> (String, yaml_rust2::Yaml) {
         let files = agent_files(c, agent, &offer()).unwrap();
-        let text = descriptor(c, agent, &files).unwrap();
+        let text = descriptor(c, agent, &files, offer().smallest_context()).unwrap();
         let doc = crate::kits::load_descriptor(&text).unwrap_or_else(|e| panic!("{e}\n{text}"));
         (text, doc)
     }
@@ -1667,6 +1927,257 @@ mod tests {
 
     fn conn_of(name: &str, url: &str) -> Connection {
         conn(name, url)
+    }
+
+    /// A local engine is `http://localhost:PORT`: a port, `localhost:PORT` and `127.0.0.1:PORT`
+    /// are typed forms of it; another http host, a path or a bad port is refused.
+    #[test]
+    fn a_local_engine_is_a_port_on_localhost() {
+        for (typed, url) in [
+            ("8095", "http://localhost:8095"),
+            (" localhost:8095 ", "http://localhost:8095"),
+            ("127.0.0.1:11434", "http://localhost:11434"),
+            ("http://127.0.0.1:1234/v1", "http://localhost:1234"),
+            ("http://localhost:8080/", "http://localhost:8080"),
+            ("https://litellm.example.com", "https://litellm.example.com"),
+            ("acme", "acme"),
+            ("localhost:0", "localhost:0"),
+            ("localhost:70000", "localhost:70000"),
+        ] {
+            assert_eq!(normalize_url(typed), url, "{typed:?}");
+        }
+        for good in ["http://localhost:8095", "http://localhost:1"] {
+            assert!(check_url(good).is_ok(), "{good}");
+            assert_eq!(Kind::of(good), Kind::Local);
+        }
+        for bad in [
+            "http://localhost:",
+            "http://localhost:0",
+            "http://localhost:08095",
+            "http://localhost:65536",
+            "http://localhost:8095/v1",
+            "http://localhost",
+            "http://192.168.1.5:8000",
+            "http://127.0.0.1:8095",
+        ] {
+            assert!(check_url(bad).is_err(), "{bad} must be refused");
+        }
+        let k2 = conn("k2", "http://localhost:8095");
+        assert!(k2.is_local() && !conn("acme", "https://h").is_local());
+        assert_eq!(host(&k2.url), "localhost");
+        assert_eq!(port(&k2.url), Some(8095));
+        assert_eq!(port("https://h:443"), None);
+        assert_eq!(place(&k2.url), "localhost:8095");
+        assert_eq!(
+            place("https://litellm.example.com/x"),
+            "litellm.example.com"
+        );
+        assert_eq!(sandbox_url(&k2), "http://host.docker.internal:8095");
+        assert_eq!(allow_entry(&k2), "localhost:8095");
+        assert_eq!(allow_entry(&conn("acme", "https://h/")), "h:443");
+        assert!(
+            !moves_host(&k2, &conn("k2", "http://localhost:8096")),
+            "a port is no host"
+        );
+        assert!(moves_host(&k2, &conn("k2", "https://h")));
+        assert_eq!(Kind::Local.noun(), "engine");
+    }
+
+    /// Only a local connection names an engine, and only one aisbx knows; the title says it.
+    #[test]
+    fn an_engine_is_named_only_on_a_local_connection() {
+        let mut k2 = conn("k2", "http://localhost:8095");
+        assert_eq!(k2.title(), "k2");
+        k2.engine = Some("llama-server".into());
+        assert!(validate(&k2).is_ok());
+        assert_eq!(k2.title(), "llama-server k2");
+        k2.engine = Some("gpt-9".into());
+        assert!(validate(&k2).is_err());
+        let mut acme = conn("acme", "https://h");
+        acme.engine = Some("ollama".into());
+        assert!(validate(&acme).is_err());
+        let root = scratch("engine");
+        let mut saved = conn("k2", "http://localhost:8095");
+        saved.engine = Some("ollama".into());
+        save_in(&root, &saved).unwrap();
+        assert_eq!(load_in(&root, "k2"), Some(saved));
+        save_in(&root, &conn("acme", "https://h")).unwrap();
+        let gateway = fs::read_to_string(root.join("acme/connection.json")).unwrap();
+        assert!(!gateway.contains("engine"), "{gateway}");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// The backends a connection is for: the `*-local` ones on an engine, the LiteLLM ones on a
+    /// gateway.
+    #[test]
+    fn a_backend_names_the_kind_of_its_connection() {
+        assert_eq!(kind_of_backend("pi-local"), Some(Kind::Local));
+        assert_eq!(kind_of_backend("claude-bare-local"), Some(Kind::Local));
+        assert_eq!(kind_of_backend("claude-litellm"), Some(Kind::Gateway));
+        assert_eq!(kind_of_backend("claude-anthropic"), None);
+        assert_eq!(Agent::of_backend("claude-bare-local"), Some(Agent::Claude));
+        assert_eq!(Agent::of_backend("opencode-local"), Some(Agent::Opencode));
+        assert_eq!(Agent::of_backend("pi-local"), Some(Agent::Pi));
+    }
+
+    /// A local engine's kit: the sandbox reaches the engine as host.docker.internal on its port,
+    /// the policy allows `localhost:PORT` and nothing else, and Claude Code is told the window.
+    #[test]
+    fn a_local_engines_kit_reaches_the_host_on_its_port_only() {
+        let mut k2 = conn("k2", "http://localhost:8095");
+        k2.engine = Some("llama-server".into());
+        let (text, doc) = parsed(&k2, Agent::Claude);
+        let build = doc["build"].as_str().unwrap();
+        for want in [
+            "ENV SBX_KIT_LOCAL_K2_CLAUDE=\"1\"",
+            "ENV ANTHROPIC_BASE_URL=\"http://host.docker.internal:8095\"",
+            "ENV ANTHROPIC_AUTH_TOKEN=\"sbx-cs-aisbx-llm-k2\"",
+            "ENV CLAUDE_CODE_MAX_CONTEXT_TOKENS=\"200000\"",
+            "ENV CLAUDE_CODE_DISABLE_1M_CONTEXT=\"1\"",
+        ] {
+            assert!(build.contains(want), "{want:?} missing in\n{build}");
+        }
+        let net = capability(&doc, "network-policy@1");
+        assert_eq!(strings(&net.config["runtime"]["allow"]), ["localhost:8095"]);
+        assert_eq!(doc["displayName"].as_str(), Some("Local engine: k2"));
+        assert!(
+            text.contains("--host localhost --placeholder sbx-cs-aisbx-llm-k2"),
+            "{text}"
+        );
+        assert!(!text.contains("https://"), "{text}");
+        // A gateway's Claude Code is not told a window: its ids are Claude Code's own.
+        let (_, gw) = parsed(&conn("acme", "https://litellm.example.com"), Agent::Claude);
+        let gw = gw["build"].as_str().unwrap();
+        assert!(!gw.contains("CLAUDE_CODE_MAX_CONTEXT_TOKENS") && !gw.contains("1M_CONTEXT"));
+        // No window known: none told.
+        let files = agent_files(&k2, Agent::Claude, &Offer::default()).unwrap();
+        let bare = descriptor(&k2, Agent::Claude, &files, None).unwrap();
+        assert!(bare.contains("CLAUDE_CODE_DISABLE_1M_CONTEXT"), "{bare}");
+        assert!(!bare.contains("CLAUDE_CODE_MAX_CONTEXT_TOKENS"), "{bare}");
+
+        let pi = pi_models(&k2, &offer());
+        let p = &pi["providers"]["local-k2"];
+        assert_eq!(p["name"], "llama-server k2");
+        assert_eq!(p["baseUrl"], "http://host.docker.internal:8095/v1");
+        assert_eq!(p["apiKey"], "sbx-cs-aisbx-llm-k2");
+        assert_eq!(
+            p["compat"],
+            serde_json::json!({"supportsDeveloperRole": false, "supportsReasoningEffort": false})
+        );
+        assert!(
+            pi_models(&conn("acme", "https://h"), &offer())["providers"]["litellm-acme"]
+                .get("compat")
+                .is_none()
+        );
+        assert_eq!(
+            pi_settings(&k2, &offer()).unwrap()["defaultProvider"],
+            "local-k2"
+        );
+        let oc = opencode_config(&k2, &offer()).unwrap();
+        let p = &oc["providers"]["local-k2"];
+        assert_eq!(
+            p["settings"]["baseURL"],
+            "http://host.docker.internal:8095/v1"
+        );
+        assert_eq!(oc["model"], "local-k2/gpt-x");
+
+        let root = scratch("local-kit");
+        save_in(&root, &k2).unwrap();
+        let kit = ensure_kit_in(&root, &k2, Agent::Pi).unwrap();
+        assert!(kit.ends_with("k2/local-k2-pi"), "{}", kit.display());
+        let read = crate::kits::Kit::read(&kit).expect("the generated kit parses");
+        assert_eq!(read.name, "local-k2-pi");
+        assert_eq!(of_kit(&read.name), Some(("k2", Agent::Pi)));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// On a local engine an unpicked slot is on the first offered model: an engine answers only
+    /// to the names it serves. A gateway's slots stay the agent's own choice.
+    #[test]
+    fn an_engine_starts_on_its_first_model_unless_one_is_picked() {
+        use crate::models::{Model, Slot};
+        let models = vec![
+            Model {
+                id: "a".into(),
+                name: "a".into(),
+                ..Default::default()
+            },
+            Model {
+                id: "b".into(),
+                name: "b".into(),
+                ..Default::default()
+            },
+        ];
+        let mut picks = crate::model_picks::Picks::default();
+        picks.slots.set(Slot::Sonnet, Some("b".into()));
+        let k2 = conn("k2", "http://localhost:8095");
+        let offer = Offer::of(&k2, &models, &picks, Agent::Claude);
+        assert_eq!(offer.slots.get(Slot::Sonnet), Some("b"), "a pick stays");
+        assert_eq!(offer.slots.get(Slot::Opus), Some("a"));
+        assert_eq!(offer.slots.get(Slot::Haiku), Some("a"));
+        let gw = Offer::of(&conn("acme", "https://h"), &models, &picks, Agent::Claude);
+        assert_eq!(gw.slots.get(Slot::Opus), None);
+        picks.disabled.insert("a".into());
+        let off = Offer::of(&k2, &models, &picks, Agent::Pi);
+        assert_eq!(
+            off.slots.get(Slot::PiDefault),
+            Some("b"),
+            "the first offered one"
+        );
+        assert_eq!(
+            Offer::of(&k2, &[], &Default::default(), Agent::Pi).slots,
+            Default::default()
+        );
+    }
+
+    /// An engine's generated kits pass sbx's own validator, for every agent. Run it with the other
+    /// live checks: `cargo test -- --ignored --nocapture live`.
+    #[test]
+    #[ignore = "runs sbx; part of the live suite"]
+    fn live_sbx_validates_an_engines_kits() {
+        let root = scratch("live-local");
+        let mut k2 = conn("k2", "http://localhost:8095");
+        k2.engine = Some("llama-server".into());
+        save_in(&root, &k2).unwrap();
+        let listed = crate::models::Model {
+            id: "k2-horizon-7b".into(),
+            name: "k2-horizon-7b".into(),
+            limits: crate::models::Limits {
+                context: Some(32_768),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        crate::local::store(&root, &k2, vec![listed], 1_800_000_000).unwrap();
+        for agent in [Agent::Claude, Agent::Opencode, Agent::Pi] {
+            let dir = ensure_kit_in(&root, &k2, agent).unwrap();
+            let out = std::process::Command::new("sbx")
+                .args(["kit", "validate", "--json"])
+                .arg(&dir)
+                .output()
+                .expect("running `sbx kit validate`");
+            let text = format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            println!("sbx kit validate {} →\n{text}", dir.display());
+            assert!(out.status.success(), "{agent:?}: {text}");
+            let report: serde_json::Value = serde_json::from_slice(&out.stdout).expect("JSON");
+            assert_eq!(report["valid"], serde_json::json!(true), "{text}");
+            assert_eq!(report["warnings"], serde_json::json!([]), "{text}");
+        }
+        let claude = fs::read_to_string(crate::kits::descriptor_path(&kit_dir_in(
+            &root,
+            &k2,
+            Agent::Claude,
+        )))
+        .unwrap();
+        assert!(
+            claude.contains("CLAUDE_CODE_MAX_CONTEXT_TOKENS=\"32768\""),
+            "{claude}"
+        );
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

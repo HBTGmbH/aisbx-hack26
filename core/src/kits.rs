@@ -84,6 +84,8 @@ pub enum Provider {
     OpenAi,
     /// The user's own LiteLLM gateway, through a connection ([`crate::litellm`]).
     Litellm,
+    /// An inference engine on this computer, through a local connection ([`crate::local`]).
+    Local,
     /// A backend this build does not place with a provider.
     Other,
 }
@@ -96,6 +98,7 @@ impl Provider {
             Self::Google => "Google",
             Self::OpenAi => "OpenAI",
             Self::Litellm => "LiteLLM",
+            Self::Local => "Local engine",
             Self::Other => "Other",
         }
     }
@@ -129,6 +132,10 @@ impl Backend {
     pub fn type_label(&self) -> String {
         match self.kit.name.as_str() {
             "claude-litellm" => "Claude Code · LiteLLM".into(),
+            "claude-local" => "Claude Code · local".into(),
+            "claude-bare-local" => "Claude Code bare · local".into(),
+            "opencode-local" => "OpenCode · local".into(),
+            "pi-local" => "Pi · local".into(),
             // No suffix: the account is the interesting half here, and `Sandbox::type_label`
             // appends it (`Claude Code · /login`, `Claude Code · token private`).
             "claude-anthropic" | "claude-token" => "Claude Code".into(),
@@ -144,6 +151,9 @@ impl Backend {
     pub fn setup_hint(&self) -> &'static str {
         match self.kit.name.as_str() {
             "claude-litellm" | "opencode-litellm" | "pi-litellm" => "your LiteLLM gateway",
+            "claude-local" | "claude-bare-local" | "opencode-local" | "pi-local" => {
+                "an inference engine on this computer"
+            }
             "claude-anthropic" => "your Claude subscription",
             "claude-token" => "your Claude subscription, through a setup token",
             "codex-openai" => "your ChatGPT account or an OpenAI API key",
@@ -165,18 +175,28 @@ impl Backend {
     }
 
     /// Where this backend sits in the create form. The first one is the default for a new sandbox.
+    /// On a local engine the harnesses come by how little of the context their first request
+    /// takes: Pi, Claude Code bare, OpenCode, then Claude Code.
     fn rank(&self) -> u8 {
         match self.kit.name.as_str() {
             "claude-litellm" => 0,
             "opencode-litellm" => 1,
             "claude-anthropic" => 2,
+            "pi-local" => 4,
+            "claude-bare-local" => 5,
+            "opencode-local" => 6,
+            "claude-local" => 7,
             _ => 3,
         }
     }
 
-    /// Whether this backend's model aliases can be pinned to a gateway model ([`crate::models`]).
+    /// Whether this backend's model aliases can be pinned to a gateway or engine model
+    /// ([`crate::models`]).
     pub fn model_overrides(&self) -> bool {
-        self.kit.name == "claude-litellm"
+        matches!(
+            self.kit.name.as_str(),
+            "claude-litellm" | "claude-local" | "claude-bare-local"
+        )
     }
 
     /// The agent a LiteLLM backend wires a connection into — `Some` means every sandbox on this
@@ -198,8 +218,10 @@ impl Backend {
     /// Who serves this backend's model. Keyed by name, because no descriptor field states it: add
     /// each new backend here, or the wizard offers it under *Other*.
     pub fn provider(&self) -> Provider {
-        if self.litellm_agent().is_some() {
-            return Provider::Litellm;
+        match crate::litellm::kind_of_backend(&self.kit.name) {
+            Some(crate::litellm::Kind::Gateway) => return Provider::Litellm,
+            Some(crate::litellm::Kind::Local) => return Provider::Local,
+            None => {}
         }
         if self.account().is_some() {
             return Provider::Anthropic;
@@ -217,9 +239,49 @@ impl Backend {
     }
 
     /// The agent CLI this backend runs, which the create wizard's Harness step offers: the
-    /// binary's name ([`agent_command`]), else the agent's name.
+    /// binary's name ([`agent_command`]), else the agent's name. Claude Code in bare mode is a
+    /// harness of its own, [`CLAUDE_BARE`]: it reads no hooks, plugins or CLAUDE.md, so the
+    /// addons for Claude Code do nothing in it.
     pub fn harness(&self) -> &str {
-        agent_command(&self.agent).unwrap_or(&self.agent)
+        match self.kit.name.as_str() {
+            "claude-bare-local" => CLAUDE_BARE,
+            _ => agent_command(&self.agent).unwrap_or(&self.agent),
+        }
+    }
+}
+
+/// The harness of Claude Code in bare mode (`claude --bare`, `CLAUDE_CODE_SIMPLE=1`).
+pub const CLAUDE_BARE: &str = "claude-bare";
+
+impl Backend {
+    /// The local backend's note on the Harness step, in plain words: how much memory its harness
+    /// needs and how fast it answers (`docs/local.md`, *Which harness*). `None` off a local engine.
+    pub fn context_note(&self) -> Option<&'static str> {
+        let note = match self.kit.name.as_str() {
+            "pi-local" => "light: needs little memory, answers fast · recommended",
+            "claude-bare-local" => "light: needs little memory, answers fast · no CLAUDE.md",
+            "opencode-local" => "medium: needs more memory, answers slower",
+            "claude-local" => "heavy: needs a lot of memory, answers slowly",
+            _ => return None,
+        };
+        Some(note)
+    }
+
+    /// The smallest context window, in tokens, the local backend's harness works in: its first
+    /// request and room to work. `None` off a local engine.
+    pub fn context_needed(&self) -> Option<u64> {
+        match self.kit.name.as_str() {
+            "pi-local" | "claude-bare-local" => Some(8_192),
+            "opencode-local" => Some(16_384),
+            "claude-local" => Some(32_768),
+            _ => None,
+        }
+    }
+
+    /// Does the backend's harness need the engine's Anthropic API (`/v1/messages`)? Claude Code
+    /// speaks only that one.
+    pub fn needs_anthropic_api(&self) -> bool {
+        self.litellm_agent() == Some(crate::litellm::Agent::Claude)
     }
 }
 
@@ -236,11 +298,12 @@ enum Cli {
 
 fn cli(agent: &str) -> Option<Cli> {
     match agent {
-        "claude" | "claude-litellm" | "claude-anthropic" | "claude-token" => Some(Cli::Claude),
-        "opencode" | "opencode-litellm" => Some(Cli::OpenCode),
+        "claude" | "claude-litellm" | "claude-anthropic" | "claude-token" | "claude-local"
+        | "claude-bare-local" => Some(Cli::Claude),
+        "opencode" | "opencode-litellm" | "opencode-local" => Some(Cli::OpenCode),
         "codex" | "codex-openai" => Some(Cli::Codex),
         "agy" => Some(Cli::Agy),
-        "pi-litellm" => Some(Cli::Pi),
+        "pi-litellm" | "pi-local" => Some(Cli::Pi),
         _ => None,
     }
 }
@@ -966,7 +1029,7 @@ mod tests {
             assert_eq!(b.agent, b.kit.name);
         }
         assert!(catalog.all_addons().all(|a| !a.kit.is_workload));
-        assert_eq!(catalog.backends.len(), 7);
+        assert_eq!(catalog.backends.len(), 11);
     }
 
     /// Groups flatten into their members, a group's `optional` passing down, and the namespace
@@ -1225,6 +1288,166 @@ mod tests {
         assert_eq!(statusline.kit.harnesses, ["claude"]);
     }
 
+    /// A local kit is its gateway twin: the same files and the same code lines, apart from its
+    /// name, title and description, its marker and flavor and, for bare mode, its one switch.
+    /// The twins' own tests then hold for the local kits too.
+    #[test]
+    fn every_local_kit_is_its_twin() {
+        let catalog = Catalog::load().expect("kits/ must be discoverable from the crate");
+        let code = |path: &Path| -> Vec<String> {
+            fs::read_to_string(path)
+                .unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+                .lines()
+                .filter(|l| !l.trim_start().starts_with('#'))
+                .filter(|l| !l.starts_with("displayName: ") && !l.starts_with("description: "))
+                .map(str::to_string)
+                .collect()
+        };
+        let marker = |kit: &str| format!("SBX_KIT_{}", kit.to_uppercase().replace('-', "_"));
+        let files = |dir: &Path| -> Vec<(PathBuf, Vec<u8>)> {
+            let mut out = Vec::new();
+            let mut stack = vec![dir.join("files")];
+            while let Some(d) = stack.pop() {
+                for e in fs::read_dir(&d).unwrap().filter_map(|e| e.ok()) {
+                    let path = e.path();
+                    match path.is_dir() {
+                        true => stack.push(path),
+                        false => out.push((
+                            path.strip_prefix(dir).unwrap().to_path_buf(),
+                            fs::read(&path).unwrap(),
+                        )),
+                    }
+                }
+            }
+            out.sort();
+            out
+        };
+        for (local, twin) in [
+            ("claude-local", "claude-litellm"),
+            ("claude-bare-local", "claude-litellm"),
+            ("opencode-local", "opencode-litellm"),
+            ("pi-local", "pi-litellm"),
+        ] {
+            let (l, t) = (catalog.kits_dir.join(local), catalog.kits_dir.join(twin));
+            assert_eq!(
+                files(&l),
+                files(&t),
+                "{local}: files/ differs from {twin}'s"
+            );
+            assert_eq!(
+                code(&l.join(format!("{local}.yaml"))),
+                code(&t.join(format!("{twin}.yaml"))),
+                "{local}.yaml"
+            );
+            let expected: Vec<String> = (code(&t.join(format!("{twin}.dockerfile"))).into_iter())
+                .map(|line| {
+                    line.replace(
+                        &format!("ENV {}=1", marker(twin)),
+                        &format!("ENV {}=1", marker(local)),
+                    )
+                    .replace(
+                        &format!("flavor=\"{twin}\""),
+                        &format!("flavor=\"{local}\""),
+                    )
+                })
+                .collect();
+            let mut got = code(&l.join(format!("{local}.dockerfile")));
+            if local == "claude-bare-local" {
+                let at = got.iter().position(|x| x == "ENV CLAUDE_CODE_SIMPLE=1");
+                got.remove(at.expect("the bare switch"));
+                got.remove(at.unwrap());
+            }
+            assert_eq!(got, expected, "{local}.dockerfile");
+            let kit = &catalog.backend(local).expect("offered").kit;
+            assert!(kit.display_name.contains("local engine"), "{local}");
+            assert!(kit.description.contains("on this computer"), "{local}");
+        }
+        let bare: Vec<&str> = (catalog.backends.iter())
+            .filter(|b| {
+                fs::read_to_string(b.kit.dir.join(format!("{}.dockerfile", b.kit.name)))
+                    .is_ok_and(|d| d.lines().any(|l| l == "ENV CLAUDE_CODE_SIMPLE=1"))
+            })
+            .map(|b| b.kit.name.as_str())
+            .collect();
+        assert_eq!(
+            bare,
+            ["claude-bare-local"],
+            "only the bare backend starts Claude Code bare"
+        );
+    }
+
+    /// The local backends run the agents of their twins, offer each harness once, and say how much
+    /// of an engine's context their first request takes.
+    #[test]
+    fn the_local_backends_are_their_twins_agents_on_an_engine() {
+        let catalog = Catalog::load().expect("kits/ must be discoverable from the crate");
+        let b = |name: &str| catalog.backend(name).expect("shipped");
+        assert_eq!(b("claude-local").harness(), "claude");
+        assert_eq!(b("claude-bare-local").harness(), CLAUDE_BARE);
+        assert_eq!(
+            crate::create::harness_label(b("claude-bare-local")),
+            "Claude Code bare"
+        );
+        assert_eq!(
+            b("claude-bare-local").base_label(),
+            "Claude Code bare · Local engine"
+        );
+        assert_eq!(b("pi-local").base_label(), "Pi · Local engine");
+        assert_eq!(
+            crate::model::agent_hue(CLAUDE_BARE),
+            crate::model::agent_hue("claude-local"),
+            "bare mode is coloured as Claude Code"
+        );
+        assert_eq!(b("opencode-local").harness(), "opencode");
+        assert_eq!(b("pi-local").harness(), "pi");
+        for name in ["claude-local", "claude-bare-local"] {
+            assert_eq!(agent_command(name), Some("claude"), "{name}");
+            assert!(
+                b(name).needs_anthropic_api() && b(name).model_overrides(),
+                "{name}"
+            );
+            assert_eq!(agent_update(name), agent_update("claude-litellm"), "{name}");
+        }
+        assert_eq!(agent_update("pi-local"), agent_update("pi-litellm"));
+        assert_eq!(
+            agent_update("opencode-local"),
+            agent_update("opencode-litellm")
+        );
+        assert!(!b("pi-local").needs_anthropic_api() && !b("opencode-local").needs_anthropic_api());
+        let order: Vec<&str> = (catalog.backends.iter())
+            .filter(|b| b.provider() == Provider::Local)
+            .map(|b| b.kit.name.as_str())
+            .collect();
+        assert_eq!(
+            order,
+            [
+                "pi-local",
+                "claude-bare-local",
+                "opencode-local",
+                "claude-local"
+            ],
+            "the smallest first request first"
+        );
+        for name in order {
+            assert!(b(name).context_note().is_some() && b(name).context_needed().is_some());
+        }
+        assert_eq!(b("pi-litellm").context_note(), None);
+        let headless = |agent| {
+            headless_argv(
+                agent,
+                &HeadlessRun {
+                    model: None,
+                    effort: None,
+                    format: OutputFormat::Text,
+                    print_timeout: "0",
+                    extra: &[],
+                },
+            )
+        };
+        assert_eq!(headless("claude-bare-local"), headless("claude-litellm"));
+        assert_eq!(headless("pi-local"), headless("pi-litellm"));
+    }
+
     /// Every shipped backend has a provider, and within one provider each harness is one offered
     /// backend: the wizard's two first steps then name exactly one kit.
     #[test]
@@ -1238,6 +1461,14 @@ mod tests {
         assert_eq!(provider("claude-litellm"), Some(Provider::Litellm));
         assert_eq!(provider("opencode-litellm"), Some(Provider::Litellm));
         assert_eq!(provider("pi-litellm"), Some(Provider::Litellm));
+        for local in [
+            "claude-local",
+            "claude-bare-local",
+            "opencode-local",
+            "pi-local",
+        ] {
+            assert_eq!(provider(local), Some(Provider::Local), "{local}");
+        }
         let offered = catalog.offered_backends();
         for i in &offered {
             let b = &catalog.backends[*i];
@@ -1316,7 +1547,11 @@ mod tests {
                 "claude-anthropic",
                 "agy",
                 "codex-openai",
-                "pi-litellm"
+                "pi-litellm",
+                "pi-local",
+                "claude-bare-local",
+                "opencode-local",
+                "claude-local"
             ],
             "the first entry is the default for a new sandbox"
         );
@@ -1443,8 +1678,12 @@ mod tests {
             [
                 "claude-anthropic: claude/seed.sh",
                 "claude-anthropic: claude/update.sh",
+                "claude-bare-local: claude/seed.sh",
+                "claude-bare-local: claude/update.sh",
                 "claude-litellm: claude/seed.sh",
                 "claude-litellm: claude/update.sh",
+                "claude-local: claude/seed.sh",
+                "claude-local: claude/update.sh",
                 "claude-token: claude/seed.sh",
                 "claude-token: claude/update.sh",
                 "ponytail: ponytail/activate.sh",

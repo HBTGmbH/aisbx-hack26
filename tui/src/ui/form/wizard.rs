@@ -4,8 +4,8 @@
 
 use super::*;
 use crate::create::{
-    connection_hint, connection_label, harness_blurb, provider_blurb, ConnChoice, CreateStep, Help,
-    Review, WizardRow, LOGIN_TAG,
+    connection_hint, connection_label, provider_blurb, ConnChoice, CreateStep, Help, Review,
+    WizardRow, LOGIN_TAG,
 };
 
 pub(super) fn render(frame: &mut Frame, app: &App, area: Rect) -> Hits {
@@ -482,7 +482,7 @@ fn harness_step(
             theme::agent_color(&harness.agent),
             &harness.label,
             None,
-            harness_blurb(&harness.agent),
+            &form.harness_gloss(catalog, harness),
             out.width as usize,
         );
         let row = WizardRow::Agent(h);

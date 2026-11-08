@@ -6,7 +6,8 @@ Connect Claude Code, OpenCode and Pi to any LiteLLM gateway, and choose the mode
 
 The backends `claude-litellm`, `opencode-litellm` and `pi-litellm` use a *connection*: a name, an `https://` URL
 (port 443 only) and a key. Keep as many connections as you need. aisbx reads the model list of each gateway itself
-and keeps your model picks per connection. You set up everything in the dashboard.
+and keeps your model picks per connection. You set up everything in the dashboard. For a model on this computer, see
+[Local inference engines](local.md).
 
 ## Adding a connection
 

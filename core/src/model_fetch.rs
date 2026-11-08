@@ -182,6 +182,7 @@ mod tests {
         Connection {
             name: "acme".into(),
             url: "https://litellm.example.com/".into(),
+            engine: None,
         }
     }
 
@@ -290,6 +291,7 @@ mod tests {
         let probe = Connection {
             name: "probe-live".into(),
             url: "https://example.com".into(),
+            engine: None,
         };
         let kit = ensure_kit_in(&root, &probe).unwrap();
         let name = sandbox_name(&probe.name);

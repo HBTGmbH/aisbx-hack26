@@ -17,6 +17,7 @@ pub mod insight;
 pub mod job;
 pub mod kits;
 pub mod litellm;
+pub mod local;
 pub mod model;
 pub mod model_fetch;
 pub mod model_picks;

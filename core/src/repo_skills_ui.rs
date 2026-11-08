@@ -403,14 +403,7 @@ pub fn skip_words(why: &str) -> &'static str {
 
 /// `aisbx skill sync <sandbox>` — this very binary, the owner's full sync (not a start's).
 pub fn sync_argv(sandbox: &str) -> Vec<String> {
-    vec![
-        std::env::current_exe()
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_else(|_| "aisbx".to_string()),
-        "skill".into(),
-        "sync".into(),
-        sandbox.into(),
-    ]
+    crate::headless::job_argv(&["skill", "sync", sandbox])
 }
 
 #[cfg(test)]

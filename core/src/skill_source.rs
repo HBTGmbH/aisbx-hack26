@@ -56,15 +56,9 @@ impl SkillSource {
     pub fn install_argv(self, sandbox: &str) -> Vec<String> {
         match self {
             SkillSource::HostFolder => sbx::host_skills_argv(sandbox),
-            SkillSource::RepoCache => vec![
-                std::env::current_exe()
-                    .map(|p| p.to_string_lossy().into_owned())
-                    .unwrap_or_else(|_| "aisbx".to_string()),
-                "skill".into(),
-                "sync".into(),
-                "--start".into(),
-                sandbox.into(),
-            ],
+            SkillSource::RepoCache => {
+                crate::headless::job_argv(&["skill", "sync", "--start", sandbox])
+            }
         }
     }
 

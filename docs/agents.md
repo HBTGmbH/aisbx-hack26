@@ -87,23 +87,24 @@ list or pick reaches the sandbox at its next session.
 ## Pi
 
 `pi-litellm` runs [Pi](https://pi.dev), a minimal open-source (MIT) coding agent, on a
-[LiteLLM connection](litellm.md#litellm-connections). Pi has four tools (read, bash, edit, write), no sub-agents and
-no approval prompts.
+[LiteLLM connection](litellm.md#litellm-connections). `pi-local` runs the same Pi on a
+[local inference engine](local.md). Pi has four tools (read, bash, edit, write), no sub-agents and no approval
+prompts.
 
 ### Gateway only
 
-**Pi uses only the gateway of a LiteLLM connection.** The connection's generated kit (`litellm-<name>-pi`) writes two
-files:
+**Pi uses only the gateway of a LiteLLM connection, or the local engine.** The connection's generated kit
+(`litellm-<name>-pi`, on an engine `local-<name>-pi`) writes two files:
 
 | File | Holds |
 | --- | --- |
-| `~/.pi/agent/models.json` | the OpenAI-compatible provider `litellm-<name>` on `<URL>/v1`, with the connection's placeholder as its key |
+| `~/.pi/agent/models.json` | the OpenAI-compatible provider `litellm-<name>` (`local-<name>`) on `<URL>/v1`, with the connection's placeholder as its key |
 | `~/.pi/agent/settings.json` | the name of that provider; `defaultModel` where you picked one |
 
 - Use `/model` to switch the model. The list is the [connection's](litellm.md#the-gateways-model-list), minus the
   models you switched off.
 - Pi's `/login` and API-key providers do not work: the kit opens no model provider's host.
-- Not yet measured: that the proxy swaps Pi's placeholder for the real key.
+- On a local engine the proxy swaps Pi's placeholder for the engine's key. Not yet measured on a gateway.
 
 ### Install
 
@@ -113,7 +114,7 @@ The image installs the latest `@earendil-works/pi-coding-agent`. The install hoo
 ### No phoning home
 
 The image sets `PI_SKIP_VERSION_CHECK=1`, `PI_TELEMETRY=0` with `enableInstallTelemetry: false`, and `PI_OFFLINE=1`.
-Requests to your gateway still work. The image has `fd` and `rg`, so Pi downloads nothing from GitHub.
+Requests to your gateway or engine still work. The image has `fd` and `rg`, so Pi downloads nothing from GitHub.
 
 ### What Pi does not do
 

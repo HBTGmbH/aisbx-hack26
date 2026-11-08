@@ -89,6 +89,7 @@ Give the workspace folder as the last argument: `aisbx up --backend <kit> [optio
 | `--kit ADDON` | stacks an addon, by name (repeatable) |
 | `--token NAME` | the setup token, for `claude-token` |
 | `--litellm NAME` | the LiteLLM connection, for a LiteLLM backend (see below) |
+| `--local NAME` | the local engine, for a `*-local` backend (see below) |
 | `--clone` | clone mode: the agent works on its own clone, your repo is read-only |
 | `--skills MODE` | `off`, `readonly` or `readwrite`: how the sandbox mounts the [skills store](skills.md#shared-agent-skills); default the host's `skills.defaultMode` |
 | `--skill REPO[#SKILL]` | skills from a cached skill repo (repeatable; [Skills from skill repos](skills.md#skills-from-skill-repos-aisbx-skill)) |
@@ -126,6 +127,12 @@ and `pi-litellm`. `up` prints the connection it uses on stderr.
 
 Add a connection in the dashboard (**Secrets** › **New LiteLLM connection**), or with `aisbx litellm add`
 ([Other headless commands](#other-headless-commands)).
+
+#### `up --local <name>`
+
+`--local` picks the [local engine](local.md) on `pi-local`, `claude-bare-local`, `opencode-local` and
+`claude-local`, by the rules of `--litellm`: the only engine without it, exit 2 with several. `--litellm` on a local
+backend exits 2. Add an engine in the dashboard's create wizard, or with `aisbx local add`.
 
 #### `up --template REF` is refused
 
@@ -250,6 +257,7 @@ These commands manage what the dashboard manages on its own screens. Each page d
 | Command | Dashboard | Page |
 | --- | --- | --- |
 | `aisbx litellm ls \| add \| fetch \| rm` | **Secrets** (`S`), **Refresh models** (`L`) | [LiteLLM connections](litellm.md#adding-a-connection) |
+| `aisbx local discover \| add \| ls \| fetch \| rm` | the create wizard's Engine step, **Refresh models** (`L`) | [Local inference engines](local.md#in-scripts) |
 | `aisbx folders ls \| add \| rm` | **Host folders** (`F`) | [Host folders](sandboxes.md#host-folders-f-and-companionjson) |
 | `aisbx skill-repo add \| rm \| ls \| fetch \| auto-update` | **Skills** (`K`) | [Skill repositories](skills.md#skill-repositories-aisbx-skill-repo) |
 | `aisbx skill add \| rm \| ls \| sync` | **Repo skills** (`i`) | [Skills from skill repos](skills.md#skills-from-skill-repos-aisbx-skill) |

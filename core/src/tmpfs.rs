@@ -399,7 +399,9 @@ mod tests {
             with_volumes,
             [
                 "claude-anthropic",
+                "claude-bare-local",
                 "claude-litellm",
+                "claude-local",
                 "claude-token",
                 "host-npm",
                 "host-pip"

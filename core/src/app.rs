@@ -501,6 +501,10 @@ impl CreateForm {
                 picks_for: None,
                 picks_kept: Vec::new(),
                 connections: Vec::new(),
+                all: Vec::new(),
+                found: Vec::new(),
+                found_pick: None,
+                discovered: false,
                 litellm: None,
                 last_litellm: None,
                 new_conn: crate::create::NewConnection::default(),
@@ -565,22 +569,71 @@ impl CreateForm {
         self.connection.connections.iter().find(|c| c.name == name)
     }
 
+    /// The kind of connection the picked backend is built on: a gateway, a local engine, or
+    /// `None` for a backend without a connection.
+    pub fn conn_kind(&self, catalog: &Catalog) -> Option<crate::litellm::Kind> {
+        let backend = catalog.backends.get(self.harness.backend)?;
+        crate::litellm::kind_of_backend(&backend.kit.name)
+    }
+
+    /// Offer the connections of the picked backend's kind. When the provider changes, the list
+    /// changes with it: a connection of the other kind is no longer picked, the last used one of
+    /// this kind (else the first) is, and fields a found engine filled in are cleared.
+    pub fn sync_connections(&mut self, catalog: &Catalog) {
+        let kind = self.conn_kind(catalog);
+        let c = &mut self.connection;
+        let changed = c.new_conn.kind != kind;
+        c.connections = (c.all.iter())
+            .filter(|x| kind.is_some_and(|k| x.kind() == k))
+            .cloned()
+            .collect();
+        c.connections.sort_by(|a, b| a.name.cmp(&b.name));
+        if changed {
+            if c.found_pick.take().is_some() {
+                c.new_conn = crate::create::NewConnection::default();
+            }
+            c.new_conn.kind = kind;
+        }
+        let stale =
+            (c.litellm.as_ref()).is_some_and(|n| !c.connections.iter().any(|x| &x.name == n));
+        if (changed || stale) && c.found_pick.is_none() {
+            c.litellm = match crate::litellm::preselect(&c.connections, c.last_litellm.as_deref()) {
+                crate::litellm::LitellmPick::Existing(name) => Some(name),
+                crate::litellm::LitellmPick::New => None,
+            };
+        }
+    }
+
+    /// Take the engines found on this computer: those no local connection is on yet are offered
+    /// after the connections, and the first fills *new engine…* when nothing else is picked.
+    pub fn take_found(&mut self, catalog: &Catalog, found: Vec<crate::local::Found>) {
+        let saved: Vec<u16> = (self.connection.all.iter())
+            .filter_map(|c| crate::litellm::port(&c.url))
+            .collect();
+        self.connection.found = (found.into_iter())
+            .filter(|f| !saved.contains(&f.port))
+            .collect();
+        self.connection.found_pick = None;
+        self.connection.discovered = true;
+        self.sync_connections(catalog);
+        let c = &self.connection;
+        let typed =
+            !c.new_conn.name.value.trim().is_empty() || !c.new_conn.url.value.trim().is_empty();
+        if c.litellm.is_none() && !c.found.is_empty() && !typed {
+            self.fill_from_found(0);
+        }
+    }
+
     /// Step the Connection row to the next (`forward`) or previous choice — every connection,
-    /// then *new connection…* — wrapping.
+    /// every found engine, then *new connection…* — wrapping.
     pub fn cycle_litellm(&mut self, forward: bool) {
-        let all = &self.connection.connections;
-        let n = all.len() + 1;
-        let at = self
-            .connection
-            .litellm
-            .as_deref()
-            .and_then(|name| all.iter().position(|c| c.name == name))
-            .unwrap_or(all.len());
+        let n = self.connection.connections.len() + self.found_offered().len() + 1;
+        let at = self.chosen(CreateRow::LitellmConn).unwrap_or(n - 1);
         let next = match forward {
             true => (at + 1) % n,
             false => (at + n - 1) % n,
         };
-        self.connection.litellm = all.get(next).map(|c| c.name.clone());
+        self.pick_choice(CreateRow::LitellmConn, next);
     }
 
     /// Is a setup token being asked for — as opposed to the shared `/login`?
@@ -1092,7 +1145,7 @@ pub const MCP_SECRETS: &str = "MCP servers' secrets";
 
 /// The secrets screen's line over its rows: where the values are, and who sees them.
 pub const SECRETS_NOTE: &str =
-    "Stored on this computer and shown masked. A sandbox never sees them: sbx puts them into its      requests on the way out.";
+    "Stored on this computer and shown masked. A sandbox never sees them: sbx puts them into its requests on the way out.";
 
 /// A focusable line on the secrets screen — one stored credential, or the button that closes it.
 /// Derived from `sbx secret ls` and the kit catalog on every render, not held in the form.
@@ -2480,6 +2533,9 @@ pub struct PostJob {
     /// A model fetch succeeded: read the fetcher's list back onto the host, under the connection
     /// (`(fetcher, connection)`; see [`App::harvest_models`]).
     pub harvest_models: Option<(String, String)>,
+    /// A local engine's models were read on the host and kept: show the list now, under that
+    /// connection.
+    pub reload_models: Option<String>,
     /// Where a job that **succeeded** goes back to, once all that follows it is done: the create
     /// form that started a model fetch, on its Models step.
     pub resume: Option<Restore>,
@@ -2884,14 +2940,9 @@ impl App {
         }
         let mut form = self.new_create_form();
         // Read now, never cached: `connection.json` is the authority for which connections exist.
-        let connections = crate::litellm::load_all_in(&self.litellm_root);
-        let last = self.registry.last_litellm().map(str::to_string);
-        form.connection.litellm = match crate::litellm::preselect(&connections, last.as_deref()) {
-            crate::litellm::LitellmPick::Existing(name) => Some(name),
-            crate::litellm::LitellmPick::New => None,
-        };
-        form.connection.connections = connections;
-        form.connection.last_litellm = last;
+        form.connection.all = crate::litellm::load_all_in(&self.litellm_root);
+        form.connection.last_litellm = self.registry.last_litellm().map(str::to_string);
+        form.sync_connections(&self.catalog);
         // The cursor opens on the picked provider, which need not be the first.
         if let Some(p) = form.selected_provider_index(&self.catalog) {
             form.focus_wizard_row(&self.catalog, WizardRow::Provider(p));
@@ -2971,7 +3022,9 @@ impl App {
         else {
             return false;
         };
-        secrets.litellm_key_state(name, crate::litellm::host(&conn.url)) != Some(true)
+        // An engine on this computer may have no key at all.
+        !conn.is_local()
+            && secrets.litellm_key_state(name, crate::litellm::host(&conn.url)) != Some(true)
     }
 
     /// The named tokens stored on this host. Empty while `sbx secret ls` has not answered yet.
@@ -3186,9 +3239,11 @@ impl App {
             self.registry.set_last_litellm(&conn.name);
             let _ = self.registry.save();
             // The model fetch that follows a new key builds its fetcher from this kit.
-            if let Err(e) = crate::model_fetch::ensure_kit_in(&self.litellm_root, conn) {
-                self.set_error(format!("{e:#}"));
-                return;
+            if !conn.is_local() {
+                if let Err(e) = crate::model_fetch::ensure_kit_in(&self.litellm_root, conn) {
+                    self.set_error(format!("{e:#}"));
+                    return;
+                }
             }
         }
         if let Some(conn) = &post.rewrite_connection {
@@ -3239,6 +3294,14 @@ impl App {
                 }
                 Err(e) => self.set_error(e),
             }
+        }
+        if let Some(conn) = &post.reload_models {
+            let file = self.litellm_root.join(conn).join("models.json");
+            let count = crate::models::catalog_for(Some(&file)).0.len();
+            if self.models_conn.as_deref() == Some(conn.as_str()) {
+                self.load_models_for(Some(conn));
+            }
+            self.set_info(format!("{conn}: {count} models from the engine"));
         }
         if let Some(defaults) = &post.defaults {
             self.registry.set_create_defaults(defaults.clone());
@@ -4242,10 +4305,13 @@ impl App {
                     .as_ref()
                     .map_or(0, |c| self.connection_models(c).0.len());
                 let key = self.secrets.as_ref().and_then(|s| s.litellm_key(conn));
+                let place = read
+                    .as_ref()
+                    .map_or(String::new(), |c| crate::litellm::place(&c.url));
                 let note = match (key.is_some_and(|k| !k.targets_host(host)), models) {
-                    (true, _) => format!("{host} · key stored for another host"),
-                    (false, 0) => host.to_string(),
-                    (false, n) => format!("{host} · {n} model{}", if n == 1 { "" } else { "s" }),
+                    (true, _) => format!("{place} · key stored for another host"),
+                    (false, 0) => place,
+                    (false, n) => format!("{place} · {n} model{}", if n == 1 { "" } else { "s" }),
                 };
                 (
                     conn.clone(),
@@ -5092,28 +5158,31 @@ impl App {
         let mut failed = form.clone();
         failed.connection.new_conn.key = TextInput::default();
         let mut stored = form.clone();
-        stored.connection.new_conn = crate::create::NewConnection::default();
-        stored.connection.connections.push(conn.clone());
-        (stored.connection.connections).sort_by(|a, b| a.name.cmp(&b.name));
+        stored.connection.new_conn = crate::create::NewConnection {
+            kind: Some(conn.kind()),
+            ..Default::default()
+        };
+        stored.connection.all.push(conn.clone());
+        stored.connection.found_pick = None;
+        (stored.connection.found).retain(|f| Some(f.port) != crate::litellm::port(&conn.url));
         stored.connection.litellm = Some(conn.name.clone());
+        stored.sync_connections(&catalog);
         stored.wizard_set_step(&catalog, CreateStep::Harness);
         stored.wizard.auto_fetched = Some(conn.name.clone());
         // Named now, written once the key is stored (`App::start_next`).
         let kit = crate::model_fetch::kit_dir_in(&self.litellm_root, &conn.name);
-        let mut fetch = self.fetch_job_at(&conn, &kit);
+        let mut fetch = self.fetch_job_at(&conn, &kit, Some(&key));
         let back = Restore::Create(Box::new(stored));
         fetch.post.resume = Some(back.clone());
         fetch.post.restore = Some(back);
         self.mark_fetched(&conn.name);
-        let placeholder = crate::litellm::placeholder(&conn.name);
         self.screen = Screen::List;
         self.start_job(PendingJob {
-            title: format!("Storing the key of LiteLLM connection {}", conn.name),
-            steps: vec![Step::with_stdin(
-                format!("sbx secret set-custom ({placeholder})"),
-                sbx::secret_set_litellm_key_argv(crate::litellm::host(&conn.url), &placeholder),
-                key,
-            )],
+            title: match conn.is_local() {
+                true => format!("Adding the local engine {}", conn.name),
+                false => format!("Storing the key of LiteLLM connection {}", conn.name),
+            },
+            steps: key_steps(&conn, key),
             post: PostJob {
                 save_connection: Some((conn, Some(agent))),
                 then: Some(Box::new(fetch)),
@@ -5159,6 +5228,20 @@ impl App {
             return;
         }
         let catalog = Arc::clone(&self.catalog);
+        let Screen::Create(form) = &mut self.screen else {
+            return;
+        };
+        let before = form.connection.litellm.clone();
+        form.sync_connections(&catalog);
+        let local = form.conn_kind(&catalog) == Some(crate::litellm::Kind::Local);
+        if local && !form.connection.discovered {
+            form.take_found(&catalog, crate::local::discover());
+        }
+        let after = form.connection.litellm.clone();
+        if after != before {
+            form.connection.model_pick = None;
+            self.load_models_for(after.as_deref());
+        }
         let Screen::Create(form) = &mut self.screen else {
             return;
         };
@@ -5862,8 +5945,12 @@ impl App {
     }
 
     /// The job that fetches a connection's model list through its fetcher sandbox, creating the
-    /// fetcher first where it does not exist. `None` when its kit cannot be written.
+    /// fetcher first where it does not exist; on a local engine, the host asks it itself.
+    /// `None` when the fetcher's kit cannot be written.
     pub fn fetch_job(&mut self, conn: &crate::litellm::Connection) -> Option<PendingJob> {
+        if conn.is_local() {
+            return Some(self.fetch_job_at(conn, Path::new(""), None));
+        }
         let kit = match crate::model_fetch::ensure_kit_in(&self.litellm_root, conn) {
             Ok(kit) => kit,
             Err(e) => {
@@ -5871,11 +5958,29 @@ impl App {
                 return None;
             }
         };
-        Some(self.fetch_job_at(conn, &kit))
+        Some(self.fetch_job_at(conn, &kit, None))
     }
 
-    /// [`App::fetch_job`] with the fetcher's kit at `kit`, written or not yet.
-    fn fetch_job_at(&self, conn: &crate::litellm::Connection, kit: &Path) -> PendingJob {
+    /// [`App::fetch_job`] with the fetcher's kit at `kit`, written or not yet. A local engine
+    /// needs no fetcher: `key` is its key where the form holds one.
+    fn fetch_job_at(
+        &self,
+        conn: &crate::litellm::Connection,
+        kit: &Path,
+        key: Option<&str>,
+    ) -> PendingJob {
+        if conn.is_local() {
+            return PendingJob {
+                title: format!("Reading the models of {}", conn.name),
+                steps: vec![crate::local::fetch_step(conn, key)],
+                post: PostJob {
+                    reload_models: Some(conn.name.clone()),
+                    ..Default::default()
+                },
+                fallback: None,
+                fallback_hint: None,
+            };
+        }
         let fetcher = crate::model_fetch::sandbox_name(&conn.name);
         let exists = self.fetchers.contains(&fetcher);
         PendingJob {
@@ -5900,6 +6005,22 @@ impl App {
         self.start_job(job);
     }
 
+    /// Read a new local engine's model list on the host and keep it, before the sandbox on it is
+    /// built: a create straight from the form makes the engine's kit with no fetch job between.
+    /// A failure only says so; the next fetch tries again. Not under `cargo test`.
+    fn prefetch_local(&mut self, conn: &crate::litellm::Connection, key: &str) {
+        if cfg!(any(test, feature = "test-support")) {
+            return;
+        }
+        let now = crate::state::now_epoch();
+        self.mark_fetched(&conn.name);
+        let read = crate::local::fetch(conn, Some(key))
+            .and_then(|models| crate::local::store(&self.litellm_root, conn, models, now as i64));
+        if let Err(e) = read {
+            self.set_error(format!("{}: {e:#}", conn.name));
+        }
+    }
+
     /// Keep a connection's model picks for `agent` ([`crate::model_picks`]). Not under `cargo
     /// test`, whose connections folder every test shares.
     /// The config files the create form's answers make for its connection and agent, with the
@@ -5916,8 +6037,12 @@ impl App {
         };
         let agent = form.models_agent(&self.catalog)?;
         let conn = form.litellm_choice()?.clone();
-        let offer =
-            crate::litellm::Offer::of(&self.catalog.models, &form.picks(&self.catalog), agent);
+        let offer = crate::litellm::Offer::of(
+            &conn,
+            &self.catalog.models,
+            &form.picks(&self.catalog),
+            agent,
+        );
         let files = crate::litellm::config_files(&conn, agent, &offer).ok()?;
         Some((conn, agent, files))
     }
@@ -6080,8 +6205,19 @@ impl App {
                 continue;
             }
             let tx = self.fetch_tx.clone();
-            let fetcher = crate::model_fetch::sandbox_name(&conn.name);
             let name = conn.name.clone();
+            if conn.is_local() {
+                let label = conn.title();
+                std::thread::spawn(move || {
+                    let now = crate::state::now_epoch() as i64;
+                    let text = crate::local::fetch(&conn, None)
+                        .ok()
+                        .map(|models| crate::local::cache_text(&models, now));
+                    let _ = tx.send((name, label, text));
+                });
+                continue;
+            }
+            let fetcher = crate::model_fetch::sandbox_name(&conn.name);
             std::thread::spawn(move || {
                 let done = job.steps.iter().all(crate::job::run_quiet);
                 let text = done.then(|| sbx::read_models_cache(&fetcher)).flatten();
@@ -7954,14 +8090,9 @@ impl App {
         key: String,
         post: PostJob,
     ) -> PendingJob {
-        let placeholder = crate::litellm::placeholder(&conn.name);
         PendingJob {
             title,
-            steps: vec![Step::with_stdin(
-                format!("sbx secret set-custom ({placeholder})"),
-                sbx::secret_set_litellm_key_argv(crate::litellm::host(&conn.url), &placeholder),
-                key,
-            )],
+            steps: key_steps(conn, key),
             post,
             fallback: None,
             fallback_hint: None,
@@ -7983,6 +8114,9 @@ impl App {
                     name: TextInput::new(name.clone()),
                     url: TextInput::new(conn.url.clone()),
                     key: TextInput::default(),
+                    kind: Some(conn.kind()),
+                    engine: conn.engine.clone(),
+                    needs_key: false,
                 }
             }
         };
@@ -8296,11 +8430,14 @@ impl App {
                 let kit = crate::model_fetch::kit_dir_in(&self.litellm_root, &conn.name);
                 let post = PostJob {
                     save_connection: Some((conn.clone(), None)),
-                    then: Some(Box::new(self.fetch_job_at(&conn, &kit))),
+                    then: Some(Box::new(self.fetch_job_at(&conn, &kit, Some(&key)))),
                     restore: Some(Restore::Connection(Box::new(form.clone().without_key()))),
                     ..Default::default()
                 };
-                let title = format!("Storing the key of LiteLLM connection {}", conn.name);
+                let title = match conn.is_local() {
+                    true => format!("Adding the local engine {}", conn.name),
+                    false => format!("Storing the key of LiteLLM connection {}", conn.name),
+                };
                 return ConnPlan::Apply(Box::new(Self::litellm_key_job(title, &conn, key, post)));
             }
             ConnMode::Edit(name) => name.clone(),
@@ -8439,7 +8576,13 @@ impl App {
     /// Open `A` on a LiteLLM sandbox, on the connection it is on — or, when that one is gone, on
     /// the one the create form would offer.
     fn open_conn_switch(&mut self, sandbox: &str, current: Option<String>) {
-        let connections = crate::litellm::load_all_in(&self.litellm_root);
+        let kind = (self.sandboxes.iter().find(|s| s.name == sandbox))
+            .and_then(|s| s.backend.as_deref())
+            .and_then(crate::litellm::kind_of_backend);
+        let connections: Vec<crate::litellm::Connection> =
+            (crate::litellm::load_all_in(&self.litellm_root).into_iter())
+                .filter(|c| kind.is_none_or(|k| c.kind() == k))
+                .collect();
         let pick = match current
             .as_deref()
             .filter(|c| connections.iter().any(|x| x.name == *c))
@@ -8452,7 +8595,10 @@ impl App {
             current,
             connections,
             pick,
-            new_conn: crate::create::NewConnection::default(),
+            new_conn: crate::create::NewConnection {
+                kind,
+                ..Default::default()
+            },
             focus: 0,
         });
     }
@@ -8871,6 +9017,9 @@ impl App {
         if let Some((conn, agent, picks)) = &picks {
             self.save_picks(conn, *agent, picks);
         }
+        if let Some((conn, key)) = new_conn.as_ref().filter(|(c, _)| c.is_local()) {
+            self.prefetch_local(conn, key);
+        }
         let Some(kit_dirs) = self.kit_dirs(
             &name,
             &backend.kit.name,
@@ -8929,11 +9078,10 @@ impl App {
         let restore_after_key = match (&restore, &new_conn) {
             (Some(form), Some((conn, _))) => {
                 let mut form = form.clone();
-                form.connection.connections.push(conn.clone());
-                form.connection
-                    .connections
-                    .sort_by(|a, b| a.name.cmp(&b.name));
+                form.connection.all.push(conn.clone());
+                form.connection.found_pick = None;
                 form.connection.litellm = Some(conn.name.clone());
+                form.sync_connections(&catalog);
                 Some(Restore::Create(Box::new(form)))
             }
             _ => None,
@@ -8991,14 +9139,12 @@ impl App {
             return;
         };
         // The key first; `App::start_next` writes the file and kit, then starts the create.
-        let placeholder = crate::litellm::placeholder(&conn.name);
         self.start_job(PendingJob {
-            title: format!("Storing the key of LiteLLM connection {}", conn.name),
-            steps: vec![Step::with_stdin(
-                format!("sbx secret set-custom ({placeholder})"),
-                sbx::secret_set_litellm_key_argv(crate::litellm::host(&conn.url), &placeholder),
-                key,
-            )],
+            title: match conn.is_local() {
+                true => format!("Adding the local engine {}", conn.name),
+                false => format!("Storing the key of LiteLLM connection {}", conn.name),
+            },
+            steps: key_steps(&conn, key),
             post: PostJob {
                 save_connection: Some((conn, Some(agent))),
                 then: Some(Box::new(create)),
@@ -9171,11 +9317,7 @@ impl App {
                 pin_catalog = Some(self.connection_models(conn).0);
                 // A connection still being made is named here and written once its key is stored.
                 if !crate::litellm::exists_in(&self.litellm_root, &conn.name) {
-                    dirs.push(crate::litellm::kit_dir_in(
-                        &self.litellm_root,
-                        &conn.name,
-                        agent,
-                    ));
+                    dirs.push(crate::litellm::kit_dir_in(&self.litellm_root, conn, agent));
                 } else {
                     match crate::litellm::ensure_kit_in(&self.litellm_root, conn, agent) {
                         Ok(dir) => dirs.push(dir),
@@ -9202,6 +9344,24 @@ impl App {
                 }
             }
         }
+        let filled = match (litellm, pin_catalog.as_deref()) {
+            (Some(conn), Some(listed)) if conn.is_local() => {
+                let agent = crate::litellm::Agent::Claude;
+                let picks = crate::model_picks::load_in(&self.litellm_root, &conn.name, agent);
+                let offered: Vec<models::Model> =
+                    picks.enabled(listed).into_iter().cloned().collect();
+                let claude = self
+                    .catalog
+                    .backend(backend)
+                    .and_then(Backend::litellm_agent);
+                match claude == Some(agent) {
+                    true => crate::litellm::engine_slots(conn, agent, &offered, models),
+                    false => models.clone(),
+                }
+            }
+            _ => models.clone(),
+        };
+        let models = &filled;
         // No pins: remove a stale model kit, so the rebuild drops the variables. Only Claude
         // Code's slots ride the kit; the other agents' are in their config.
         if models.entries().any(|(slot, _)| slot.is_claude()) {
@@ -9955,6 +10115,20 @@ pub(crate) fn deny_host_ok(host: &str) -> bool {
 }
 
 /// Is this sandbox on that named token?
+/// The step that stores a connection's key with sbx, the key on stdin. None for a local engine
+/// given no key: it may have none.
+fn key_steps(conn: &crate::litellm::Connection, key: String) -> Vec<Step> {
+    if key.trim().is_empty() && conn.is_local() {
+        return Vec::new();
+    }
+    let placeholder = crate::litellm::placeholder(&conn.name);
+    vec![Step::with_stdin(
+        format!("sbx secret set-custom ({placeholder})"),
+        sbx::secret_set_litellm_key_argv(crate::litellm::host(&conn.url), &placeholder),
+        key,
+    )]
+}
+
 fn on_token(sb: &Sandbox, token: &str) -> bool {
     sb.auth
         .as_ref()
@@ -14212,6 +14386,329 @@ mod tests {
         assert!(form(&app).picks(&app.catalog).slots.is_empty());
     }
 
+    /// A local engine for tests: `k2`, llama-server on port 8095.
+    fn k2() -> crate::litellm::Connection {
+        let mut c = crate::testkit::connection("k2", "http://localhost:8095");
+        c.engine = Some("llama-server".into());
+        c
+    }
+
+    /// An engine found on `port`, with the key aisbx read from its setup.
+    fn found(engine: crate::local::Engine, port: u16, key: Option<&str>) -> crate::local::Found {
+        crate::local::Found {
+            engine,
+            port,
+            key: key.map(str::to_string),
+            key_source: key.map(|_| "its key file /x/api-keys".to_string()),
+            needs_key: false,
+            models: Vec::new(),
+        }
+    }
+
+    /// The local provider's Connection step offers the engines, then those found on this
+    /// computer that no engine is on yet, then *new engine…*; a gateway provider only gateways.
+    #[test]
+    fn the_engine_step_offers_the_engines_and_those_found() {
+        use crate::local::Engine;
+        let mut app = app_on(&[crate::testkit::acme(), k2()], Vec::new());
+        app.open_create();
+        wizard_for(&mut app, "pi-local", CreateStep::Connection);
+        let catalog = Arc::clone(&app.catalog);
+        let form = create_form(&mut app);
+        let names: Vec<&str> = (form.connection.connections.iter())
+            .map(|c| c.name.as_str())
+            .collect();
+        assert_eq!(names, ["k2"], "only the local engines");
+        assert!(form.connection.discovered, "looked for once");
+        assert_eq!(form.connection.litellm.as_deref(), Some("k2"));
+        form.take_found(
+            &catalog,
+            vec![
+                found(Engine::Ollama, 11434, None),
+                found(Engine::LlamaServer, 8095, Some("k-1")),
+            ],
+        );
+        assert_eq!(
+            form.choices(CreateRow::LitellmConn),
+            ["k2", "Ollama on localhost:11434 (found)", "new engine…"],
+            "the engine k2 is on is not offered again"
+        );
+        assert_eq!(form.chosen(CreateRow::LitellmConn), Some(0));
+        assert!(form.pick_choice(CreateRow::LitellmConn, 1));
+        assert_eq!(form.chosen(CreateRow::LitellmConn), Some(1));
+        let typed = &form.connection.new_conn;
+        assert_eq!(typed.name.value, "ollama");
+        assert_eq!(typed.url.value, "http://localhost:11434");
+        assert_eq!(typed.engine.as_deref(), Some("ollama"));
+        assert!(typed.key.value.is_empty());
+        assert_eq!(form.connection.litellm, None);
+        assert_eq!(
+            form.step_problem(CreateStep::Connection, &catalog),
+            None,
+            "no key needed"
+        );
+        assert!(form.pick_choice(CreateRow::LitellmConn, 2));
+        assert_eq!(form.chosen(CreateRow::LitellmConn), Some(2));
+        assert!(
+            form.connection.new_conn.name.value.is_empty(),
+            "the found fields go"
+        );
+        app.after_wizard_input();
+        let form = create_form(&mut app);
+        assert_eq!(
+            form.chosen(CreateRow::LitellmConn),
+            Some(2),
+            "new engine… stays picked"
+        );
+        form.cycle_litellm(true);
+        assert_eq!(
+            form.chosen(CreateRow::LitellmConn),
+            Some(0),
+            "the row wraps"
+        );
+        // On the LiteLLM provider the row offers the gateways only.
+        wizard_for(&mut app, "claude-litellm", CreateStep::Connection);
+        let form = create_form(&mut app);
+        assert_eq!(
+            form.choices(CreateRow::LitellmConn),
+            ["acme", "new connection…"]
+        );
+        assert_eq!(form.connection.litellm.as_deref(), Some("acme"));
+    }
+
+    /// With no engine added yet, the first found engine fills *new engine…*; a name a gateway
+    /// has is refused, a gateway URL too, and a key only where the engine refused aisbx.
+    #[test]
+    fn a_found_engine_fills_new_engine_and_its_fields_are_checked_as_an_engines() {
+        use crate::local::Engine;
+        let mut app = app_on(&[crate::testkit::acme()], Vec::new());
+        app.open_create();
+        wizard_for(&mut app, "claude-bare-local", CreateStep::Connection);
+        let catalog = Arc::clone(&app.catalog);
+        let form = create_form(&mut app);
+        assert!(form.connection.connections.is_empty());
+        form.take_found(
+            &catalog,
+            vec![found(Engine::LlamaServer, 8095, Some("k-1"))],
+        );
+        assert_eq!(form.chosen(CreateRow::LitellmConn), Some(0));
+        assert_eq!(form.connection.new_conn.key.value, "k-1");
+        assert_eq!(form.step_problem(CreateStep::Connection, &catalog), None);
+        let problem = |form: &mut CreateForm, name: &str, url: &str, key: &str, needs: bool| {
+            let typed = &mut form.connection.new_conn;
+            typed.name = TextInput::new(name);
+            typed.url = TextInput::new(url);
+            typed.key = TextInput::new(key);
+            typed.needs_key = needs;
+            form.step_problem(CreateStep::Connection, &catalog)
+        };
+        assert_eq!(problem(form, "k2", "8095", "", false), None, "a bare port");
+        assert_eq!(
+            form.new_connection().unwrap().url,
+            "http://localhost:8095",
+            "kept as the URL"
+        );
+        let taken = problem(form, "acme", "8095", "", false).unwrap();
+        assert!(taken.contains("LiteLLM connection"), "{taken}");
+        let gateway = problem(form, "k2", "https://h", "", false).unwrap();
+        assert!(gateway.contains("http://localhost:PORT"), "{gateway}");
+        let keyless = problem(form, "k2", "8095", "", true).unwrap();
+        assert!(keyless.contains("wants a key"), "{keyless}");
+        // The gateway step still wants https and a key.
+        wizard_for(&mut app, "claude-litellm", CreateStep::Connection);
+        let form = create_form(&mut app);
+        form.connection.litellm = None;
+        let local = problem(form, "beta", "8095", "k", false).unwrap();
+        assert!(local.contains("Local engine provider"), "{local}");
+        assert!(problem(form, "beta", "https://h", "", false)
+            .unwrap()
+            .contains("gateway's key"));
+    }
+
+    /// Next on a found engine adds it: its key stored for localhost only when it has one, then
+    /// its list read on the host by this program's own `local fetch`, key on stdin.
+    #[test]
+    fn next_on_a_found_engine_stores_its_key_if_any_and_reads_its_list_on_the_host() {
+        use crate::local::Engine;
+        for key in [Some("k-1"), None] {
+            let mut app = app_on(&[crate::testkit::acme()], Vec::new());
+            app.open_create();
+            wizard_for(&mut app, "pi-local", CreateStep::Connection);
+            let catalog = Arc::clone(&app.catalog);
+            let form = create_form(&mut app);
+            form.take_found(&catalog, vec![found(Engine::LlamaServer, 8095, key)]);
+            assert!(app.store_new_connection_first(), "{:?}", app.status);
+            let Some(Modal::Running(_, pending)) = app.modal.take() else {
+                panic!("a job was started: {:?}", app.status)
+            };
+            assert_eq!(pending.title, "Adding the local engine llama-server");
+            match key {
+                Some(k) => {
+                    let step = &pending.steps[0];
+                    assert_eq!(
+                        step.argv,
+                        sbx::secret_set_litellm_key_argv(
+                            "localhost",
+                            "sbx-cs-aisbx-llm-llama-server"
+                        )
+                    );
+                    assert_eq!(step.stdin.as_deref(), Some(k));
+                }
+                None => assert!(pending.steps.is_empty(), "no key, nothing to store"),
+            }
+            let (conn, _) = pending.post.save_connection.clone().expect("saved after");
+            assert_eq!(conn.url, "http://localhost:8095");
+            assert_eq!(conn.engine.as_deref(), Some("llama-server"));
+            let fetch = pending.post.then.as_ref().expect("the list follows");
+            let argv = &fetch.steps[0].argv;
+            assert_eq!(&argv[1..4], ["local", "fetch", "llama-server"]);
+            assert_eq!(argv.contains(&"--key-stdin".to_string()), key.is_some());
+            assert_eq!(fetch.steps[0].stdin.as_deref(), key);
+            assert_eq!(fetch.post.reload_models.as_deref(), Some("llama-server"));
+            assert!(fetch.post.harvest_models.is_none(), "no fetcher sandbox");
+            app.apply_post(&pending.post);
+            app.start_next(&pending.post);
+            let saved = crate::litellm::load_in(&app.litellm_root, "llama-server").unwrap();
+            assert_eq!(saved, conn);
+            assert!(!crate::model_fetch::kit_dir_in(&app.litellm_root, "llama-server").exists());
+            assert!(crate::kits::descriptor_path(&crate::litellm::kit_dir_in(
+                &app.litellm_root,
+                &saved,
+                crate::litellm::Agent::Pi
+            ))
+            .is_file());
+        }
+    }
+
+    /// The Harness step says what an engine lacks for the picked harness: Claude Code's API on
+    /// mlx-lm, or the context Claude Code's first request needs.
+    /// Claude Code on an engine without picks is pinned to the engine's first model, both in
+    /// the dashboard's kits and on the review; Pi needs no pins kit.
+    #[test]
+    fn claude_code_on_an_engine_starts_on_its_first_model() {
+        let mut app = app_on(&[k2()], Vec::new());
+        let listed = crate::models::Model {
+            id: "k2-horizon-7b".into(),
+            name: "k2-horizon-7b".into(),
+            ..Default::default()
+        };
+        crate::local::store(&app.litellm_root, &k2(), vec![listed], 1_800_000_000).unwrap();
+        let sandbox = "claude-local-engine-pins";
+        let dirs = app
+            .kit_dirs(
+                sandbox,
+                "claude-local",
+                &[],
+                None,
+                &Overrides::default(),
+                Some(&k2()),
+            )
+            .expect("kits");
+        assert!(
+            dirs.iter().any(|d| d.ends_with("k2/local-k2-claude")),
+            "{dirs:?}"
+        );
+        let pins = models::kit_dir(sandbox);
+        assert!(dirs.contains(&pins), "{dirs:?}");
+        let spec = std::fs::read_to_string(crate::kits::descriptor_path(&pins)).unwrap();
+        for slot in [Slot::Opus, Slot::Sonnet, Slot::Haiku] {
+            assert!(
+                spec.contains(&format!("{}=\"k2-horizon-7b\"", slot.env())),
+                "{slot:?}: {spec}"
+            );
+        }
+        models::remove_kit(sandbox).unwrap();
+        let pi = app
+            .kit_dirs(
+                sandbox,
+                "pi-local",
+                &[],
+                None,
+                &Overrides::default(),
+                Some(&k2()),
+            )
+            .expect("kits");
+        assert!(
+            !pi.contains(&pins),
+            "Pi reads its model from its files: {pi:?}"
+        );
+
+        app.open_create();
+        wizard_for(&mut app, "claude-local", CreateStep::Models);
+        let Screen::Create(form) = &app.screen else {
+            panic!("the create form is open")
+        };
+        let review = form.review(&app);
+        let models = review.answers.iter().find(|a| a.label == "Models").unwrap();
+        assert_eq!(
+            models.value,
+            format!("{}: k2-horizon-7b", crate::create::ENGINE_FIRST)
+        );
+    }
+
+    #[test]
+    fn the_harness_step_warns_what_the_engine_lacks() {
+        let mut mlx = crate::testkit::connection("mlx", "http://localhost:8080");
+        mlx.engine = Some("mlx-lm".into());
+        let mut app = app_on(&[k2(), mlx], Vec::new());
+        app.open_create();
+        wizard_for(&mut app, "claude-local", CreateStep::Harness);
+        let catalog = Arc::clone(&app.catalog);
+        let backend = |name: &str| catalog.backend(name).unwrap().clone();
+        let form = create_form(&mut app);
+        form.connection.litellm = Some("mlx".into());
+        let warn = form
+            .engine_warning(&catalog, &backend("claude-local"))
+            .unwrap();
+        assert!(
+            warn.starts_with("mlx-lm cannot run Claude Code: it has no Anthropic API"),
+            "{warn}"
+        );
+        assert!(!warn.contains("  "), "{warn}");
+        assert_eq!(form.engine_warning(&catalog, &backend("pi-local")), None);
+        form.connection.litellm = Some("k2".into());
+        assert_eq!(
+            form.engine_warning(&catalog, &backend("claude-local")),
+            None,
+            "no list yet"
+        );
+        let small = crate::models::Model {
+            id: "k2-horizon-7b".into(),
+            name: "k2-horizon-7b".into(),
+            limits: crate::models::Limits {
+                context: Some(16_384),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        Arc::make_mut(&mut app.catalog).models = vec![small];
+        let catalog = Arc::clone(&app.catalog);
+        let form = create_form(&mut app);
+        let warn = form
+            .engine_warning(&catalog, &backend("claude-local"))
+            .unwrap();
+        assert!(
+            warn.starts_with(
+                "Claude Code needs more memory than the engine has: 32k context or more, the \
+                 engine has 16k."
+            ),
+            "{warn}"
+        );
+        assert!(!warn.contains("  "), "{warn}");
+        assert_eq!(
+            form.engine_warning(&catalog, &backend("opencode-local")),
+            None
+        );
+        assert_eq!(form.engine_warning(&catalog, &backend("pi-local")), None);
+        let gloss = form.harness_gloss(&catalog, &form.harnesses(&catalog)[0]);
+        assert!(gloss.contains("recommended"), "{gloss}");
+    }
+
+    #[test]
+    fn the_secrets_note_has_no_run_of_spaces() {
+        assert!(!SECRETS_NOTE.contains("  "), "{SECRETS_NOTE}");
+    }
+
     #[test]
     fn a_new_connection_is_written_only_after_its_key_is_stored() {
         let mut app = app_on(&[crate::testkit::acme()], Vec::new());
@@ -14231,7 +14728,7 @@ mod tests {
         assert_eq!(saved.url, "https://gw.example.org");
         assert!(crate::kits::descriptor_path(&crate::litellm::kit_dir_in(
             &app.litellm_root,
-            "beta",
+            &saved,
             crate::litellm::Agent::Claude
         ))
         .is_file());
@@ -14632,9 +15129,10 @@ mod tests {
         app.start_next(&pending.post);
         assert!(crate::litellm::exists_in(&app.litellm_root, "beta"));
         assert_eq!(app.registry.last_litellm(), Some("beta"));
+        let beta = crate::litellm::load_in(&app.litellm_root, "beta").expect("saved");
         assert!(!crate::litellm::kit_dir_in(
             &app.litellm_root,
-            "beta",
+            &beta,
             crate::litellm::Agent::Claude
         )
         .exists());

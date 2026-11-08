@@ -112,9 +112,19 @@ pub struct ConnectionAnswers {
     /// The answers given for other connections and agents while the form is open, so going
     /// OpenCode → Claude Code → OpenCode keeps what was picked for OpenCode.
     pub picks_kept: Vec<((String, crate::litellm::Agent), crate::model_picks::Picks)>,
-    /// The LiteLLM connections on this host when the form was opened, sorted by name — read from
-    /// their `connection.json`, the authority for which exist.
+    /// The connections of the picked provider's kind ([`crate::litellm::Kind`]) on this host when
+    /// the form was opened, sorted by name — read from their `connection.json`, the authority for
+    /// which exist. What the Connection step offers.
     pub connections: Vec<crate::litellm::Connection>,
+    /// Every connection on this host, of both kinds: a new one's name must be free among them.
+    pub all: Vec<crate::litellm::Connection>,
+    /// The engines found on this computer that no connection is on yet, offered after the
+    /// connections on a local provider ([`crate::local::discover`]).
+    pub found: Vec<crate::local::Found>,
+    /// The found engine *new connection…* was filled from, by index into `found`.
+    pub found_pick: Option<usize>,
+    /// The engines of this computer were looked for since the form opened.
+    pub discovered: bool,
     /// The connection a LiteLLM backend is built on, pre-selected by [`crate::litellm::preselect`];
     /// `None` is *new connection...*, made from [`ConnectionAnswers::new_conn`] with the sandbox.
     pub litellm: Option<String>,
@@ -125,14 +135,20 @@ pub struct ConnectionAnswers {
 }
 
 /// The fields of *new connection…* (and of the `S` dialog's edit): everything a connection is,
-/// plus its key. No models: every sandbox reads them from the gateway, and the agent picks one.
+/// plus its key. No models: the host reads them from the endpoint, and the agent picks one.
 #[derive(Debug, Clone, Default)]
 pub struct NewConnection {
     pub name: TextInput,
     pub url: TextInput,
-    /// The gateway's key. Never rendered back, never passed as an argument, emptied whenever the
+    /// The endpoint's key. Never rendered back, never passed as an argument, emptied whenever the
     /// form comes back after a failed attempt to store it.
     pub key: TextInput,
+    /// The kind of connection this form makes; `None` takes either, as the URL says.
+    pub kind: Option<crate::litellm::Kind>,
+    /// The engine a found engine filled these fields with, kept with the connection.
+    pub engine: Option<String>,
+    /// That engine refused aisbx's request without a key: the connection needs one.
+    pub needs_key: bool,
 }
 
 impl NewConnection {
@@ -148,7 +164,24 @@ impl NewConnection {
         {
             return Err(problem);
         }
-        Self::build(self.name.value.trim(), self.url.value.trim())
+        Self::build(
+            self.name.value.trim(),
+            self.url.value.trim(),
+            self.engine.as_deref(),
+        )
+    }
+
+    /// The URL the field stands for ([`crate::litellm::normalize_url`]): a local engine's port
+    /// is `http://localhost:PORT`.
+    pub fn url(&self) -> String {
+        crate::litellm::normalize_url(&self.url.value)
+    }
+
+    /// Is this a local engine: the kind the form makes, else the kind the URL names.
+    pub fn is_local(&self) -> bool {
+        self.kind
+            .unwrap_or_else(|| crate::litellm::Kind::of(&self.url()))
+            == crate::litellm::Kind::Local
     }
 
     /// What is wrong with one field, as [`NewConnection::check`] says it. The fields are checked
@@ -158,26 +191,65 @@ impl NewConnection {
         field: ConnField,
         existing: &[crate::litellm::Connection],
     ) -> Option<String> {
+        use crate::litellm::Kind;
+        let noun = match self.is_local() {
+            true => "engine",
+            false => "connection",
+        };
         match field {
             ConnField::Name => {
                 let name = self.name.value.trim();
                 if !crate::litellm::valid_name(name) {
-                    return Some("name the connection in a–z, 0–9 and “-” (at most 32)".into());
+                    return Some(format!("name the {noun} in a–z, 0–9 and “-” (at most 32)"));
                 }
-                existing
-                    .iter()
-                    .any(|c| c.name == name)
-                    .then(|| format!("connection {name} exists — pick it in the list"))
+                let taken = existing.iter().find(|c| c.name == name)?;
+                Some(match self.kind.is_none_or(|k| k == taken.kind()) {
+                    true => format!("{noun} {name} exists — pick it in the list"),
+                    false => format!(
+                        "{name} is the name of a {} — pick another name",
+                        match taken.kind() {
+                            Kind::Gateway => "LiteLLM connection",
+                            Kind::Local => "local engine",
+                        }
+                    ),
+                })
             }
-            ConnField::Url => crate::litellm::check_url(self.url.value.trim())
-                .err()
-                .map(|e| format!("{e}")),
-            ConnField::Key => self
-                .key
-                .value
-                .trim()
-                .is_empty()
-                .then(|| "paste the gateway's key — it is stored in the host keychain".into()),
+            ConnField::Url => {
+                let url = self.url();
+                if let Err(e) = crate::litellm::check_url(&url) {
+                    return Some(match self.kind {
+                        Some(Kind::Local) => {
+                            "give the engine's port, or http://localhost:PORT".to_string()
+                        }
+                        _ => format!("{e}"),
+                    });
+                }
+                match (self.kind, Kind::of(&url)) {
+                    (Some(Kind::Local), Kind::Gateway) => Some(
+                        "an engine runs on this computer: give its port, or http://localhost:PORT"
+                            .into(),
+                    ),
+                    (Some(Kind::Gateway), Kind::Local) => Some(
+                        "a gateway's address starts with https:// — for an engine on this \
+                         computer, pick the Local engine provider"
+                            .into(),
+                    ),
+                    _ => None,
+                }
+            }
+            ConnField::Key => {
+                let empty = self.key.value.trim().is_empty();
+                match (empty, self.is_local(), self.needs_key) {
+                    (false, _, _) | (true, true, false) => None,
+                    (true, true, true) => Some(
+                        "the engine wants a key — paste it; it is stored in the host keychain"
+                            .into(),
+                    ),
+                    (true, false, _) => {
+                        Some("paste the gateway's key — it is stored in the host keychain".into())
+                    }
+                }
+            }
         }
     }
 
@@ -187,15 +259,20 @@ impl NewConnection {
         &self,
         old: &crate::litellm::Connection,
     ) -> Result<crate::litellm::Connection, String> {
-        Self::build(&old.name, self.url.value.trim())
+        Self::build(&old.name, self.url.value.trim(), old.engine.as_deref())
     }
 
-    /// The connection put together and validated as a whole.
-    fn build(name: &str, url: &str) -> Result<crate::litellm::Connection, String> {
-        let conn = crate::litellm::Connection {
-            name: name.to_string(),
-            url: url.to_string(),
-        };
+    /// The connection put together and validated as a whole. An engine stays only on a local
+    /// URL.
+    fn build(
+        name: &str,
+        url: &str,
+        engine: Option<&str>,
+    ) -> Result<crate::litellm::Connection, String> {
+        let mut conn = crate::litellm::Connection::new(name, crate::litellm::normalize_url(url));
+        if conn.is_local() {
+            conn.engine = engine.map(str::to_string);
+        }
         crate::litellm::validate(&conn).map_err(|e| format!("{e}"))?;
         Ok(conn)
     }
@@ -365,8 +442,7 @@ impl CreateForm {
             CreateRow::DenyNetwork => return Self::deny_problem(ws.deny_network.value.trim()),
             _ if field.is_some() && new_conn => {
                 let field = field?;
-                return (self.connection.new_conn)
-                    .field_problem(field, &self.connection.connections);
+                return (self.connection.new_conn).field_problem(field, &self.connection.all);
             }
             CreateRow::TokenName if new_token && !crate::sbx::token_name_ok(name) => {
                 "name the token in lower-case letters, digits and dashes"
@@ -423,7 +499,11 @@ impl CreateForm {
                 .collect(),
             CreateRow::LitellmConn => (self.connection.connections.iter())
                 .map(|c| c.name.clone())
-                .chain(std::iter::once(NEW_CONNECTION.to_string()))
+                .chain(self.found_offered().iter().map(found_label))
+                .chain(std::iter::once(
+                    self.new_conn_label(self.connection.new_conn.kind)
+                        .to_string(),
+                ))
                 .collect(),
             _ => Vec::new(),
         }
@@ -435,13 +515,17 @@ impl CreateForm {
             CreateRow::Skills => SKILLS_MODES
                 .iter()
                 .position(|m| *m == self.workspace.skills),
-            CreateRow::LitellmConn => Some(
-                self.litellm_choice()
-                    .and_then(|c| {
-                        (self.connection.connections.iter()).position(|o| o.name == c.name)
-                    })
-                    .unwrap_or(self.connection.connections.len()),
-            ),
+            CreateRow::LitellmConn => {
+                let saved = self.connection.connections.len();
+                let picked = self.litellm_choice().and_then(|c| {
+                    (self.connection.connections.iter()).position(|o| o.name == c.name)
+                });
+                Some(match (picked, self.connection.found_pick) {
+                    (Some(i), _) => i,
+                    (None, Some(k)) => saved + k,
+                    (None, None) => saved + self.found_offered().len(),
+                })
+            }
             CreateRow::Folder(i) if i < self.workspace.extra_folders.len() => {
                 Some(usize::from(!self.folder_read_only(i)))
             }
@@ -458,11 +542,26 @@ impl CreateForm {
                 None => return false,
             },
             CreateRow::LitellmConn => {
-                let all = &self.connection.connections;
-                if value > all.len() {
-                    return false;
+                let saved = self.connection.connections.len();
+                let found = self.found_offered().len();
+                match value {
+                    v if v < saved => {
+                        self.connection.litellm = Some(self.connection.connections[v].name.clone());
+                        self.connection.found_pick = None;
+                    }
+                    v if v < saved + found => self.fill_from_found(v - saved),
+                    v if v == saved + found => {
+                        if self.connection.found_pick.take().is_some() {
+                            let kind = self.connection.new_conn.kind;
+                            self.connection.new_conn = NewConnection {
+                                kind,
+                                ..NewConnection::default()
+                            };
+                        }
+                        self.connection.litellm = None;
+                    }
+                    _ => return false,
                 }
-                self.connection.litellm = all.get(value).map(|c| c.name.clone());
             }
             CreateRow::Folder(i) => {
                 let (Some(spec), Some(access)) = (
@@ -568,7 +667,43 @@ impl CreateForm {
     /// The connection *new connection...* describes, checked as a save would check it, or the first
     /// reason to refuse it.
     pub fn new_connection(&self) -> Result<crate::litellm::Connection, String> {
-        self.connection.new_conn.check(&self.connection.connections)
+        self.connection.new_conn.check(&self.connection.all)
+    }
+
+    /// The engines found on this computer that the Connection row offers: on a local provider
+    /// only.
+    pub fn found_offered(&self) -> &[crate::local::Found] {
+        match self.connection.new_conn.kind {
+            Some(crate::litellm::Kind::Local) => &self.connection.found,
+            _ => &[],
+        }
+    }
+
+    /// *new connection…* on a gateway provider, *new engine…* on a local one.
+    pub fn new_conn_label(&self, kind: Option<crate::litellm::Kind>) -> &'static str {
+        match kind {
+            Some(crate::litellm::Kind::Local) => NEW_ENGINE,
+            _ => NEW_CONNECTION,
+        }
+    }
+
+    /// Fill *new engine…* from the `k`-th found engine: its name, URL and the key aisbx read.
+    pub fn fill_from_found(&mut self, k: usize) {
+        let Some(found) = self.connection.found.get(k) else {
+            return;
+        };
+        let all = &self.connection.all;
+        let name = found.default_name(&|n| all.iter().any(|c| c.name == n));
+        self.connection.new_conn = NewConnection {
+            name: TextInput::new(&name),
+            url: TextInput::new(found.url()),
+            key: TextInput::new(found.key.as_deref().unwrap_or_default()),
+            kind: Some(crate::litellm::Kind::Local),
+            engine: Some(found.engine.slug().to_string()),
+            needs_key: found.needs_key,
+        };
+        self.connection.litellm = None;
+        self.connection.found_pick = Some(k);
     }
 
     /// The first entry of the ports field that is no port mapping.
@@ -688,6 +823,7 @@ impl Default for WizardState {
 pub fn harness_label(backend: &Backend) -> String {
     match backend.harness() {
         "claude" => "Claude Code".into(),
+        crate::kits::CLAUDE_BARE => "Claude Code bare".into(),
         "opencode" => "OpenCode".into(),
         "codex" => "Codex".into(),
         "agy" => "Antigravity".into(),
@@ -710,6 +846,18 @@ pub const PREFILLED: &str = "prefilled with the settings of your last sandbox";
 
 /// The last value of the LiteLLM connection row: a connection made together with the sandbox.
 pub const NEW_CONNECTION: &str = "new connection…";
+
+/// The last value of the engine row on a local provider: an engine added with the sandbox.
+pub const NEW_ENGINE: &str = "new engine…";
+
+/// A found engine as the engine row offers it: `llama-server on localhost:8095 (found)`.
+pub fn found_label(found: &crate::local::Found) -> String {
+    format!(
+        "{} on localhost:{} (found)",
+        found.engine.label(),
+        found.port
+    )
+}
 
 /// What a picked folder's choice row offers, tightest first.
 pub const FOLDER_ACCESS: [crate::folders::Access; 2] =
@@ -785,6 +933,9 @@ pub fn provider_blurb(provider: Provider) -> &'static str {
         Provider::Google => "Gemini models",
         Provider::OpenAi => "GPT models",
         Provider::Litellm => "the models of your LiteLLM gateway",
+        Provider::Local => {
+            "models served on this computer: llama.cpp, Ollama, LM Studio, MLX, vLLM"
+        }
         Provider::Other => "",
     }
 }
@@ -1027,7 +1178,11 @@ impl CreateForm {
                 Some(name) => name.to_string(),
                 None => format!("new: {}", self.connection.new_conn.name.value.trim()),
             };
-            answer(CreateStep::Connection, "Connection", connection, false);
+            let label = match self.local(catalog) {
+                true => "Engine",
+                false => "Connection",
+            };
+            answer(CreateStep::Connection, label, connection, false);
         }
         answer(
             CreateStep::Harness,
@@ -1059,9 +1214,12 @@ impl CreateForm {
                     })
                     .collect();
                 let none = pins.is_empty();
-                let value = match none {
-                    true => AGENT_PICKS.to_string(),
-                    false => pins.join(", "),
+                let first =
+                    (self.enabled_models(catalog).first()).map(|i| catalog.models[*i].name.clone());
+                let value = match (none, self.local(catalog), first) {
+                    (true, true, Some(first)) => format!("{ENGINE_FIRST}: {first}"),
+                    (true, _, _) => AGENT_PICKS.to_string(),
+                    (false, _, _) => pins.join(", "),
                 };
                 answer(CreateStep::Models, "Models", value, none);
                 let total = catalog.models.len();
@@ -1191,6 +1349,10 @@ pub fn shown_folder(spec: &str) -> String {
 /// The Review's and the ledger's word for models the agent picks itself.
 pub const AGENT_PICKS: &str = "the agent picks";
 
+/// The Review's word for an engine's unpicked slots: they are on its first model
+/// ([`crate::litellm::engine_slots`]).
+pub const ENGINE_FIRST: &str = "the engine's first model";
+
 impl CreateForm {
     /// The providers the Provider step offers, in [`Provider`]'s order.
     pub fn providers(&self, catalog: &Catalog) -> Vec<Provider> {
@@ -1275,7 +1437,10 @@ impl CreateForm {
     pub fn step_heading(&self, step: CreateStep, catalog: &Catalog) -> (String, &'static str) {
         match step {
             CreateStep::Provider => ("Choose the AI provider".into(), ""),
-            CreateStep::Connection => ("Choose the LiteLLM gateway".into(), ""),
+            CreateStep::Connection => match self.local(catalog) {
+                true => ("Choose the inference engine".into(), "on this computer"),
+                false => ("Choose the LiteLLM gateway".into(), ""),
+            },
             CreateStep::Harness => ("Choose the coding agent".into(), ""),
             CreateStep::Models => match (self.models_agent(catalog), catalog.models.len()) {
                 (None, _) => ("The agent picks its own models".into(), ""),
@@ -1941,12 +2106,105 @@ pub(crate) fn model_pick_help(catalog: &Catalog, slot: Slot, i: usize) -> Help {
 pub fn harness_blurb(agent: &str) -> &'static str {
     match agent {
         "claude" => "Anthropic's coding agent",
+        crate::kits::CLAUDE_BARE => "Claude Code without hooks, plugins or CLAUDE.md",
         "opencode" => "an open-source coding agent",
         "codex" => "OpenAI's coding agent",
         "agy" => "Google's coding agent",
         "pi" => "a minimal coding agent",
         _ => "",
     }
+}
+
+impl CreateForm {
+    /// Is the picked backend built on a local engine?
+    pub fn local(&self, catalog: &Catalog) -> bool {
+        self.conn_kind(catalog) == Some(crate::litellm::Kind::Local)
+    }
+
+    /// The Harness step's gloss beside an agent: on a local engine, how much memory it needs and
+    /// how fast it answers ([`Backend::context_note`]); elsewhere what it is.
+    pub fn harness_gloss(&self, catalog: &Catalog, harness: &Harness) -> String {
+        let note = (harness.backends.first())
+            .and_then(|b| catalog.backends.get(*b))
+            .and_then(Backend::context_note);
+        match note {
+            Some(note) => note.to_string(),
+            None => harness_blurb(&harness.agent).to_string(),
+        }
+    }
+
+    /// [`field_gloss`], worded for a local engine on the Connection step's fields.
+    pub fn field_gloss_of(&self, catalog: &Catalog, row: CreateRow) -> &'static str {
+        match (self.local(catalog), row) {
+            (true, CreateRow::LitellmUrl) => "its port, or http://localhost:PORT",
+            (true, CreateRow::LitellmKey) => "only if the engine has one; stored on this computer",
+            _ => field_gloss(row),
+        }
+    }
+
+    /// The smallest context window among the models the picked connection serves, where the
+    /// engine said it.
+    pub fn engine_context(&self, catalog: &Catalog) -> Option<u64> {
+        catalog.models.iter().filter_map(|m| m.limits.context).min()
+    }
+
+    /// What the picked engine lacks for this backend's harness: Claude Code's API, or the context
+    /// the harness needs. `None` off a local engine, or when nothing lacks.
+    pub fn engine_warning(&self, catalog: &Catalog, backend: &Backend) -> Option<String> {
+        if !self.local(catalog) {
+            return None;
+        }
+        let harness = harness_label(backend);
+        let engine = (self.litellm_choice())
+            .and_then(|c| c.engine.as_deref())
+            .and_then(crate::local::Engine::parse);
+        if backend.needs_anthropic_api() && engine.and_then(|e| e.anthropic()) == Some(false) {
+            let engine = engine.map(|e| e.label()).unwrap_or_default();
+            return Some(format!(
+                "{engine} cannot run {harness}: it has no Anthropic API (/v1/messages). Pick Pi or \
+                 OpenCode, or another engine."
+            ));
+        }
+        let (Some(needed), Some(context)) =
+            (backend.context_needed(), self.engine_context(catalog))
+        else {
+            return None;
+        };
+        (context < needed).then(|| {
+            let short = crate::local::tokens_short;
+            let (needed, context) = (short(needed), short(context));
+            format!(
+                "{harness} needs more memory than the engine has: {needed} context or more, the \
+                 engine has {context}. Start the engine with a larger context, or pick Pi."
+            )
+        })
+    }
+}
+
+/// What a harness on a local engine costs, in plain words, for the Harness step's help
+/// (docs/local.md, *Which harness*).
+fn local_harness_help(backend: &Backend) -> Option<&'static str> {
+    let text = match backend.kit.name.as_str() {
+        "pi-local" => {
+            "Pi sends the model short instructions before your task. So it needs little memory, \
+             and the first answer comes in seconds. The best fit for a model on this computer."
+        }
+        "claude-bare-local" => {
+            "Claude Code as claude --bare: short instructions and three tools (Bash, Edit, Read). \
+             So it needs little memory and answers fast. It reads no CLAUDE.md, hooks or plugins."
+        }
+        "opencode-local" => {
+            "OpenCode sends the model about four times as much as Pi before your task. So it needs \
+             more memory and answers slower. Give the engine 16k context or more."
+        }
+        "claude-local" => {
+            "Claude Code sends the model about eight times as much as Pi before your task. So it \
+             needs a lot of memory, and the first answer can take a minute. Give the engine 32k \
+             context or more."
+        }
+        _ => return None,
+    };
+    Some(text)
 }
 
 /// One line under a field or beside an option: what goes in it, or what it does.
@@ -2012,12 +2270,21 @@ impl CreateForm {
             return Help::new("", "");
         };
         let own_sign_in = b.account().is_none() && b.litellm_agent().is_none();
-        let text = match own_sign_in && !b.setup_hint().is_empty() {
-            true => format!("It signs in with {}.", b.setup_hint()),
-            false => String::new(),
+        let text = match (
+            own_sign_in && !b.setup_hint().is_empty(),
+            local_harness_help(b),
+        ) {
+            (_, Some(local)) => local.to_string(),
+            (true, None) => format!("It signs in with {}.", b.setup_hint()),
+            (false, None) => String::new(),
         };
         let picked = harness.backends.contains(&self.harness.backend);
-        let warn = picked.then(|| self.missing_warning(app)).flatten();
+        let warn = picked
+            .then(|| {
+                self.missing_warning(app)
+                    .or_else(|| self.engine_warning(catalog, b))
+            })
+            .flatten();
         Help::new(harness.label, text.trim_start()).warn(warn)
     }
 
@@ -2062,6 +2329,32 @@ impl CreateForm {
         let ws = &self.workspace;
         let root = crate::model::tilde(&self.workspace_root(&app.cwd));
         let help = match row {
+            CreateRow::LitellmConn if self.local(catalog) => match self.litellm_choice() {
+                Some(conn) => Help::new(
+                    "engine",
+                    format!(
+                        "The sandbox uses the engine on {} of this computer.",
+                        crate::litellm::place(&conn.url)
+                    ),
+                ),
+                None => match self.connection.found_pick.and_then(|k| self.connection.found.get(k)) {
+                    Some(found) => {
+                        let key = match &found.key_source {
+                            Some(source) => format!(" Its key comes from {source}."),
+                            None => String::new(),
+                        };
+                        Help::new(
+                            "engine",
+                            format!("Found: {}. Next adds it.{key}", found.summary()),
+                        )
+                    }
+                    None => Help::new(
+                        "engine",
+                        "Adds an engine on this computer: a name for it, its port and its key, if \
+                         it has one.",
+                    ),
+                },
+            },
             CreateRow::LitellmConn => match self.litellm_choice() {
                 Some(conn) => {
                     let host = crate::litellm::host(&conn.url);
@@ -2076,6 +2369,20 @@ impl CreateForm {
                     "Adds a gateway: a name for it, its address and its key.",
                 ),
             },
+            CreateRow::LitellmName if self.local(catalog) => Help::new(
+                "name",
+                "A name for the engine: a–z, 0–9 and “-”, at most 32 characters.",
+            ),
+            CreateRow::LitellmUrl if self.local(catalog) => Help::new(
+                "URL",
+                "The engine's port on this computer, or http://localhost:PORT. The sandbox reaches \
+                 it as host.docker.internal on that port, and no other port.",
+            ),
+            CreateRow::LitellmKey if self.local(catalog) => Help::new(
+                "key",
+                "The engine's key, if it has one. It is stored on this computer, never in the \
+                 sandbox.",
+            ),
             CreateRow::LitellmName => Help::new(
                 "name",
                 "A name for the gateway: a–z, 0–9 and “-”, at most 32 characters.",
@@ -2118,15 +2425,24 @@ impl CreateForm {
             CreateRow::ModelDefault(slot) => default_model_help(slot),
             CreateRow::ModelPick(slot, i) => model_pick_help(catalog, slot, i),
             CreateRow::ModelsRefresh => {
+                let whose = match self.local(catalog) {
+                    true => "engine",
+                    false => "gateway",
+                };
                 let text = match &catalog.models_source {
                     crate::models::Source::Gateway { fetched_at, .. } => format!(
-                        "Reads the gateway's model list again. The list is from {}.",
+                        "Reads the {whose}'s model list again. The list is from {}.",
                         crate::state::ago(u64::try_from(*fetched_at).unwrap_or(0))
                     ),
-                    crate::models::Source::NotYet => "Reads the gateway's model list.".to_string(),
+                    crate::models::Source::NotYet => format!("Reads the {whose}'s model list."),
                 };
                 Help::new("refresh", text)
             }
+            CreateRow::ModelsFold if self.local(catalog) => Help::new(
+                "models",
+                "When set, the agent starts on the models you pick, and sees only the models you \
+                 leave ticked. Otherwise, it starts on the engine's first model.",
+            ),
             CreateRow::ModelsFold => Help::new(
                 "models",
                 "When set, the agent starts on the models you pick, and sees only the models you \
@@ -2347,6 +2663,7 @@ mod tests {
             name: TextInput::new(name),
             url: TextInput::new(url),
             key: TextInput::new(key),
+            ..NewConnection::default()
         }
     }
 
@@ -2373,13 +2690,7 @@ mod tests {
         assert!(refused("beta", "https://h", " ").starts_with("paste the gateway's key"));
         for url in ["https://h", "https://h:443/litellm"] {
             let conn = typed("beta", url, "k").check(&existing).expect("accepted");
-            assert_eq!(
-                conn,
-                crate::litellm::Connection {
-                    name: "beta".into(),
-                    url: url.into()
-                }
-            );
+            assert_eq!(conn, crate::litellm::Connection::new("beta", url));
         }
         // An edit: the name is the old one's, and the key may stay empty.
         let acme = crate::testkit::acme();
@@ -2499,6 +2810,31 @@ mod tests {
         let help = f.help(&app, WizardRow::Agent(claude)).text;
         assert!(!help.contains("Anthropic account"), "{help}");
         assert!(!help.contains("placeholder"), "{help}");
+    }
+
+    /// On a local engine each harness says in plain words how light it is: how much memory it
+    /// needs and how fast it answers, with no token or request counts.
+    #[test]
+    fn a_local_harness_says_its_memory_and_speed_in_plain_words() {
+        let catalog = Catalog::load().unwrap();
+        let mut weights = Vec::new();
+        for name in [
+            "pi-local",
+            "claude-bare-local",
+            "opencode-local",
+            "claude-local",
+        ] {
+            let b = catalog.backend(name).unwrap();
+            let (note, help) = (b.context_note().unwrap(), local_harness_help(b).unwrap());
+            weights.push(note.split(':').next().unwrap());
+            for text in [note, help] {
+                assert!(text.contains("memory"), "{name}: {text}");
+                for jargon in ["request", "token", "  "] {
+                    assert!(!text.contains(jargon), "{name}: {jargon:?} in {text}");
+                }
+            }
+        }
+        assert_eq!(weights, ["light", "light", "medium", "heavy"]);
     }
 
     /// The account radios say the same in both frontends: the setup token says why while it is
@@ -2692,7 +3028,8 @@ mod tests {
                 Provider::Anthropic,
                 Provider::Google,
                 Provider::OpenAi,
-                Provider::Litellm
+                Provider::Litellm,
+                Provider::Local
             ]
         );
         assert_eq!(f.selected_provider(&catalog), Some(Provider::Litellm));
@@ -2708,6 +3045,10 @@ mod tests {
             (Provider::Anthropic, vec!["claude"]),
             (Provider::Google, vec!["agy"]),
             (Provider::OpenAi, vec!["codex"]),
+            (
+                Provider::Local,
+                vec!["pi", "claude-bare", "opencode", "claude"],
+            ),
         ] {
             let at = f.providers(&catalog).iter().position(|o| *o == p).unwrap();
             f.pick_provider(&catalog, at);

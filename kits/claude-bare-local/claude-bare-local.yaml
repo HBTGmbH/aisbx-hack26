@@ -1,0 +1,95 @@
+# syntax=docker/sandbox-kit:3
+# Claude Code in bare mode against an inference engine on this computer: a v3 workload, its image
+# built from claude-bare-local.dockerfile.
+schemaVersion: "3"
+kind: workload
+displayName: Claude Code bare (local engine)
+description: Run Claude Code in bare mode, as claude --bare (no hooks, plugins or CLAUDE.md, three tools, a short prompt), against an inference engine on this computer. The engine - its port and the key's placeholder - comes from the engine kit aisbx generates and stacks next to this one; a key, if the engine has one, stays in the host keychain and the host proxy swaps it in.
+
+# No credential and no engine on purpose: the generated engine kit sets the URL, the context window
+# and the key's placeholder (core/src/litellm.rs).
+
+capabilities:
+  # sbx launches the image's ENTRYPOINT as the agent.
+  - type: com.docker.sandbox/sbx@1
+
+  # Egress. No gateway host on purpose: the connection kit allows it.
+  - type: com.docker.sandbox/network-policy@1
+    config:
+      install:
+        allow:
+          - downloads.claude.ai       # `claude update` (files/claude/update.sh)
+      runtime:
+        allow:
+          - downloads.claude.ai       # the dashboard's `claude update` before a session
+          - code.claude.com           # the Claude Code docs its bundled claude-code skill fetches
+          - api.anthropic.com         # WebFetch's domain check; the sandbox holds no credential for it
+          - plugins.gradle.org
+          - plugins-artifacts.gradle.org
+          - ports.ubuntu.com          # apt: arm64
+          - archive.ubuntu.com        # apt: amd64
+          - security.ubuntu.com       # apt: amd64 security
+          - download.docker.com       # the template's Docker apt source; apt-get update reads every source
+
+  # Claude Code's session state: the five folders sbx's built-in agent kept as volumes.
+  - type: com.docker.sandbox/volume@1
+    description: Conversation transcripts
+    config: {path: /home/agent/.claude/projects, size: 2g}
+  - type: com.docker.sandbox/volume@1
+    description: Per-session state (`claude -c`)
+    config: {path: /home/agent/.claude/sessions, size: 512m}
+  - type: com.docker.sandbox/volume@1
+    description: TodoWrite state
+    config: {path: /home/agent/.claude/todos, size: 512m}
+  - type: com.docker.sandbox/volume@1
+    description: Bash state across sessions
+    config: {path: /home/agent/.claude/shell-snapshots, size: 512m}
+  - type: com.docker.sandbox/volume@1
+    description: Local feature-flag cache
+    config: {path: /home/agent/.claude/statsig, size: 512m}
+
+  # sbx's shared skills store, linked into ~/.claude/skills by files/skills/skills-store.sh.
+  # readwrite is the most this kit takes; `--skills readonly` (the default) still mounts it
+  # read-only.
+  - type: com.docker.sandbox/agent-skills@1
+    optional: true
+    config: {path: /home/agent/.local/share/aisbx/skills-store, mode: readwrite}
+
+  - type: com.docker.sandbox/lifecycle@1
+    config:
+      # In this order, before the agent's first launch.
+      install:
+        - command: ["sh", "/usr/local/lib/aisbx/claude/prepare.sh"]
+          user: "0"
+          description: Make ~/.claude and the session volumes the agent's
+        - command: ["sh", "/usr/local/lib/aisbx/claude/seed.sh"]
+          user: agent
+          # A hook sees only the variables it declares: every hook that runs `claude` declares
+          # the image's telemetry switches.
+          env: [WORKSPACE_DIR, SBX_CRED_ANTHROPIC_MODE, MCP_GATEWAY_URL, MCP_SENTINEL_TOKEN_NAME,
+                CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC, DISABLE_TELEMETRY, DISABLE_ERROR_REPORTING,
+                DISABLE_FEEDBACK_COMMAND, DISABLE_BUG_COMMAND, CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY,
+                DISABLE_GROWTHBOOK, DO_NOT_TRACK, DISABLE_AUTOUPDATER]
+          description: Trust the workspace, bypass permissions, register the MCP gateway
+        - command: ["sh", "/usr/local/lib/aisbx/skills/skills-store.sh", "/home/agent/.claude/skills"]
+          user: agent
+          description: Link the shared skills store into ~/.claude/skills
+        - command: ["sh", "/usr/local/lib/aisbx/claude/update.sh"]
+          user: agent
+          env: [CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC, DISABLE_TELEMETRY, DISABLE_ERROR_REPORTING,
+                DISABLE_FEEDBACK_COMMAND, DISABLE_BUG_COMMAND, CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY,
+                DISABLE_GROWTHBOOK, DO_NOT_TRACK, DISABLE_AUTOUPDATER]
+          description: Update Claude Code to the current release
+      # Every start, alongside the agent: nothing here may be needed by its first moment.
+      startup:
+        - command: ["sh", "/usr/local/lib/aisbx/claude/prepare.sh"]
+          user: "0"
+          description: Keep the session volumes the agent's
+        - command: ["sh", "/usr/local/lib/aisbx/skills/skills-store.sh", "/home/agent/.claude/skills"]
+          user: agent
+          description: Refresh the shared-skills links
+
+  # The context file Claude Code reads.
+  - type: com.docker.sandbox/agent-context@1
+    config:
+      filename: CLAUDE.md

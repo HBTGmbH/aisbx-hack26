@@ -38,10 +38,13 @@ aisbx builds on these sbx features. It does not replace them.
 
 ## What aisbx adds
 
-- **Backend kits for five agents on your own accounts:** a LiteLLM gateway, your Anthropic, OpenAI or Google
-  account, or a setup token ([Backends](#backends)).
+- **Backend kits for five agents on your own accounts:** a LiteLLM gateway, a model on this computer, your
+  Anthropic, OpenAI or Google account, or a setup token ([Backends](#backends)).
 - **LiteLLM connections:** add a gateway once, read its model list, and pin models per sandbox
   ([LiteLLM connections](docs/litellm.md)).
+- **Local inference engines:** run Pi, Claude Code and OpenCode on a model served by llama.cpp, Ollama, LM Studio,
+  MLX or vLLM on this computer. aisbx finds the engines and says which agent fits a small context
+  ([Local inference engines](docs/local.md)).
 - **Two Anthropic accounts at once**, through named setup tokens
   ([Two Anthropic accounts](docs/accounts.md#two-anthropic-accounts-at-once)).
 - **Addons** that stack onto every backend: JDK, Rust, read-only host caches, host skills, RTK and more
@@ -255,6 +258,10 @@ A backend is the kit that runs the agent. Each sandbox has one backend.
 | `claude-token`     | Claude Code | an Anthropic subscription, through a [named setup token](docs/accounts.md#setup-tokens-a-second-account) |
 | `opencode-litellm` | OpenCode 2.x | a [LiteLLM connection](docs/litellm.md) ([OpenCode](docs/agents.md#opencode)) |
 | `pi-litellm`       | [Pi](https://pi.dev) | a [LiteLLM connection](docs/litellm.md) ([Pi](docs/agents.md#pi)) |
+| `pi-local`         | [Pi](https://pi.dev) | a [local inference engine](docs/local.md) (recommended for a local model) |
+| `claude-bare-local` | Claude Code bare (`claude --bare`) | a [local inference engine](docs/local.md#claude-code-bare) |
+| `opencode-local`   | OpenCode 2.x | a [local inference engine](docs/local.md) |
+| `claude-local`     | Claude Code | a [local inference engine](docs/local.md) (best with 32k context or more) |
 | `codex-openai`     | Codex       | your OpenAI account: the ChatGPT sign-in or an API key ([Codex](docs/agents.md#codex)) |
 | `agy`              | Antigravity CLI | your Google account, or a Gemini API key ([Antigravity](docs/agents.md#antigravity-agy)) |
 
@@ -286,8 +293,10 @@ $ sbx run --kit ./kits/jdk25 ./kits/claude-anthropic    # Claude Code → /login
 $ sbx run ./kits/codex-openai                           # Codex → your OpenAI account
 ```
 
-The gateway and token backends also need the kit that aisbx generates for the connection or token
-([LiteLLM connections](docs/litellm.md#the-generated-kit), [Setup tokens](docs/accounts.md#setup-tokens-a-second-account)).
+The gateway, local engine and token backends also need the kit that aisbx generates for the connection, engine or
+token ([LiteLLM connections](docs/litellm.md#the-generated-kit),
+[Local inference engines](docs/local.md#the-generated-kit),
+[Setup tokens](docs/accounts.md#setup-tokens-a-second-account)).
 
 ## Documentation
 
@@ -298,6 +307,7 @@ The gateway and token backends also need the kit that aisbx generates for the co
 | [Working with sandboxes](docs/sandboxes.md)            | rebuild, add kits, publish ports, keep a sandbox running, connect an editor, mount host folders |
 | [Accounts and secrets](docs/accounts.md)               | use two Anthropic accounts, change an account, manage stored secrets |
 | [LiteLLM connections](docs/litellm.md)                 | add a gateway, read its model list, choose and pin models          |
+| [Local inference engines](docs/local.md)               | run the agents on a model on this computer, and pick the harness   |
 | [Agents](docs/agents.md)                               | learn the details of OpenCode, Codex, Pi and Antigravity           |
 | [Network and privacy](docs/network.md)                 | set the network policy, see what each kit allows, block hosts, check telemetry |
 | [Shared agent skills](docs/skills.md)                  | give the agents your skills, from the host or from Git repositories |

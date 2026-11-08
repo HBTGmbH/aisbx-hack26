@@ -449,8 +449,10 @@ fn litellm_row(
     row_index: &dyn Fn(CreateRow) -> usize,
 ) {
     let row = CreateRow::LitellmConn;
+    let kind = form.connection.new_conn.kind;
+    let local = kind == Some(crate::litellm::Kind::Local);
     let mut spans = vec![Span::styled(
-        format!("{:>14}  ", "connection"),
+        format!("{:>14}  ", if local { "engine" } else { "connection" }),
         theme::muted(),
     )];
     let picked = form
@@ -458,10 +460,15 @@ fn litellm_row(
         .litellm
         .as_deref()
         .and_then(|name| form.connection.connections.iter().find(|c| c.name == name));
-    match picked {
-        Some(conn) => {
+    let found = (form.connection.found_pick).and_then(|k| form.found_offered().get(k));
+    match (picked, found) {
+        (Some(conn), _) => {
             spans.push(Span::styled(
-                format!("‹ {} · {} ›", conn.name, crate::litellm::host(&conn.url)),
+                format!(
+                    "‹ {} · {} ›",
+                    conn.title(),
+                    crate::litellm::place(&conn.url)
+                ),
                 Style::default().fg(theme::ACCENT),
             ));
             if form.connection.last_litellm.as_deref() == Some(conn.name.as_str()) {
@@ -471,12 +478,19 @@ fn litellm_row(
                 spans.push(Span::styled(" key missing", theme::warn()));
             }
         }
-        None => spans.push(Span::styled(
-            "‹ new connection… ›",
+        (None, Some(found)) => spans.push(Span::styled(
+            format!("‹ {} ›", crate::create::found_label(found)),
+            Style::default().fg(theme::ACCENT),
+        )),
+        (None, None) => spans.push(Span::styled(
+            format!("‹ {} ›", form.new_conn_label(kind)),
             Style::default().fg(theme::ACCENT),
         )),
     }
     out.row(spans, focused == Some(row), row_index(row));
+    if let (None, Some(found)) = (picked, found) {
+        out.note(format!("                {}", found.summary()));
+    }
     if let Some(conn) = picked.filter(|c| app.litellm_key_missing(&c.name)) {
         out.warn(format!(
             "                {}",
@@ -496,13 +510,18 @@ fn new_connection_rows(
     row_index: &dyn Fn(CreateRow) -> usize,
 ) {
     let typed = &form.connection.new_conn;
-    let host = crate::litellm::check_url(typed.url.value.trim())
+    let url = typed.url();
+    let host = crate::litellm::check_url(&url)
         .ok()
-        .map(|()| format!("  host {}", crate::litellm::host(typed.url.value.trim())));
+        .map(|()| format!("  host {}", crate::litellm::place(&url)));
+    let (url_hint, key_hint) = match typed.kind {
+        Some(crate::litellm::Kind::Local) => ("(its port)", "(only if it has one)"),
+        _ => ("(https://…)", "(paste it here)"),
+    };
     for (field, label, input, hint) in [
         (CreateRow::LitellmName, "name", &typed.name, "(a–z, 0–9, -)"),
-        (CreateRow::LitellmUrl, "URL", &typed.url, "(https://…)"),
-        (CreateRow::LitellmKey, "key", &typed.key, "(paste it here)"),
+        (CreateRow::LitellmUrl, "URL", &typed.url, url_hint),
+        (CreateRow::LitellmKey, "key", &typed.key, key_hint),
     ] {
         let on = focused == Some(field);
         let mut spans = vec![Span::styled(format!("{label:>14}  "), theme::muted())];

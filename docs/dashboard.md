@@ -259,22 +259,30 @@ like a setup assistant. In both, click a step to go there.
 
 ### The seven steps
 
-1. **Provider**: who serves the model. Pick Anthropic, Google, OpenAI or your LiteLLM gateway.
-2. **Connection** (LiteLLM only; the other providers skip it): one of your
+1. **Provider**: who serves the model. Pick Anthropic, Google, OpenAI, your LiteLLM gateway, or a local engine on
+   this computer ([Local inference engines](local.md)).
+2. **Connection** (LiteLLM and local engines only; the other providers skip it): one of your
    [connections](litellm.md#litellm-connections), or *new connection…*. The step opens on the last used connection.
    `↵` on a stored connection picks it and goes on.
    - Next reads the connection's [model list](litellm.md#the-gateways-model-list) when it has none younger than a
      day.
    - With *new connection…*, Next stores the key first and then reads the list.
+   - On a local engine the step offers your engines, then the engines aisbx found on this computer, marked
+     *(found)*, then *new engine…*. A found engine fills in its name, port and key
+     ([What aisbx finds](local.md#what-aisbx-finds)).
 3. **Harness**: the agent. The step offers only the agents that work with that provider:
    - Anthropic: Claude Code. Under it, pick `/login` or a setup token (a token stored on this host, or
      *new token…*).
    - Google: Antigravity.
    - OpenAI: Codex.
    - LiteLLM: Claude Code, OpenCode or Pi.
+   - Local engine: Pi, Claude Code bare, OpenCode or Claude Code. Each says how light it is: a light one needs less
+     memory and answers faster. The step warns when the engine's context is too small for the harness
+     ([Which harness](local.md#which-harness)).
 
    When the harness needs a credential that is not stored, the step flags it, with the command that stores it.
-4. **Models** (LiteLLM only; the other providers skip it): the connection's models, read through its fetcher.
+4. **Models** (LiteLLM and local engines only; the other providers skip it): the connection's models, read through
+   its fetcher, or from the local engine by aisbx itself.
    *Refresh the list* asks the gateway again. Two optional folds follow, closed until you open them:
    - *Pick models*: what the agent starts on, and which models it sees. Untick a model to keep it from the agent.
      Without picks, the agent picks its own models from all of the gateway's.

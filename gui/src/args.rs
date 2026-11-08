@@ -36,15 +36,15 @@ pub enum Parsed {
     Run(Args),
     Help,
     Version,
-    /// `skill …`, for core's headless code: the one subcommand core's own jobs run as this very
-    /// binary (`repo_skills_ui::sync_argv`, the repo-cache skill source's pre-start step).
+    /// `skill …` or `local fetch …`, for core's headless code: the commands core's own jobs run as
+    /// this very binary (`headless::JOB_COMMANDS`).
     Headless(Vec<String>),
 }
 
 pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Parsed, String> {
-    let mut args = args.into_iter().peekable();
-    if args.peek().is_some_and(|a| a == "skill") {
-        return Ok(Parsed::Headless(args.collect()));
+    let args: Vec<String> = args.into_iter().collect();
+    if aisbx_core::headless::is_job_command(&args) {
+        return Ok(Parsed::Headless(args));
     }
     let mut out = Args {
         show_other: None,
@@ -125,11 +125,15 @@ mod tests {
     }
 
     #[test]
-    fn the_skill_syncs_core_runs_as_this_binary_go_to_headless() {
-        use aisbx_core::{headless, repo_skills_ui, skill_source::SkillSource};
+    fn the_commands_core_runs_as_this_binary_go_to_headless() {
+        use aisbx_core::skill_source::SkillSource;
+        use aisbx_core::{headless, litellm::Connection, local, repo_skills_ui};
+        let engine = Connection::new("llama-server", "http://localhost:8095");
         for argv in [
             repo_skills_ui::sync_argv("box"),
             SkillSource::RepoCache.install_argv("box"),
+            local::fetch_step(&engine, None).argv,
+            local::fetch_step(&engine, Some("typed")).argv,
         ] {
             let tail = argv[1..].to_vec();
             assert_eq!(
@@ -142,6 +146,17 @@ mod tests {
             run(&["skills"]),
             folder(None, "skills"),
             "only the subcommand itself"
+        );
+        assert_eq!(
+            run(&["local"]),
+            folder(None, "local"),
+            "a folder named local"
+        );
+        assert_eq!(run(&["local", "--here"]), folder(Some(false), "local"));
+        assert_eq!(
+            run(&["local", "ls"]),
+            Err("unexpected argument: ls".into()),
+            "no other local command"
         );
     }
 }

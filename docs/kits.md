@@ -23,6 +23,10 @@ Pick the kits in the create wizard (`n`, or **New sandbox**). You can add an *ad
 | `codex-openai` | workload on `shell-docker-image` | Codex → your OpenAI account (ChatGPT sign-in or API key, kept on the host) |
 | `agy` | workload on Docker's community Antigravity image | Antigravity CLI → your Google account, or a Gemini API key |
 | `pi-litellm` | workload on `shell-docker-image` | Pi → a LiteLLM connection |
+| `pi-local` | workload on `shell-docker-image` | Pi → an [inference engine on this computer](local.md) |
+| `claude-bare-local` | workload on `claude-code-docker` | Claude Code in bare mode (`claude --bare`) → an inference engine on this computer |
+| `opencode-local` | workload on `shell-docker-image` | OpenCode 2.x → an inference engine on this computer |
+| `claude-local` | workload on `claude-code-docker` | Claude Code → an inference engine on this computer |
 | `jdk25` | stackable mixin, add-able | Temurin JDK 25 |
 | `rust` | stackable mixin | Rust 1.99.1: rustc, cargo, clippy, rustfmt ([Rust projects](addons.md#rust-projects)) |
 | `rtk` | stackable mixin, add-able | the RTK token reducer |

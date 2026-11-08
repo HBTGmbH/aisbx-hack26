@@ -29,7 +29,7 @@ same() { [ "$1" = "$2" ]; }
 # --- static ----------------------------------------------------------------------------------------
 
 static() {
-  check "five workloads ship the hook" same "$(printf '%s\n' "$copies" | grep -c .)" 5
+  check "eight workloads ship the hook" same "$(printf '%s\n' "$copies" | grep -c .)" 8
   for copy in $copies; do
     check "${copy#"$root"/}: byte-identical" cmp -s "$hook" "$copy"
     kit=$(basename "$(dirname "$(dirname "$(dirname "$copy")")")")

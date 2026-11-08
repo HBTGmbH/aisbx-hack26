@@ -4,8 +4,8 @@
 
 use aisbx_core::app::{AccountChoice, App, CreateForm, CreateRow, Hit, Screen, TextInput};
 use aisbx_core::create::{
-    self, connection_hint, connection_label, field_gloss, harness_blurb, provider_blurb,
-    ConnChoice, CreateStep, Help, Review, WizardRow,
+    self, connection_hint, connection_label, field_gloss, provider_blurb, ConnChoice, CreateStep,
+    Help, Review, WizardRow,
 };
 use aisbx_core::models::{self, Slot};
 use aisbx_core::{kits, litellm, model, startdir};
@@ -606,7 +606,7 @@ fn harness_step(ui: &mut egui::Ui, at: &mut Draw<'_, '_>) {
     let picked = at.form.selected_harness(catalog);
     let harnesses = at.form.harnesses(catalog);
     let blurbs: Vec<String> = (harnesses.iter())
-        .map(|h| sentence(harness_blurb(&h.agent)))
+        .map(|h| sentence(&at.form.harness_gloss(catalog, h)))
         .collect();
     let tiles = (harnesses.iter().enumerate())
         .map(|(h, harness)| Tile {
@@ -695,12 +695,20 @@ fn litellm_fields(ui: &mut egui::Ui, at: &mut Draw<'_, '_>) {
     let width = ui.available_width().min(FIELD + 120.0);
     let chosen = form.chosen(CreateRow::LitellmConn);
     let last = sentence("last used");
+    let local = form.connection.new_conn.kind == Some(litellm::Kind::Local);
+    let saved = form.connection.connections.len();
     for (n, name) in form.choices(CreateRow::LitellmConn).iter().enumerate() {
         let conn = form.connection.connections.get(n);
+        let found = (n.checked_sub(saved)).and_then(|k| form.found_offered().get(k));
         let selected = chosen == Some(n);
-        let (title, blurb) = match conn {
-            Some(c) => (c.name.clone(), c.url.clone()),
-            None => (
+        let (title, blurb) = match (conn, found) {
+            (Some(c), _) => (c.title(), c.url.clone()),
+            (None, Some(f)) => (name.clone(), sentence(&f.summary())),
+            (None, None) if local => (
+                sentence(name),
+                "Add an engine on this computer: its port, and its key if it has one".to_string(),
+            ),
+            (None, None) => (
                 sentence(name),
                 "Add a gateway: its address and key".to_string(),
             ),
@@ -743,28 +751,18 @@ fn litellm_fields(ui: &mut egui::Ui, at: &mut Draw<'_, '_>) {
         }
         None => {
             let typed = &form.connection.new_conn;
-            let fields = [
-                (
-                    CreateRow::LitellmName,
-                    "Name",
-                    &typed.name,
+            let (name, url, key) = match local {
+                true => ("llama-server", "8080", "only if the engine has one"),
+                false => (
                     "my-gateway",
-                    false,
-                ),
-                (
-                    CreateRow::LitellmUrl,
-                    "URL",
-                    &typed.url,
                     "https://litellm.example.com",
-                    true,
-                ),
-                (
-                    CreateRow::LitellmKey,
-                    "Key",
-                    &typed.key,
                     "paste the gateway's key",
-                    false,
                 ),
+            };
+            let fields = [
+                (CreateRow::LitellmName, "Name", &typed.name, name, false),
+                (CreateRow::LitellmUrl, "URL", &typed.url, url, true),
+                (CreateRow::LitellmKey, "Key", &typed.key, key, false),
             ];
             for (field, label, input, placeholder, mono) in fields {
                 text_field(ui, at, field, label, input, placeholder, mono);
@@ -849,7 +847,7 @@ fn text_field(
     let suggested = field == CreateRow::Name && !at.form.workspace.name_touched;
     let gloss = match suggested {
         true => sentence(create::GENERATED_GLOSS),
-        false => sentence(field_gloss(field)),
+        false => sentence(at.form.field_gloss_of(&at.app.catalog, field)),
     };
     let response = controls::labelled(ui, label, &gloss, problem.as_deref(), |ui| {
         let input = Input {

@@ -2081,6 +2081,30 @@ mod tests {
     }
 
     #[test]
+    fn on_a_local_engine_each_harness_says_how_light_it_is() {
+        let mut app = app_with(populated());
+        app.open_create();
+        let pi = (app.catalog.backends.iter())
+            .position(|b| b.kit.name == "pi-local")
+            .expect("Pi on a local engine is offered");
+        if let Screen::Create(form) = &mut app.screen {
+            form.harness.backend = pi;
+        }
+        show_step(&mut app, CreateStep::Harness);
+        let screen = super::tests_support::render(&mut app);
+        for line in [
+            "light: needs little memory, answers fast · recommended",
+            "light: needs little memory, answers fast · no CLAUDE.md",
+            "medium: needs more memory, answers slower",
+            "heavy: needs a lot of memory, answers slowly",
+            "So it needs little memory",
+        ] {
+            assert!(screen.contains(line), "{line:?} in {screen}");
+        }
+        assert!(!screen.contains("first request"), "{screen}");
+    }
+
+    #[test]
     fn the_service_secret_command_shows_up_only_while_it_is_missing() {
         let mut app = app_with(populated());
         app.open_create();
@@ -3244,6 +3268,7 @@ mod tests {
         crate::litellm::Connection {
             name: name.into(),
             url: "https://litellm.example.com".into(),
+            engine: None,
         }
     }
 
@@ -3810,11 +3835,11 @@ mod tests {
         let mut app = app_with(Vec::new());
         open_wizard(&mut app, CreateStep::Provider);
         let buffer = buffer_at(&mut app, width, height);
-        let last_row = lines_with(&buffer, "LiteLLM")
+        let last_row = lines_with(&buffer, "Local engine")
             .iter()
             .map(|(_, y)| *y)
             .find(|y| *y > 2)
-            .expect("the LiteLLM radio");
+            .expect("the Local engine radio, the last provider");
         let strip = strip_rule(&buffer);
         assert_eq!(strip, last_row + 2, "one blank line, then the strip");
         let ledger = lines_with(&buffer, "─ so far ")[0].1;
