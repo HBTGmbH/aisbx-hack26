@@ -628,6 +628,26 @@ fn up(raw: &[String]) -> Outcome {
             }
             Err(_) => {}
         }
+        if !addons.is_empty() {
+            let have = match &inspected {
+                Ok(i) => &i.kits,
+                Err(e) => {
+                    return Err(Fail::sandbox(format!(
+                        "could not read {name}'s kit list ({e:#}) — cannot tell whether it \
+                         has {}",
+                        addons.join(", ")
+                    )))
+                }
+            };
+            let missing: Vec<&kits::Addon> = missing_addons(&addons, have)
+                .into_iter()
+                .filter_map(|a| catalog.addon(a))
+                .collect();
+            if let Some(refusal) = create_time_refusal(&name, &missing) {
+                return Err(Fail::usage(refusal));
+            }
+            add_addons(&name, &missing, tmpfs_volumes, ssh_agent)?;
+        }
         if args.has("no-mcp") {
             eprintln!(
                 "aisbx: warning: --no-mcp only applies when a sandbox is created; it cannot be \
@@ -978,6 +998,83 @@ fn volumes_refusal(name: &str, kits: &[String], want_ram: bool) -> Option<String
         )),
         _ => None,
     }
+}
+
+/// The requested addons, in request order, that no kit dir in `kits` is named after.
+fn missing_addons<'a>(wanted: &'a [String], kits: &[String]) -> Vec<&'a str> {
+    let have: Vec<&str> = kits
+        .iter()
+        .filter_map(|k| Path::new(k).file_name().and_then(|n| n.to_str()))
+        .collect();
+    let mut missing: Vec<&str> = Vec::new();
+    for kit in wanted {
+        if !have.contains(&kit.as_str()) && !missing.contains(&kit.as_str()) {
+            missing.push(kit);
+        }
+    }
+    missing
+}
+
+/// Why `up` cannot add these missing addons to the existing sandbox: some can only be set at
+/// creation ([`kits::Addon::create_time_reason`]).
+fn create_time_refusal(name: &str, missing: &[&kits::Addon]) -> Option<String> {
+    let mut refused: Vec<String> = Vec::new();
+    for addon in missing {
+        if let Some(reason) = addon.create_time_reason() {
+            let kit = &addon.kit.name;
+            refused.push(format!("{kit} ({reason} — set when a sandbox is created)"));
+        }
+    }
+    if refused.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "a sandbox named {name} exists without {}; `aisbx rm {name}`, then `aisbx up` again",
+        refused.join(", ")
+    ))
+}
+
+/// `sbx kit add` for each addon in turn, stopping at the first that fails.
+fn add_addons(
+    name: &str,
+    addons: &[&kits::Addon],
+    in_ram: bool,
+    ssh_agent: bool,
+) -> Result<(), Fail> {
+    if addons.is_empty() {
+        return Ok(());
+    }
+    let dirs: Vec<&Path> = addons.iter().map(|a| a.kit.dir.as_path()).collect();
+    approve_credentials(&dirs);
+    let emptied = match in_ram {
+        true => "; its volumes in RAM come back empty",
+        false => "",
+    };
+    let mut added: Vec<&str> = Vec::new();
+    for addon in addons {
+        let kit = addon.kit.name.as_str();
+        eprintln!("aisbx: adding {kit} to {name} (sbx kit add recreates the container{emptied})");
+        let why = match step(&sbx::kit_add_argv(name, &addon.kit.dir), ssh_agent) {
+            Ok(status) if status.success() => {
+                eprintln!("aisbx: added {kit} to {name}");
+                added.push(kit);
+                continue;
+            }
+            Ok(status) => format!("sbx kit add failed ({status})"),
+            Err(e) => format!("could not run sbx: {e}"),
+        };
+        return Err(Fail::failed(add_failure(name, kit, &added, &why)));
+    }
+    Ok(())
+}
+
+/// What `up` says when `sbx kit add` of `kit` failed after `added` went in.
+fn add_failure(name: &str, kit: &str, added: &[&str], why: &str) -> String {
+    let before = match added {
+        [] => "no kit was added".to_string(),
+        added => format!("added before it: {}", added.join(", ")),
+    };
+    format!("could not add {kit} to {name} ({why}); {before}")
 }
 
 /// What `up --tmpfs-volumes` says about the kits it swapped for their copies (`dirs` → `copies`).
@@ -3164,6 +3261,21 @@ mod tests {
     }
 
     #[test]
+    fn adding_a_kit_to_a_reused_sandbox_never_asks() {
+        let catalog = Catalog::load().unwrap();
+        let jdk = catalog.addon("jdk25").unwrap();
+        let cmd = sbx_command(&sbx::kit_add_argv("box", &jdk.kit.dir), false);
+        let args: Vec<String> = (cmd.get_args())
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(cmd.get_program(), std::ffi::OsStr::new("sbx"));
+        let dir = catalog.kits_dir.join("jdk25").display().to_string();
+        assert_eq!(args, ["--no-input", "kit", "add", "box", dir.as_str()]);
+        let sock = std::ffi::OsStr::new("SSH_AUTH_SOCK");
+        assert!(cmd.get_envs().any(|(k, v)| k == sock && v.is_none()));
+    }
+
+    #[test]
     fn a_headless_model_fetch_never_asks() {
         let conn = crate::testkit::acme();
         let steps = fetch_steps(&conn, Path::new("/kits/aisbx-models"), false);
@@ -4815,6 +4927,69 @@ mod tests {
         for want_ram in [true, false] {
             assert_eq!(volumes_refusal("box", &none, want_ram), None);
         }
+    }
+
+    #[test]
+    fn a_reused_sandbox_lacks_the_addons_no_kit_dir_is_named_after() {
+        let wanted = strings(&["jdk25", "rtk"]);
+        let kits = strings(&["/r/kits/claude-anthropic", "/r/kits/rtk"]);
+        assert_eq!(missing_addons(&wanted, &kits), ["jdk25"]);
+        let ram = strings(&["/s/aisbx/tmpfs/claude-anthropic", "/s/aisbx/tmpfs/host-npm"]);
+        assert!(missing_addons(&strings(&["host-npm"]), &ram).is_empty());
+        let twice = strings(&["statusline", "jdk25", "statusline"]);
+        assert_eq!(missing_addons(&twice, &kits), ["statusline", "jdk25"]);
+        let extra = strings(&["/r/kits/codex-openai", "/r/kits/rtk", "/r/kits/jdk25"]);
+        assert!(missing_addons(&strings(&["jdk25"]), &extra).is_empty());
+        assert!(missing_addons(&[], &kits).is_empty());
+        assert_eq!(missing_addons(&strings(&["rtk"]), &[]), ["rtk"]);
+    }
+
+    #[test]
+    fn a_kit_set_at_creation_is_not_added_to_a_reused_sandbox() {
+        let catalog = Catalog::load().unwrap();
+        let addon = |name: &str| catalog.addon(name).unwrap();
+        for kit in ["jdk25", "rtk", "statusline"] {
+            assert_eq!(create_time_refusal("box", &[addon(kit)]), None, "{kit}");
+        }
+        assert_eq!(create_time_refusal("box", &[]), None);
+        let missing = [addon("jdk25"), addon("host-gradle"), addon("host-npm")];
+        let refused = create_time_refusal("box", &missing).unwrap();
+        assert_eq!(
+            refused,
+            format!(
+                "a sandbox named box exists without host-gradle ({} — set when a sandbox is \
+                 created), host-npm ({} — set when a sandbox is created); `aisbx rm box`, then \
+                 `aisbx up` again",
+                addon("host-gradle").create_time_reason().unwrap(),
+                addon("host-npm").create_time_reason().unwrap()
+            )
+        );
+        assert!(refused.contains("(extra workspaces"), "{refused}");
+        assert!(refused.contains("(volumes"), "{refused}");
+        assert!(!refused.contains("jdk25"), "{refused}");
+    }
+
+    #[test]
+    fn nothing_missing_adds_nothing() {
+        assert!(add_addons("box", &[], false, false).is_ok());
+    }
+
+    #[test]
+    fn a_failed_kit_add_names_the_kit_and_what_went_in_before() {
+        assert_eq!(
+            add_failure("box", "jdk25", &[], "sbx kit add failed (exit status: 1)"),
+            "could not add jdk25 to box (sbx kit add failed (exit status: 1)); no kit was added"
+        );
+        assert_eq!(
+            add_failure(
+                "box",
+                "statusline",
+                &["jdk25", "rtk"],
+                "could not run sbx: gone"
+            ),
+            "could not add statusline to box (could not run sbx: gone); added before it: jdk25, \
+             rtk"
+        );
     }
 
     #[test]

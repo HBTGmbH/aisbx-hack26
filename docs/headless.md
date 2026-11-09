@@ -105,6 +105,23 @@ Give the workspace folder as the last argument: `aisbx up --backend <kit> [optio
 | `--tmpfs-volumes` | keeps the kits' volumes in RAM (see below) |
 | `--no-mcp` | no MCP servers and no tools to find the host's (`sbx create --static-mcp none`, as the dashboard's "none"); applied at creation only: on an existing sandbox it warns on stderr and changes nothing |
 
+#### `up --kit` on an existing sandbox
+
+When the sandbox exists, `up` compares the `--kit` addons with the kits `sbx inspect` lists for it:
+
+- `up` adds each missing addon with `sbx kit add`, in the order you gave them, and says so on stderr
+  (*adding jdk25 to NAME*, *added jdk25 to NAME*). Each add recreates the container: it takes about a minute, and
+  volumes in RAM ([`--tmpfs-volumes`](#up---tmpfs-volumes)) come back empty. The workspace, the kit volumes on disk
+  and the container's own files stay.
+- Some addons can only be set when a sandbox is created: those with volumes, credentials, network rules or extra
+  workspaces (`host-gradle`, `host-npm`, `web`, …). When one of them is missing, `up` exits 2 before it adds
+  anything, and names each such kit and `aisbx rm NAME`.
+- When an `sbx kit add` fails, `up` stops, prints no name on stdout and exits 1. The message names the kit and the
+  kits it added before it.
+- When `up` cannot read the sandbox's kit list, it exits 125.
+- Kits the sandbox has beyond `--kit` stay: `up` never removes a kit.
+- With no `--kit`, or nothing missing, `up` runs no `sbx kit add`.
+
 #### Extra folders
 
 - `--mount` adds a host folder as an extra workspace at its own path. Add `:ro` to make it read-only.
