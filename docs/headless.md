@@ -166,13 +166,13 @@ With the flag:
 
 ### `aisbx run`
 
-`run NAME` runs the agent once in print mode: Claude Code, Codex, agy or Pi.
+`run NAME` runs the agent once in print mode: Claude Code, Codex, agy, Pi or OpenCode.
 
 | Option | What it does |
 | --- | --- |
 | `--prompt TEXT` | the prompt |
 | `--prompt-file FILE` | the prompt from a file; `-` reads stdin |
-| `--model`, `--effort` | the model and the effort; on Pi `--effort` becomes `--thinking` |
+| `--model`, `--effort` | the model and the effort; on Pi `--effort` becomes `--thinking`; OpenCode refuses `--effort` (exit 2) |
 | `--format json\|stream-json\|text` | the output format; default `json` |
 | `--timeout DUR` | stops the agent after `DUR` (`90s`, `45m`, `4h`, `1h30m`); exit 124 |
 | `--workdir DIR` | starts in `DIR` instead of the workspace root |
@@ -186,6 +186,9 @@ The agent's output comes through untouched:
 
 - On Codex, both JSON formats are its `--json` event stream.
 - On Pi, both JSON formats are its `--mode json` JSONL stream, and `text` is `pi -p`'s final answer.
+- On OpenCode, `run` is `opencode run`. Both JSON formats are its `--format json` JSONL event stream, and `text` is
+  its default output. `--model` takes OpenCode's `provider/model` form, e.g. `litellm-<connection>/<model>`
+  (`local-<engine>/<model>` on a local engine).
 
 ### `aisbx status`, `stop` and `rm`
 
@@ -247,8 +250,8 @@ An exit code of 0 does not prove the agent succeeded. Read the agent's own outpu
   its parent dies. If that fails, `run` stops the sandbox.
 - **The prompt travels into the sandbox as a file** (`sbx exec -i`), not as an argument. As an argument on the host,
   it would sit in the process table for the whole run, and a long one would meet Linux's 128 KiB per-argument limit.
-  Claude Code, Codex and Pi get it as the positional after `--`, so a prompt that starts with `-` stays a prompt.
-  agy's `--print` takes it as its value.
+  Claude Code, Codex, Pi and OpenCode get it as the positional after `--`, so a prompt that starts with `-` stays a
+  prompt. agy's `--print` takes it as its value.
 
 ## Other headless commands
 

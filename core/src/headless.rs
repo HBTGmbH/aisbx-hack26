@@ -71,7 +71,7 @@ HEADLESS USE — the same kits and names as the dashboard, for scripts:
         --approvals MODE       dismiss (default) | keep — requests held for approval
         --report FILE          write a JSON summary of the run to FILE (on the host)
         --ssh-agent            forward the host SSH agent (off by default)
-        Agents: Claude Code, Codex, Antigravity (agy) and Pi.
+        Agents: Claude Code, Codex, Antigravity (agy), Pi and OpenCode.
 
     aisbx status NAME [--json]     state, agent, kits, held requests (exit 1 if unknown)
     aisbx stop NAME                stop it
@@ -419,6 +419,21 @@ fn quiet(argv: &[String]) -> bool {
         .stderr(Stdio::null())
         .status()
         .is_ok_and(|s| s.success())
+}
+
+/// The agent's headless command line for `run`, or the usage error that stops `run` before it
+/// starts anything.
+fn agent_argv(name: &str, agent: &str, run: &HeadlessRun<'_>) -> Result<Vec<String>, Fail> {
+    if run.effort.is_some() && !kits::accepts_effort(agent) {
+        return Err(Fail::usage(format!(
+            "{name} runs {agent:?}; OpenCode has no effort flag: drop --effort"
+        )));
+    }
+    kits::headless_argv(agent, run).ok_or_else(|| {
+        Fail::usage(format!(
+            "{name} runs {agent:?}; headless runs know Claude Code, Codex, agy, Pi and OpenCode"
+        ))
+    })
 }
 
 fn find(name: &str) -> Result<Option<sbx::LsEntry>, Fail> {
@@ -1095,7 +1110,8 @@ fn run(raw: &[String]) -> Outcome {
     let model = args.one("model")?;
     let effort = args.one("effort")?;
     let print_timeout = timeout.as_ref().map_or("0".to_string(), |(_, t)| t.clone());
-    let agent_argv = kits::headless_argv(
+    let agent_argv = agent_argv(
+        &name,
         &entry.agent,
         &HeadlessRun {
             model: model.as_deref(),
@@ -1104,13 +1120,7 @@ fn run(raw: &[String]) -> Outcome {
             print_timeout: &print_timeout,
             extra: &args.trailing,
         },
-    )
-    .ok_or_else(|| {
-        Fail::usage(format!(
-            "{name} runs {:?}; headless runs know Claude Code, Codex and agy",
-            entry.agent
-        ))
-    })?;
+    )?;
 
     let interrupted = Arc::new(AtomicBool::new(false));
     {
@@ -3840,10 +3850,24 @@ mod tests {
         assert!(kits::headless_argv("claude-token", &stream)
             .unwrap()
             .contains(&"--verbose".to_string()));
-        assert!(
-            kits::headless_argv("opencode", &run).is_none(),
-            "no measured headless facts"
+        let no_effort = HeadlessRun {
+            effort: None,
+            ..run.clone()
+        };
+        assert_eq!(
+            kits::headless_argv("opencode-litellm", &no_effort).unwrap(),
+            [
+                "opencode",
+                "run",
+                "--format",
+                "json",
+                "--model",
+                "m",
+                "--",
+                sbx::PROMPT_SLOT
+            ]
         );
+        assert!(kits::headless_argv("unknown", &run).is_none());
 
         let launch = sbx::headless_exec_argv("box", Some(Path::new("/w")), "/tmp/r", &claude);
         assert_eq!(&launch[..5], ["sbx", "exec", "-w", "/w", "box"]);
@@ -3894,6 +3918,92 @@ mod tests {
             "{printed}"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn opencode_gets_one_stream_for_both_json_formats_and_its_prompt_after_the_dashes() {
+        let extra = strings(&["--title", "t"]);
+        let run = |format| HeadlessRun {
+            model: Some("litellm-gw/m"),
+            effort: None,
+            format,
+            print_timeout: "0",
+            extra: &extra,
+        };
+        let text = kits::headless_argv("opencode-litellm", &run(OutputFormat::Text)).unwrap();
+        assert_eq!(
+            text,
+            [
+                "opencode",
+                "run",
+                "--model",
+                "litellm-gw/m",
+                "--title",
+                "t",
+                "--",
+                sbx::PROMPT_SLOT
+            ]
+        );
+        let json = kits::headless_argv("opencode-litellm", &run(OutputFormat::Json)).unwrap();
+        let stream =
+            kits::headless_argv("opencode-litellm", &run(OutputFormat::StreamJson)).unwrap();
+        assert_eq!(json, stream, "OpenCode has no single-document form");
+        assert_eq!(
+            json,
+            [
+                "opencode",
+                "run",
+                "--format",
+                "json",
+                "--model",
+                "litellm-gw/m",
+                "--title",
+                "t",
+                "--",
+                sbx::PROMPT_SLOT
+            ]
+        );
+        for agent in ["opencode-local", "opencode"] {
+            assert_eq!(
+                kits::headless_argv(agent, &run(OutputFormat::Json)).unwrap(),
+                json,
+                "{agent}"
+            );
+        }
+    }
+
+    #[test]
+    fn run_refuses_an_effort_on_opencode_and_names_every_headless_agent() {
+        let run = HeadlessRun {
+            model: None,
+            effort: Some("high"),
+            format: OutputFormat::Json,
+            print_timeout: "0",
+            extra: &[],
+        };
+        for agent in ["opencode-litellm", "opencode-local", "opencode"] {
+            assert!(!kits::accepts_effort(agent), "{agent}");
+            let fail = agent_argv("box", agent, &run).unwrap_err();
+            assert_eq!(fail.code, EXIT_USAGE);
+            assert!(fail.message.contains("OpenCode"), "{}", fail.message);
+            assert!(fail.message.contains("--effort"), "{}", fail.message);
+        }
+        for agent in ["claude-litellm", "codex-openai", "agy", "pi-litellm"] {
+            assert!(kits::accepts_effort(agent), "{agent}");
+            assert!(agent_argv("box", agent, &run).is_ok(), "{agent}");
+        }
+        let without = HeadlessRun {
+            effort: None,
+            ..run.clone()
+        };
+        assert!(agent_argv("box", "opencode-litellm", &without).is_ok());
+
+        let fail = agent_argv("box", "unknown", &without).unwrap_err();
+        assert_eq!(fail.code, EXIT_USAGE);
+        for name in ["Claude Code", "Codex", "agy", "Pi", "OpenCode"] {
+            assert!(fail.message.contains(name), "{name}: {}", fail.message);
+        }
+        assert!(HELP.contains("Pi and OpenCode"));
     }
 
     #[test]

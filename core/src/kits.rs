@@ -372,8 +372,9 @@ pub fn agent_launch_args(agent_cmd: &str) -> &'static [&'static str] {
 /// What a headless run prints, `aisbx run --format`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutputFormat {
-    /// One JSON result document at the end — Claude Code's and agy's `--output-format json`. Codex
-    /// has no single-document form; it gets `--json`, its JSONL event stream, for both JSON formats.
+    /// One JSON result document at the end — Claude Code's and agy's `--output-format json`. Codex,
+    /// Pi and OpenCode have no single-document form; they get their JSONL event stream for both
+    /// JSON formats.
     Json,
     /// One JSON event per line while the agent works.
     StreamJson,
@@ -481,9 +482,26 @@ pub fn headless_argv(agent: &str, run: &HeadlessRun<'_>) -> Option<Vec<String>> 
             argv.extend(run.extra.iter().cloned());
             argv.extend(["--".into(), slot]);
         }
-        Some(Cli::OpenCode) | None => return None,
+        Some(Cli::OpenCode) => {
+            argv.extend(["opencode".into(), "run".into()]);
+            if run.format != OutputFormat::Text {
+                argv.extend(["--format".into(), "json".into()]);
+            }
+            if let Some(model) = run.model {
+                argv.extend(["--model".into(), model.into()]);
+            }
+            flags(&mut argv, "opencode");
+            argv.extend(run.extra.iter().cloned());
+            argv.extend(["--".into(), slot]);
+        }
+        None => return None,
     }
     Some(argv)
+}
+
+/// Whether [`headless_argv`] has a flag for [`HeadlessRun::effort`], for an sbx agent name.
+pub fn accepts_effort(agent: &str) -> bool {
+    !matches!(cli(agent), Some(Cli::OpenCode))
 }
 
 /// The secret service an agent signs in with although its kit marks the credential optional,
@@ -1446,6 +1464,7 @@ mod tests {
         };
         assert_eq!(headless("claude-bare-local"), headless("claude-litellm"));
         assert_eq!(headless("pi-local"), headless("pi-litellm"));
+        assert_eq!(headless("opencode-local"), headless("opencode-litellm"));
     }
 
     /// Every shipped backend has a provider, and within one provider each harness is one offered
