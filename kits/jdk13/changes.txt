@@ -1,1 +1,0 @@
-Initial kit: Azul Zulu 13.54.17 (JDK 13.0.14), downloaded from Azul's CDN.

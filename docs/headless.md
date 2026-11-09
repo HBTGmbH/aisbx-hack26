@@ -33,6 +33,7 @@ They use the same kits, sandbox names, LiteLLM connections and setup tokens, and
 | `aisbx up` | writes the connection's generated kit on a LiteLLM backend, then `sbx create` with the backend and addon kits |
 | `aisbx run` | `sbx exec`: the agent update, the prompt upload, then the agent in print mode; after the run, `sbx policy approval respond` dismisses held requests |
 | `aisbx ls` | `sbx ls --json` |
+| `aisbx kits` | nothing: it reads the kit folders on this computer |
 | `aisbx status` | `sbx ls --json`, `sbx inspect --json` and `sbx policy approval ls --json` |
 | `aisbx stop` / `rm` | `sbx stop` / `sbx rm --force` |
 
@@ -268,6 +269,7 @@ These commands manage what the dashboard manages on its own screens. Each page d
 | --- | --- | --- |
 | `aisbx litellm ls \| add \| fetch \| rm` | **Secrets** (`S`), **Refresh models** (`L`) | [LiteLLM connections](litellm.md#adding-a-connection) |
 | `aisbx local discover \| add \| ls \| fetch \| rm` | the create wizard's Engine step, **Refresh models** (`L`) | [Local inference engines](local.md#in-scripts) |
+| `aisbx kits` | the create wizard's kit list | [Your own kits](kits.md#your-own-kits) |
 | `aisbx folders ls \| add \| rm` | **Host folders** (`F`) | [Host folders](sandboxes.md#host-folders-f-and-companionjson) |
 | `aisbx skill-repo add \| rm \| ls \| fetch \| auto-update` | **Skills** (`K`) | [Skill repositories](skills.md#skill-repositories-aisbx-skill-repo) |
 | `aisbx skill add \| rm \| ls \| sync` | **Repo skills** (`i`) | [Skills from skill repos](skills.md#skills-from-skill-repos-aisbx-skill) |

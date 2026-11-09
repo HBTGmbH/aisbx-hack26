@@ -705,7 +705,7 @@ pub fn resolve(snapshot: &Snapshot, catalog: &Catalog, registry: &mut Registry) 
             // name, and no other checkout - see `crate::tmpfs`.
             let in_ram = crate::tmpfs::is_copy(Path::new(path));
             tmpfs_volumes |= in_ram;
-            let elsewhere = !in_ram && !Path::new(path).starts_with(&catalog.kits_dir);
+            let elsewhere = !in_ram && !catalog.is_own_path(Path::new(path));
             // A named setup token's generated kit (`crate::tokens`), not an addon.
             if let Some(named) = crate::tokens::name_of_kit(&dir_name) {
                 token = Some(named.to_string());
@@ -2783,6 +2783,26 @@ mod checkout_tests {
         )[0];
         assert!(sb.backend.is_none());
         assert_eq!(sb.foreign_kits, vec!["mcp-postgres".to_string()]);
+
+        // A user kit in its own folder is an addon, and flags no other checkout.
+        let mut catalog = catalog;
+        let root = std::env::temp_dir().join(format!("aisbx-user-kits-{}", std::process::id()));
+        let tools = root.join("proj-tools");
+        std::fs::create_dir_all(&tools).unwrap();
+        std::fs::write(tools.join("proj-tools.yaml"), "kind: mixin\n").unwrap();
+        catalog.add_user_kits(&root);
+        let paths = [
+            here.join("claude-anthropic").display().to_string(),
+            tools.display().to_string(),
+        ];
+        let sb = &resolve(
+            &snapshot(&paths.iter().map(String::as_str).collect::<Vec<_>>()),
+            &catalog,
+            &mut registry,
+        )[0];
+        assert_eq!(sb.addons, vec!["proj-tools".to_string()]);
+        assert!(sb.foreign_kits.is_empty() && sb.other_checkout.is_none());
+        std::fs::remove_dir_all(root).unwrap();
 
         registry.forget("s");
     }

@@ -2,7 +2,7 @@
 
 [← Back to the README](../README.md)
 
-Which kits this repository ships, and how to write a kit.
+Which kits this repository ships, how to use your own kits, and how to write a kit.
 
 Every kit is an sbx **kit-spec v3** kit. A backend is a *workload*: the image the agent runs in. An addon is a
 *mixin* that sbx layers onto the workload.
@@ -28,9 +28,7 @@ Pick the kits in the create wizard (`n`, or **New sandbox**). You can add an *ad
 | `opencode-local` | workload on `shell-docker-image` | OpenCode 2.x → an inference engine on this computer |
 | `claude-local` | workload on `claude-code-docker` | Claude Code → an inference engine on this computer |
 | `jdk25` | stackable mixin, add-able | Temurin JDK 25 |
-| `jdk13` | stackable mixin | Azul Zulu JDK 13 ([JDK](addons.md#jdk--java-projects)) |
 | `rust` | stackable mixin | Rust 1.99.1: rustc, cargo, clippy, rustfmt ([Rust projects](addons.md#rust-projects)) |
-| `fonts` | stackable mixin | fontconfig and the DejaVu fonts ([Fonts](addons.md#fonts-fontconfig--dejavu)) |
 | `rtk` | stackable mixin, add-able | the RTK token reducer |
 | `headroom` | stackable mixin | **unmeasured**: the headroom context-compression proxy for Claude Code's model requests ([Headroom](addons.md#headroom-context-compression-proxy-unmeasured)) |
 | `ponytail` | stackable mixin | the Ponytail "lazy senior dev" prompt and commands for Claude Code and OpenCode |
@@ -64,6 +62,63 @@ Pick the kits in the create wizard (`n`, or **New sandbox**). You can add an *ad
 
 The Claude Code workloads start Claude Code in *bypass permissions* mode, because the sandbox is the boundary. They
 answer its first-start questions: workspace trust, onboarding and *"Make auto mode your default permission mode?"*.
+
+## Your own kits
+
+aisbx ships only kits that are useful in many projects: a language toolchain, a cache, a token saver. A kit for one
+project belongs in a folder you manage, outside this repository. Examples are your company's CLI, a database client
+pinned to production's version, or an MCP server for an internal service.
+
+aisbx finds your kits here:
+
+- In the folders that `AISBX_KITS_PATH` lists, separated like `PATH` (`:`, or `;` on Windows).
+- Without the variable, in `~/.config/aisbx/kits`. aisbx uses `$XDG_CONFIG_HOME/aisbx/kits` if that is set, and
+  `%APPDATA%\aisbx\kits` on Windows.
+
+Each folder holds kit folders, laid out as in `kits/`: `<name>/<name>.yaml`, and `<name>.dockerfile` if the kit has
+an image. sbx builds them as it builds the kits shipped here. Your kits can live in a Git repository of their own,
+and their Dockerfile can start `FROM` an image that your own pipeline builds and publishes.
+
+```console
+$ mkdir -p ~/.config/aisbx/kits/acme-cli
+$ $EDITOR ~/.config/aisbx/kits/acme-cli/acme-cli.yaml       # kind: mixin, and a description
+$ sbx kit validate ~/.config/aisbx/kits/acme-cli
+$ aisbx kits                                                # acme-cli  addon  user  …/acme-cli
+$ aisbx up --kit acme-cli ...
+```
+
+Your kits appear beside the shipped addons in the create wizard and on `e`. Their help starts *"Your own kit,
+from …"*. `aisbx up --kit <name>` takes them too.
+
+The [descriptor rules](#how-the-kits-are-written) apply to your kits as well: add a marker, and a `harnesses.txt` if
+the kit works only with some agents. A kit with network rules or volumes joins only at creation, like a shipped one.
+
+### What aisbx refuses
+
+aisbx skips these folders and gives the reason in `aisbx kits`. They never stop the dashboard from loading.
+
+- A folder without `<name>/<name>.yaml`. Folders whose names start with `.`, such as `.git`, are skipped silently.
+- A `kind: workload`. Your kits are addons, and the backends stay the ones aisbx knows how to start.
+- A kit with the name of a shipped kit, or of an earlier user kit. The first one found wins.
+- A name that aisbx uses for the kits it generates, for connections, setup tokens, model pins and host folders.
+
+### List the kits
+
+`aisbx kits` prints every kit that `--kit` takes, one per line, with four tab-separated fields: the name, `backend`
+or `addon`, `aisbx` or `user`, and the folder. Then it prints a `#` line for each user kit folder it searched, marked
+`(missing)` if the folder does not exist, and a `# skipped:` line for each refused folder.
+
+`aisbx kits --json` prints an object with these fields:
+
+- `kits`: an array of objects with `name`, `kind`, `source`, `dir` and `description`.
+- `user_dirs`: the folders it searched.
+- `skipped`: the reason for each refused folder.
+
+### Sandboxes built with your kits
+
+A sandbox remembers the folder of each of its kits. With the kit in that folder, the dashboard counts it as an addon
+of the sandbox and notices when it changes. If you remove the folder, or `AISBX_KITS_PATH` no longer lists it, the
+dashboard shows the kit as `<name>?`, as it does for any kit it does not know.
 
 ## Kit internals
 

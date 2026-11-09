@@ -2487,6 +2487,7 @@ impl CreateForm {
                 if only_now {
                     text.push(ONLY_NOW_NOTE.to_string());
                 }
+                text.extend(addon.kit.user_note());
                 text.push(addon.kit.first_sentence().to_string());
                 Help::new(addon.kit.name.clone(), text.join(" ").trim().to_string())
             }

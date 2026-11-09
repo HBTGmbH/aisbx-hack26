@@ -272,9 +272,7 @@ Pick addons in the create wizard or with `e`. [Stackable kits](docs/addons.md) d
 | Addon                        | Gives the sandbox                                                          |
 |------------------------------|----------------------------------------------------------------------------|
 | `jdk25`                      | [Temurin JDK 25](docs/addons.md#jdk--java-projects)                        |
-| `jdk13`                      | [Azul Zulu JDK 13](docs/addons.md#jdk--java-projects), end-of-life, not stackable with `jdk25` |
 | `rust`                       | [Rust](docs/addons.md#rust-projects): rustc, cargo, clippy, rustfmt        |
-| `fonts`                      | [fontconfig and the DejaVu fonts](docs/addons.md#fonts-fontconfig--dejavu), for text rendering |
 | `host-gradle`, `host-maven`  | [the host's Gradle and Maven caches](docs/addons.md#host-mavengradle-caches-read-only), read-only |
 | `host-npm`, `host-pip`       | [the host's npm, pip and uv caches](docs/addons.md#host-npmpipuv-caches-read-only), read-only |
 | `host-skills`                | [the host's own skills](docs/addons.md#host-skills-read-only), read-only and live |
@@ -285,6 +283,9 @@ Pick addons in the create wizard or with `e`. [Stackable kits](docs/addons.md) d
 | `headroom`                   | the [headroom](docs/addons.md#headroom-context-compression-proxy-unmeasured) compression proxy (an experiment, not measured) |
 | `statusline`                 | a Claude Code [status line](docs/addons.md#status-line-inside-the-sandbox) with the sandbox name, kits and usage |
 | `pkg-cache`                  | [prepared package caches](docs/addons.md#prepared-package-caches-npm-pip-uv--headless), headless only |
+
+aisbx ships only addons that are useful in many projects. Keep a kit for one project in your own folder:
+[Your own kits](docs/kits.md#your-own-kits) appear beside these.
 
 ## Without aisbx
 
@@ -315,7 +316,7 @@ token ([LiteLLM connections](docs/litellm.md#the-generated-kit),
 | [Shared agent skills](docs/skills.md)                  | give the agents your skills, from the host or from Git repositories |
 | [Stackable kits](docs/addons.md)                       | choose and configure the addons                                    |
 | [Headless use](docs/headless.md)                       | run agents from scripts and CI with `aisbx up` and `aisbx run`     |
-| [Kits](docs/kits.md)                                   | see every kit, write a kit                                         |
+| [Kits](docs/kits.md)                                   | see every kit, write a kit, use your own kits                      |
 | [Development](docs/development.md)                     | build and test the dashboard, upgrade sbx                          |
 
 ## Help and contributing

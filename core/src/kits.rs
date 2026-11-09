@@ -1,5 +1,6 @@
 //! Discovery and classification of this repo's `kits/` directory: a `kind: workload` kit is a
-//! backend (the agent itself), a `kind: mixin` kit is a stackable addon.
+//! backend (the agent itself), a `kind: mixin` kit is a stackable addon. Beside them, the user's
+//! own mixins from [`user_kit_dirs`]: kits for one project, kept outside this repo.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -16,6 +17,8 @@ pub struct Kit {
     /// The folder's name: what sbx calls the kit (its handle) and, for a workload, the agent.
     pub name: String,
     pub dir: PathBuf,
+    /// A user-managed kit from one of [`user_kit_dirs`], not one this repo ships.
+    pub user: bool,
     pub display_name: String,
     /// The descriptor's `description`, folded onto one line; empty where it has none.
     pub description: String,
@@ -589,6 +592,10 @@ pub struct Catalog {
     pub models: Vec<crate::models::Model>,
     /// Where [`Catalog::models`] came from — the pin list's title says it.
     pub models_source: crate::models::Source,
+    /// The folders searched for user-managed kits ([`user_kit_dirs`]), in order.
+    pub user_dirs: Vec<PathBuf>,
+    /// User kit folders that were skipped, each with why: a broken one never stops the load.
+    pub user_problems: Vec<String>,
 }
 
 impl Catalog {
@@ -623,14 +630,95 @@ impl Catalog {
             ));
         }
         backends.sort_by_key(|b| (b.rank(), b.agent.clone(), b.kit.name.clone()));
-        Ok(Self {
+        let mut catalog = Self {
             models: Vec::new(),
             models_source: crate::models::Source::NotYet,
             kits_dir,
             backends,
             addons,
             headless,
-        })
+            user_dirs: user_kit_dirs(),
+            user_problems: Vec::new(),
+        };
+        for dir in catalog.user_dirs.clone() {
+            catalog.add_user_kits(&dir);
+        }
+        Ok(catalog)
+    }
+
+    /// Add the user's mixins in `root`, after the shipped addons. A folder that is no kit, a
+    /// workload, or a name already taken is skipped and noted in [`Catalog::user_problems`].
+    pub fn add_user_kits(&mut self, root: &Path) {
+        let Ok(read) = fs::read_dir(root) else { return };
+        let mut entries: Vec<PathBuf> = read
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            // `.git` and its kind: a folder of kits is often a repository of its own.
+            .filter(|p| {
+                p.is_dir()
+                    && !p
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .starts_with('.')
+            })
+            .collect();
+        entries.sort();
+        for dir in entries {
+            if let Err(why) = self.add_user_kit(&dir) {
+                self.user_problems.push(format!("{}: {why}", dir.display()));
+            }
+        }
+    }
+
+    fn add_user_kit(&mut self, dir: &Path) -> Result<(), String> {
+        if !descriptor_path(dir).is_file() {
+            return Err(format!(
+                "no descriptor {}",
+                descriptor_path(dir)
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+            ));
+        }
+        let mut kit = Kit::parse(dir).map_err(|e| format!("{e:#}"))?;
+        if kit.is_workload {
+            return Err("a workload: user kits must be mixins (`kind: mixin`)".into());
+        }
+        if is_generated_name(&kit.name) {
+            return Err(format!(
+                "{}: a name aisbx keeps for its generated kits",
+                kit.name
+            ));
+        }
+        if let Some(taken) = self.find_kit(&kit.name) {
+            return Err(format!(
+                "{} is already the kit in {}",
+                kit.name,
+                taken.dir.display()
+            ));
+        }
+        kit.user = true;
+        self.addons.push(Addon { kit });
+        Ok(())
+    }
+
+    fn find_kit(&self, name: &str) -> Option<&Kit> {
+        self.backends
+            .iter()
+            .map(|b| &b.kit)
+            .chain(self.all_addons().map(|a| &a.kit))
+            .find(|k| k.name == name)
+    }
+
+    /// Whether `path` is where the kit of that name lives in this catalog — a shipped kit in this
+    /// checkout's `kits/`, or a user kit in its own folder.
+    pub fn is_own_path(&self, path: &Path) -> bool {
+        let name = path.file_name().unwrap_or_default().to_string_lossy();
+        match self.find_kit(&name) {
+            Some(kit) if kit.user => path == kit.dir,
+            _ => path.starts_with(&self.kits_dir),
+        }
     }
 
     pub fn backend(&self, name: &str) -> Option<&Backend> {
@@ -692,6 +780,13 @@ impl Kit {
         Self::parse(dir)
     }
 
+    /// For a user-managed kit, where it comes from: the forms' help says it before the
+    /// description, so nobody takes it for one of this repo's kits.
+    pub fn user_note(&self) -> Option<String> {
+        self.user
+            .then(|| format!("Your own kit, from {}.", self.dir.display()))
+    }
+
     /// The description's first sentence, its period kept: what a form has room for.
     pub fn first_sentence(&self) -> &str {
         match self.description.find(". ") {
@@ -729,6 +824,7 @@ impl Kit {
         Ok(Self {
             name,
             dir: dir.to_path_buf(),
+            user: false,
             display_name,
             description,
             kit_add_blocker: kit_add_blocker(&caps),
@@ -740,6 +836,47 @@ impl Kit {
             skills: caps.iter().any(|c| c.kind == "agent-skills@1"),
         })
     }
+}
+
+/// The environment variable that lists the folders of user-managed kits, separated like `PATH`.
+pub const KITS_PATH_ENV: &str = "AISBX_KITS_PATH";
+
+/// Where aisbx looks for user-managed kits: the folders in [`KITS_PATH_ENV`] when it is set,
+/// else the one default, `<config>/aisbx/kits`. Each folder holds kit folders, as `kits/` does.
+pub fn user_kit_dirs() -> Vec<PathBuf> {
+    if cfg!(any(test, feature = "test-support")) {
+        // Tests see the shipped kits only, whatever the developer keeps in their own folders.
+        return Vec::new();
+    }
+    match std::env::var_os(KITS_PATH_ENV) {
+        Some(list) => std::env::split_paths(&list)
+            .filter(|p| !p.as_os_str().is_empty())
+            .collect(),
+        None => default_user_kit_dir().into_iter().collect(),
+    }
+}
+
+/// `$XDG_CONFIG_HOME/aisbx/kits`, else `%APPDATA%\aisbx\kits` on Windows, else
+/// `~/.config/aisbx/kits`.
+pub fn default_user_kit_dir() -> Option<PathBuf> {
+    let var = |name: &str| std::env::var_os(name).filter(|v| !v.is_empty());
+    let config = var("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| {
+            cfg!(windows)
+                .then(|| var("APPDATA").map(PathBuf::from))
+                .flatten()
+        })
+        .or_else(|| var("HOME").map(|h| PathBuf::from(h).join(".config")))?;
+    Some(config.join("aisbx").join("kits"))
+}
+
+/// A name of the kits aisbx generates itself, which a sandbox's kit list is read back by.
+fn is_generated_name(name: &str) -> bool {
+    crate::tokens::name_of_kit(name).is_some()
+        || crate::models::is_kit(name)
+        || crate::folders::is_kit(name)
+        || crate::litellm::of_kit(name).is_some()
 }
 
 /// A kit folder's descriptor: `<folder>/<folder>.yaml`, the companion-pair layout sbx's kit builder
@@ -1002,6 +1139,79 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         fs::write(descriptor_path(&dir), descriptor).unwrap();
         dir
+    }
+
+    #[test]
+    fn user_kits_join_as_addons_and_bad_ones_are_skipped_with_why() {
+        let mut catalog = Catalog::load().unwrap();
+        let mixin = "schemaVersion: \"3\"\nkind: mixin\ndescription: Project tools. More.\n";
+        let root = std::env::temp_dir().join(format!("aisbx-user-kits-{}", std::process::id()));
+        let kit = |name: &str, descriptor: &str| {
+            let dir = root.join(name);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(descriptor_path(&dir), descriptor).unwrap();
+            dir
+        };
+        let tools = kit("user-proj-tools", mixin);
+        kit("rust", mixin);
+        kit("user-agent", "schemaVersion: \"3\"\nkind: workload\n");
+        let generated = crate::folders::kit_dir("s");
+        kit(generated.file_name().unwrap().to_str().unwrap(), mixin);
+        fs::create_dir_all(root.join("no-descriptor")).unwrap();
+        fs::create_dir_all(root.join(".git")).unwrap();
+        let shipped_addons = catalog.addons.len();
+
+        catalog.add_user_kits(&root);
+
+        let added: Vec<&Kit> = catalog.addons[shipped_addons..]
+            .iter()
+            .map(|a| &a.kit)
+            .collect();
+        assert_eq!(added.len(), 1, "{:?}", catalog.user_problems);
+        assert_eq!(added[0].name, "user-proj-tools");
+        assert!(added[0].user);
+        assert_eq!(
+            added[0].user_note().unwrap(),
+            format!("Your own kit, from {}.", tools.display())
+        );
+        assert!(catalog.addon("user-proj-tools").is_some());
+        assert!(
+            !catalog.addon("rust").unwrap().kit.user,
+            "a shipped kit keeps its name"
+        );
+        let problems = catalog.user_problems.join("\n");
+        assert_eq!(catalog.user_problems.len(), 4, "{problems}");
+        for why in [
+            "already the kit in",
+            "user kits must be mixins",
+            "generated kits",
+            "no descriptor",
+        ] {
+            assert!(problems.contains(why), "{why}: {problems}");
+        }
+        assert!(!problems.contains(".git"), "{problems}");
+
+        // A user kit is at home in its own folder; a shipped kit in this checkout's kits/.
+        assert!(catalog.is_own_path(&tools));
+        assert!(!catalog.is_own_path(&Path::new("/elsewhere").join("user-proj-tools")));
+        assert!(catalog.is_own_path(&catalog.kits_dir.join("rtk")));
+        assert!(!catalog.is_own_path(Path::new("/elsewhere/aisbx/kits/rtk")));
+        assert!(
+            Catalog::load().unwrap().addon("user-proj-tools").is_none(),
+            "tests see no user kits"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn the_user_kit_folders_come_from_the_path_variable_else_the_config_folder() {
+        assert!(user_kit_dirs().is_empty(), "tests read no user folders");
+        let dir = default_user_kit_dir().unwrap();
+        assert!(
+            dir.ends_with(Path::new("aisbx").join("kits")),
+            "{}",
+            dir.display()
+        );
     }
 
     /// The kit's parsed descriptor, read off the checkout.
@@ -1853,7 +2063,6 @@ mod tests {
         assert_eq!(
             create_time,
             vec![
-                ("fonts", "network rules"),
                 ("headroom", "network rules"),
                 ("host-gradle", "extra workspaces"),
                 ("host-maven", "extra workspaces"),
@@ -1875,7 +2084,7 @@ mod tests {
             .map(|a| a.kit.name.as_str())
             .collect();
         addable.sort_unstable();
-        assert_eq!(addable, vec!["jdk13", "jdk25", "rtk", "statusline"]);
+        assert_eq!(addable, vec!["jdk25", "rtk", "statusline"]);
     }
 
     #[test]

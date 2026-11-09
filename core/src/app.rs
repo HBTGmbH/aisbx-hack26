@@ -1899,7 +1899,9 @@ impl KitsForm {
                     (_, Some(_)) => crate::create::ONLY_NOW_NOTE,
                     (_, None) => "It is added without a rebuild.",
                 };
-                let text = format!("{cost} {}", addon.kit.first_sentence());
+                let note = addon.kit.user_note().unwrap_or_default();
+                let text = format!("{cost} {note} {}", addon.kit.first_sentence());
+                let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
                 Help::new(addon.kit.name.clone(), text.trim())
             }
             KitsRow::Model(slot) => crate::create::alias_help(slot),

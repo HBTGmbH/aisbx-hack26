@@ -74,6 +74,9 @@ HEADLESS USE — the same kits and names as the dashboard, for scripts:
         Agents: Claude Code, Codex, Antigravity (agy), Pi and OpenCode.
 
     aisbx ls [--json]              every sandbox: name, status, agent, workspace, label
+    aisbx kits [--json]            every kit --kit takes: name, kind, source (aisbx or user),
+                                   folder; then the user kit folders searched and the ones
+                                   skipped, with why (AISBX_KITS_PATH, else ~/.config/aisbx/kits)
     aisbx status NAME [--json]     state, agent, kits, held requests (exit 1 if unknown)
     aisbx stop NAME                stop it
     aisbx rm NAME                  remove it (the workspace is never touched)
@@ -153,6 +156,7 @@ pub fn is_subcommand(arg: &str) -> bool {
         arg,
         "up" | "run"
             | "ls"
+            | "kits"
             | "status"
             | "stop"
             | "rm"
@@ -204,6 +208,7 @@ pub fn main(args: &[String]) -> u8 {
         "up" => up(rest),
         "run" => run(rest),
         "ls" => ls(rest),
+        "kits" => kits_cmd(rest),
         "status" => status(rest),
         "stop" => stop(rest),
         "rm" => rm(rest),
@@ -1434,6 +1439,57 @@ fn ls(raw: &[String]) -> Outcome {
         println!("{out}");
     }
     Ok(0)
+}
+
+fn kits_cmd(raw: &[String]) -> Outcome {
+    let args = Args::parse(raw, &["json"], &[])?;
+    if let Some(extra) = args.positional.first().or(args.trailing.first()) {
+        return Err(Fail::usage(format!("kits takes no argument: {extra}")));
+    }
+    let catalog = Catalog::load().map_err(|e| Fail::sandbox(one_line(&format!("{e:#}"))))?;
+    println!("{}", render_kits(&catalog, args.has("json")));
+    Ok(0)
+}
+
+fn render_kits(catalog: &Catalog, json: bool) -> String {
+    let kits = catalog
+        .backends
+        .iter()
+        .map(|b| (&b.kit, "backend"))
+        .chain(catalog.all_addons().map(|a| (&a.kit, "addon")));
+    if json {
+        let rows: Vec<serde_json::Value> = kits
+            .map(|(kit, kind)| {
+                serde_json::json!({
+                    "name": kit.name,
+                    "kind": kind,
+                    "source": if kit.user { "user" } else { "aisbx" },
+                    "dir": kit.dir,
+                    "description": kit.description,
+                })
+            })
+            .collect();
+        let doc = serde_json::json!({
+            "kits": rows,
+            "user_dirs": catalog.user_dirs,
+            "skipped": catalog.user_problems,
+        });
+        return serde_json::to_string_pretty(&doc).unwrap_or_default();
+    }
+    let mut lines: Vec<String> = kits
+        .map(|(kit, kind)| {
+            let source = if kit.user { "user" } else { "aisbx" };
+            format!("{}\t{kind}\t{source}\t{}", kit.name, kit.dir.display())
+        })
+        .collect();
+    for dir in &catalog.user_dirs {
+        let state = if dir.is_dir() { "" } else { " (missing)" };
+        lines.push(format!("# user kits: {}{state}", dir.display()));
+    }
+    for problem in &catalog.user_problems {
+        lines.push(format!("# skipped: {problem}"));
+    }
+    lines.join("\n")
 }
 
 fn one_line(text: &str) -> String {
@@ -3087,6 +3143,41 @@ mod tests {
         );
         assert!(rows[1]["label"].is_null());
         assert_eq!(rows[1]["workspaces"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn kits_lists_every_kit_with_its_source_and_the_skipped_user_kits() {
+        assert!(is_subcommand("kits"));
+        assert!(!runs_sandboxes("kits"));
+        assert!(HELP.contains("aisbx kits [--json]"));
+        assert_eq!(kits_cmd(&strings(&["x"])).unwrap_err().code, EXIT_USAGE);
+        let mut catalog = Catalog::load().unwrap();
+        catalog.user_dirs = vec![PathBuf::from("/nowhere/kits")];
+        catalog.user_problems = vec!["/nowhere/kits/x: no descriptor x.yaml".into()];
+
+        let text = render_kits(&catalog, false);
+        let rust = catalog.kits_dir.join("rust");
+        assert!(
+            text.contains(&format!("rust\taddon\taisbx\t{}", rust.display())),
+            "{text}"
+        );
+        assert!(text.contains("\tbackend\taisbx\t"), "{text}");
+        assert!(
+            text.contains("# user kits: /nowhere/kits (missing)"),
+            "{text}"
+        );
+        assert!(
+            text.contains("# skipped: /nowhere/kits/x: no descriptor x.yaml"),
+            "{text}"
+        );
+
+        let doc: serde_json::Value = serde_json::from_str(&render_kits(&catalog, true)).unwrap();
+        let rows = doc["kits"].as_array().unwrap();
+        let rust_row = rows.iter().find(|r| r["name"] == "rust").unwrap();
+        assert_eq!(rust_row["source"], "aisbx");
+        assert_eq!(rust_row["kind"], "addon");
+        assert_eq!(doc["user_dirs"], serde_json::json!(["/nowhere/kits"]));
+        assert_eq!(doc["skipped"].as_array().unwrap().len(), 1);
     }
 
     #[test]
