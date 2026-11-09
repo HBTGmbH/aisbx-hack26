@@ -252,6 +252,9 @@ the container, for example for parallel agents or untrusted code. Your repo is m
 $ git fetch sandbox-<name> && git log sandbox-<name>/<branch>
 ```
 
+Deleting the sandbox also deletes the agent's commits that you have not fetched yet, so fetch first. The delete
+confirmation says so and shows the command.
+
 ## Mountless sandboxes
 
 A mountless sandbox has no host folder. The agent works in `/home/agent/workspace`, and the files go with the sandbox:

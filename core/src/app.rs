@@ -7643,6 +7643,14 @@ impl App {
                 false => format!("Your files in {} stay.", model::tilde(&sb.workspace)),
             },
         ];
+        if sb.clone {
+            body.push(String::new());
+            body.push(
+                "Its commits in the agent's own clone are deleted with it unless you fetched them:"
+                    .into(),
+            );
+            body.push(format!("git fetch sandbox-{name}"));
+        }
 
         let steps = vec![Step::new("sbx rm --force", sbx::rm_argv(&name))];
         // A named token stays on the host.
@@ -16420,6 +16428,49 @@ mod action_tests {
         a.modal = None;
         a.perform(Action::Start);
         assert!(matches!(&a.handoff, Some(Handoff::Agent { name, .. }) if name == "run"));
+    }
+
+    fn delete_body(a: &mut App, name: &str) -> Vec<String> {
+        on(a, name);
+        a.perform(Action::Delete);
+        match a.modal.take() {
+            Some(Modal::Confirm(c)) => {
+                assert!(c.title == "Delete sandbox" && c.danger && !c.yes);
+                c.body
+            }
+            _ => panic!("no confirm"),
+        }
+    }
+
+    #[test]
+    fn deleting_a_clone_mode_sandbox_warns_about_unfetched_commits() {
+        let mut a = app();
+        a.sandboxes[0].clone = true;
+        let body = delete_body(&mut a, "box");
+        assert_eq!(
+            body[3..],
+            [
+                "Your files in /proj stay.",
+                "",
+                "Its commits in the agent's own clone are deleted with it unless you fetched them:",
+                "git fetch sandbox-box",
+            ]
+        );
+    }
+
+    #[test]
+    fn deleting_a_plain_sandbox_says_nothing_about_fetching() {
+        let mut a = app();
+        let body = delete_body(&mut a, "box");
+        assert_eq!(
+            body,
+            [
+                "box  (box)".to_string(),
+                String::new(),
+                VOLUMES_STAY.to_string(),
+                "Your files in /proj stay.".to_string(),
+            ]
+        );
     }
 
     #[test]
