@@ -73,6 +73,7 @@ HEADLESS USE — the same kits and names as the dashboard, for scripts:
         --ssh-agent            forward the host SSH agent (off by default)
         Agents: Claude Code, Codex, Antigravity (agy), Pi and OpenCode.
 
+    aisbx ls [--json]              every sandbox: name, status, agent, workspace, label
     aisbx status NAME [--json]     state, agent, kits, held requests (exit 1 if unknown)
     aisbx stop NAME                stop it
     aisbx rm NAME                  remove it (the workspace is never touched)
@@ -151,6 +152,7 @@ pub fn is_subcommand(arg: &str) -> bool {
     matches!(
         arg,
         "up" | "run"
+            | "ls"
             | "status"
             | "stop"
             | "rm"
@@ -201,6 +203,7 @@ pub fn main(args: &[String]) -> u8 {
     let result = match cmd.as_str() {
         "up" => up(rest),
         "run" => run(rest),
+        "ls" => ls(rest),
         "status" => status(rest),
         "stop" => stop(rest),
         "rm" => rm(rest),
@@ -227,7 +230,7 @@ pub fn main(args: &[String]) -> u8 {
 /// The subcommands that drive sandboxes, before which sbx's telemetry is turned off where nobody
 /// chose a value.
 fn runs_sandboxes(cmd: &str) -> bool {
-    matches!(cmd, "up" | "run" | "status" | "stop" | "rm")
+    matches!(cmd, "up" | "run" | "ls" | "status" | "stop" | "rm")
 }
 
 /// [`sbx::disable_telemetry_by_default`], said on stderr; a failure only warns.
@@ -1417,7 +1420,61 @@ fn parse_duration(text: &str) -> Option<Duration> {
     (any && number.is_empty() && total > 0).then(|| Duration::from_secs(total))
 }
 
-// --- status, stop, rm ------------------------------------------------------------------------------
+// --- ls, status, stop, rm --------------------------------------------------------------------------
+
+fn ls(raw: &[String]) -> Outcome {
+    let args = Args::parse(raw, &["json"], &[])?;
+    if let Some(extra) = args.positional.first().or(args.trailing.first()) {
+        return Err(Fail::usage(format!("ls takes no argument: {extra}")));
+    }
+    let entries = sbx::list().map_err(|e| Fail::sandbox(one_line(&format!("{e:#}"))))?;
+    let registry = state::Registry::load();
+    let out = render_ls(&entries, &registry, args.has("json"));
+    if !out.is_empty() {
+        println!("{out}");
+    }
+    Ok(0)
+}
+
+fn one_line(text: &str) -> String {
+    text.split(['\n', '\r'])
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn render_ls(entries: &[sbx::LsEntry], registry: &state::Registry, json: bool) -> String {
+    if json {
+        let mut rows = Vec::new();
+        for e in entries {
+            let label = registry.display_name(&e.name);
+            rows.push(serde_json::json!({
+                "name": e.name,
+                "status": e.status,
+                "agent": e.agent,
+                "workspaces": e.workspaces,
+                "label": label,
+            }));
+        }
+        return serde_json::to_string_pretty(&rows).unwrap_or_default();
+    }
+    let cell = |text: &str| text.replace(['\t', '\n', '\r'], " ");
+    let mut lines = Vec::new();
+    for e in entries {
+        let primary = e.workspaces.first().map_or("", String::as_str);
+        let label = registry.display_name(&e.name).unwrap_or("");
+        lines.push(format!(
+            "{}\t{}\t{}\t{}\t{}",
+            cell(&e.name),
+            cell(&e.status),
+            cell(&e.agent),
+            cell(primary),
+            cell(label)
+        ));
+    }
+    lines.join("\n")
+}
 
 fn status(raw: &[String]) -> Outcome {
     let args = Args::parse(raw, &["json"], &[])?;
@@ -2978,9 +3035,106 @@ fn sync_args(raw: &[String]) -> Result<(String, bool), Fail> {
 mod tests {
     use super::*;
 
+    fn ls_entry(name: &str, workspaces: &[&str]) -> sbx::LsEntry {
+        sbx::LsEntry {
+            name: name.into(),
+            agent: "claude".into(),
+            status: "running".into(),
+            workspaces: workspaces.iter().map(|w| (*w).to_string()).collect(),
+            ..Default::default()
+        }
+    }
+
+    fn ls_registry() -> state::Registry {
+        let mut registry = state::Registry::empty();
+        registry.set_display_name("a", Some("nightly".into()));
+        registry.set_display_name("c", Some("two\tparts\nand\rmore".into()));
+        registry
+    }
+
+    #[test]
+    fn ls_prints_one_tab_separated_line_per_sandbox() {
+        let entries = [
+            ls_entry("a", &["/w/a", "/w/extra:ro"]),
+            ls_entry("b", &[]),
+            ls_entry("c", &["/w/c"]),
+        ];
+        let out = render_ls(&entries, &ls_registry(), false);
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines[0], "a\trunning\tclaude\t/w/a\tnightly");
+        assert_eq!(lines[1], "b\trunning\tclaude\t\t");
+        assert_eq!(lines[2], "c\trunning\tclaude\t/w/c\ttwo parts and more");
+        assert_eq!(lines.len(), 3);
+    }
+
+    #[test]
+    fn ls_json_is_an_array_of_the_five_fields() {
+        let entries = [ls_entry("a", &["/w/a", "/w/x:ro"]), ls_entry("b", &[])];
+        let out = render_ls(&entries, &ls_registry(), true);
+        let doc: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let rows = doc.as_array().unwrap();
+        assert_eq!(rows.len(), 2);
+        for row in rows {
+            let object = row.as_object().unwrap();
+            let mut keys: Vec<&str> = object.keys().map(String::as_str).collect();
+            keys.sort();
+            assert_eq!(keys, ["agent", "label", "name", "status", "workspaces"]);
+        }
+        assert_eq!(rows[0]["label"], "nightly");
+        assert_eq!(
+            rows[0]["workspaces"],
+            serde_json::json!(["/w/a", "/w/x:ro"])
+        );
+        assert!(rows[1]["label"].is_null());
+        assert_eq!(rows[1]["workspaces"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn ls_of_nothing_prints_nothing_or_an_empty_array() {
+        let registry = state::Registry::empty();
+        assert_eq!(render_ls(&[], &registry, false), "");
+        let json = render_ls(&[], &registry, true);
+        let doc: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(doc, serde_json::json!([]));
+    }
+
+    #[test]
+    fn ls_takes_only_json() {
+        assert!(is_subcommand("ls"));
+        assert!(runs_sandboxes("ls"));
+        assert!(HELP.contains("aisbx ls [--json]"));
+        for raw in [
+            &["x"][..],
+            &["--bogus"],
+            &["--json=1"],
+            &["--", "NAME"],
+            &["--json", "--", "NAME"],
+        ] {
+            assert_eq!(ls(&strings(raw)).unwrap_err().code, EXIT_USAGE, "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn ls_accepts_the_json_switch() {
+        let args = Args::parse(&strings(&["--json"]), &["json"], &[]).unwrap();
+        assert!(args.has("json"));
+        assert!(args.positional.is_empty() && args.trailing.is_empty());
+        let args = Args::parse(&[], &["json"], &[]).unwrap();
+        assert!(!args.has("json"));
+    }
+
+    #[test]
+    fn ls_errors_fit_on_one_line() {
+        assert_eq!(
+            one_line("sbx ls failed: boom\r\n  second line\n\nthird"),
+            "sbx ls failed: boom second line third"
+        );
+        assert_eq!(one_line("plain"), "plain");
+    }
+
     #[test]
     fn telemetry_is_turned_off_before_the_commands_that_drive_sandboxes() {
-        for cmd in ["up", "run", "status", "stop", "rm"] {
+        for cmd in ["up", "run", "ls", "status", "stop", "rm"] {
             assert!(runs_sandboxes(cmd), "{cmd}");
         }
         for cmd in ["litellm", "folders", "skill-repo", "skill", "nope"] {

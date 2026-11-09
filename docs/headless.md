@@ -32,6 +32,7 @@ They use the same kits, sandbox names, LiteLLM connections and setup tokens, and
 | --- | --- |
 | `aisbx up` | writes the connection's generated kit on a LiteLLM backend, then `sbx create` with the backend and addon kits |
 | `aisbx run` | `sbx exec`: the agent update, the prompt upload, then the agent in print mode; after the run, `sbx policy approval respond` dismisses held requests |
+| `aisbx ls` | `sbx ls --json` |
 | `aisbx status` | `sbx ls --json`, `sbx inspect --json` and `sbx policy approval ls --json` |
 | `aisbx stop` / `rm` | `sbx stop` / `sbx rm --force` |
 
@@ -190,8 +191,14 @@ The agent's output comes through untouched:
   its default output. `--model` takes OpenCode's `provider/model` form, e.g. `litellm-<connection>/<model>`
   (`local-<engine>/<model>` on a local engine).
 
-### `aisbx status`, `stop` and `rm`
+### `aisbx ls`, `status`, `stop` and `rm`
 
+- `ls [--json]` lists every local sandbox in sbx's order and changes nothing. A line has five tab-separated fields:
+  name, status, agent, the primary workspace (empty if none) and the label. The label is the one `aisbx up --label`
+  or the dashboard stored, empty if the sandbox has none; a tab or newline inside a field becomes a space. With
+  `--json` it prints one array whose elements have `name`, `status`, `agent`, `workspaces` (all of them, as sbx gives
+  them) and `label` (`null` if none). With no sandbox it prints nothing, or `[]`. If sbx cannot be read it prints one
+  line to stderr, nothing to stdout, and exits 125. It takes no argument.
 - `status NAME [--json]` shows whether the sandbox exists and its status. It also shows whether sbx keeps it running
   (`detached`), the agent, workspaces, kits, and the requests it holds for approval. It exits 1 for an unknown
   sandbox.
