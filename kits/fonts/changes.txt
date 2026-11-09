@@ -1,0 +1,1 @@
+Initial kit: fontconfig from the image's apt sources, and the DejaVu fonts (fonts-dejavu-core) in the image.

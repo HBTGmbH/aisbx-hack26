@@ -23,7 +23,7 @@ Press `e` to add or remove kits.
 | Kit | What an add does |
 | --- | --- |
 | `jdk25`, `rtk`, `statusline` | adds the kit live, in about a minute; the workspace, session history and installed tools stay |
-| `web`, `remote-dev`, `rust`, `headroom`, `ponytail` | fails, because the kit widens the network rules; the dashboard offers a rebuild |
+| `web`, `remote-dev`, `rust`, `fonts`, `headroom`, `ponytail` | fails, because the kit widens the network rules; the dashboard offers a rebuild |
 | `host-npm`, `host-pip`, `host-gradle`, `host-maven`, `host-skills` | fails, because the kit needs mounts fixed at creation; the dashboard offers a rebuild |
 
 To remove a kit, rebuild: sbx has no "kit remove".

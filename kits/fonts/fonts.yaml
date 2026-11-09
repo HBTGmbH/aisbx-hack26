@@ -1,0 +1,27 @@
+# syntax=docker/sandbox-kit:3
+# Fontconfig and the DejaVu fonts: a v3 mixin, its image built from fonts.dockerfile.
+schemaVersion: "3"
+kind: mixin
+displayName: Fontconfig + DejaVu fonts
+description: >-
+  Install fontconfig (libfontconfig, fc-list, fc-match) and the DejaVu Sans, Serif and Mono fonts,
+  so programs that render text work in the sandbox: Java AWT/headless image and PDF generation,
+  headless browsers, matplotlib and other charting tools.
+
+capabilities:
+  # The apt sources at install only, for the fontconfig library and tools.
+  - type: com.docker.sandbox/network-policy@1
+    config:
+      install:
+        allow:
+          - ports.ubuntu.com
+          - archive.ubuntu.com
+          - security.ubuntu.com
+          - download.docker.com
+
+  - type: com.docker.sandbox/lifecycle@1
+    config:
+      install:
+        - command: ["sh", "/usr/local/lib/aisbx/fonts/fontconfig.sh"]
+          user: "0"
+          description: Install fontconfig where the image has none, and rebuild the font cache

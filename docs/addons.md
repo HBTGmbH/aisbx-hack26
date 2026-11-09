@@ -2,7 +2,8 @@
 
 [← Back to the README](../README.md)
 
-Addons are kits that you stack onto any backend: build tools, host caches, web access, token savers and a status line.
+Addons are kits that you stack onto any backend: build tools, fonts, host caches, web access, token savers and a status
+line.
 
 Add an addon in one of these ways:
 
@@ -49,6 +50,40 @@ The dashboard shows every `kits/jdk<ver>/`. To add a version:
 
 Update the version, the dist date and the ten SHA256s. Take them from
 `https://static.rust-lang.org/dist/channel-rust-stable.toml` (each component's `hash`).
+
+## Fonts (fontconfig + DejaVu)
+
+`fonts` gives the sandbox what text rendering needs. The workload images ship neither fontconfig nor a font, so
+without the kit, code that draws text fails. In Java, AWT fails with *"Fontconfig head is null"* or a
+`NullPointerException` in `sun.awt.FontConfiguration`.
+
+The kit gives the sandbox:
+
+- **The DejaVu fonts:** Sans, Serif and Mono in `/usr/share/fonts/truetype/dejavu`. They come from Ubuntu's
+  `fonts-dejavu-core`, which apt installs and checks while the kit's image is built.
+- **fontconfig:** `libfontconfig`, its configuration and `fc-list`, `fc-match` and `fc-cache`. An install hook adds
+  it from the image's apt sources if the image does not have it. Then it rebuilds the font cache.
+- **The marker:** `SBX_KIT_FONTS=1`.
+
+With the kit, `fc-match sans-serif`, `fc-match serif` and `fc-match monospace` return DejaVu. That is fontconfig's
+default for those families, so Java's logical fonts (`Dialog`, `SansSerif`, `Monospaced`), matplotlib and headless
+Chromium render without further setup. Pair it with `jdk25` or `jdk13` for headless image, chart and PDF generation.
+
+### Network and adding the kit later
+
+The hook reaches Ubuntu's mirrors and `download.docker.com`, and only at install. Because the kit has network rules,
+it joins only at creation or with a rebuild, the same as `rust`. If apt fails, the create still succeeds and the
+hook prints *"fonts: could not install fontconfig"*. The fonts are still on disk, but programs that need
+`libfontconfig` report that it is missing.
+
+### Ship another font
+
+Fonts in `/usr/share/fonts` and `/usr/local/share/fonts` are indexed. To add your own:
+
+1. Put the `.ttf` or `.otf` files in `kits/fonts/fonts/`.
+2. Add `COPY fonts/ /usr/local/share/fonts/aisbx/` to the final stage of `kits/fonts/fonts.dockerfile`.
+3. Check the font's license before you ship it.
+4. Rebuild the sandbox. The hook's `fc-cache` indexes the new fonts.
 
 ## RTK token reducer
 

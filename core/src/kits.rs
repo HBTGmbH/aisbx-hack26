@@ -1853,6 +1853,7 @@ mod tests {
         assert_eq!(
             create_time,
             vec![
+                ("fonts", "network rules"),
                 ("headroom", "network rules"),
                 ("host-gradle", "extra workspaces"),
                 ("host-maven", "extra workspaces"),

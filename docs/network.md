@@ -58,7 +58,7 @@ A kit's allow-list can only open hosts, never close one. Under `deny-all`, these
 | `agy` | Google's sign-in, model, picture, plugin and updater hosts, `storage.googleapis.com`; **denies** `play.googleapis.com`, agy's log sink ([Antigravity](agents.md#antigravity-agy)) |
 | `pi-litellm` | the npm registry (updates; also at install); the gateway host ([Pi](agents.md#pi)) |
 | `pi-local`, `claude-bare-local`, `opencode-local`, `claude-local` | what `pi-litellm`, `claude-litellm`, `opencode-litellm` and `claude-litellm` allow; the engine's port on this computer instead of a gateway host ([Local inference engines](local.md#the-key-and-the-network)) |
-| `rust` | at install only: Ubuntu's mirrors and `download.docker.com` |
+| `rust`, `fonts` | at install only: Ubuntu's mirrors and `download.docker.com` |
 | `headroom` | at install only: `pypi.org`, `files.pythonhosted.org` |
 | `ponytail` | at install only: `github.com` |
 | `web` | `**`: every host, see [Web access](addons.md#web-access-websearch--webfetch) |
