@@ -1,0 +1,7 @@
+# syntax=docker/sandbox-kit:3
+# Azul Zulu JDK 13: a v3 mixin, its image built from jdk13.dockerfile. No hooks and no network on
+# purpose: `sbx kit add` applies the kit to a live sandbox.
+schemaVersion: "3"
+kind: mixin
+displayName: Azul Zulu JDK 13
+description: Install Azul Zulu JDK 13 (13.0.14, an end-of-life release) and set JAVA_HOME, so JVM/Gradle builds work in the sandbox.

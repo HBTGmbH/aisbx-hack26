@@ -16,7 +16,9 @@ and `host-skills`. A kit that finds no folder on this host is greyed out and sho
 
 ## JDK / Java projects
 
-`jdk25` adds Eclipse Temurin 25 in `/opt/jdk-25` and sets `JAVA_HOME`.
+`jdk25` adds Eclipse Temurin 25 in `/opt/jdk-25` and sets `JAVA_HOME`. `jdk13` adds Azul Zulu 13 (an end-of-life
+release) in `/opt/jdk-13`, also setting `JAVA_HOME`. The two cannot be stacked: sbx refuses two kits that set
+`JAVA_HOME` to different values, so pick one JDK per sandbox.
 
 ### Build egress for Gradle and Maven
 

@@ -3923,7 +3923,9 @@ mod tests {
             buffer[(5, y)].modifier.contains(Modifier::REVERSED),
             "the band"
         );
-        assert!(!lines_with(&buffer, "[x] rtk").is_empty());
+        // Taller, so the ticked rtk stays on screen however many kits sort above it.
+        let tall = buffer_for(&mut app, 80, 40, plain);
+        assert!(!lines_with(&tall, "[x] rtk").is_empty());
         let footer = line_of(&buffer, 23);
         assert!(footer.contains("up/down move"), "{footer}");
         assert!(footer.contains("space toggle"), "{footer}");

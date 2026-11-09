@@ -1874,7 +1874,7 @@ mod tests {
             .map(|a| a.kit.name.as_str())
             .collect();
         addable.sort_unstable();
-        assert_eq!(addable, vec!["jdk25", "rtk", "statusline"]);
+        assert_eq!(addable, vec!["jdk13", "jdk25", "rtk", "statusline"]);
     }
 
     #[test]

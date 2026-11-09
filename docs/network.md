@@ -63,7 +63,7 @@ A kit's allow-list can only open hosts, never close one. Under `deny-all`, these
 | `ponytail` | at install only: `github.com` |
 | `web` | `**`: every host, see [Web access](addons.md#web-access-websearch--webfetch) |
 | `remote-dev` | the editors' server download hosts, see [Editor and app integrations](sandboxes.md#editor-and-app-integrations-vs-code-intellij-claude-desktop) |
-| `jdk25`, `rtk`, `host-gradle`, `host-maven`, `host-npm`, `host-pip`, `host-skills`, `pkg-cache`, `statusline` | nothing |
+| `jdk25`, `jdk13`, `rtk`, `host-gradle`, `host-maven`, `host-npm`, `host-pip`, `host-skills`, `pkg-cache`, `statusline` | nothing |
 
 - A connection's kit allows exactly `<host>:443` of its URL. A local engine's kit allows exactly `localhost:<port>`,
   the name sbx checks a sandbox's request to `host.docker.internal:<port>` against.

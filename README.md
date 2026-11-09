@@ -272,6 +272,7 @@ Pick addons in the create wizard or with `e`. [Stackable kits](docs/addons.md) d
 | Addon                        | Gives the sandbox                                                          |
 |------------------------------|----------------------------------------------------------------------------|
 | `jdk25`                      | [Temurin JDK 25](docs/addons.md#jdk--java-projects)                        |
+| `jdk13`                      | [Azul Zulu JDK 13](docs/addons.md#jdk--java-projects), end-of-life, not stackable with `jdk25` |
 | `rust`                       | [Rust](docs/addons.md#rust-projects): rustc, cargo, clippy, rustfmt        |
 | `host-gradle`, `host-maven`  | [the host's Gradle and Maven caches](docs/addons.md#host-mavengradle-caches-read-only), read-only |
 | `host-npm`, `host-pip`       | [the host's npm, pip and uv caches](docs/addons.md#host-npmpipuv-caches-read-only), read-only |

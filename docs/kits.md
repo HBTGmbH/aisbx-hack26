@@ -28,6 +28,7 @@ Pick the kits in the create wizard (`n`, or **New sandbox**). You can add an *ad
 | `opencode-local` | workload on `shell-docker-image` | OpenCode 2.x → an inference engine on this computer |
 | `claude-local` | workload on `claude-code-docker` | Claude Code → an inference engine on this computer |
 | `jdk25` | stackable mixin, add-able | Temurin JDK 25 |
+| `jdk13` | stackable mixin | Azul Zulu JDK 13 ([JDK](addons.md#jdk--java-projects)) |
 | `rust` | stackable mixin | Rust 1.99.1: rustc, cargo, clippy, rustfmt ([Rust projects](addons.md#rust-projects)) |
 | `rtk` | stackable mixin, add-able | the RTK token reducer |
 | `headroom` | stackable mixin | **unmeasured**: the headroom context-compression proxy for Claude Code's model requests ([Headroom](addons.md#headroom-context-compression-proxy-unmeasured)) |
