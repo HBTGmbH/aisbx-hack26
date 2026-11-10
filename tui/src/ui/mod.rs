@@ -52,6 +52,7 @@ pub(crate) fn draw_in(frame: &mut Frame, app: &mut App, caps: theme::Caps) {
         Screen::Connection(_) => form::render_connection(frame, app, body),
         Screen::ConnSwitch(_) => form::render_conn_switch(frame, app, body),
         Screen::Folders(_) => form::render_folders(frame, app, body),
+        Screen::SandboxFolders(_) => form::render_sandbox_folders(frame, app, body),
         Screen::Settings(_) => form::render_settings(frame, app, body),
     };
     hits.extend(render_header(frame, app, header));
@@ -348,6 +349,7 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect, caps: theme::Caps) ->
         | Screen::Connection(_)
         | Screen::ConnSwitch(_)
         | Screen::Folders(_)
+        | Screen::SandboxFolders(_)
             if app.on_form_buttons() =>
         {
             vec![
@@ -379,6 +381,13 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect, caps: theme::Caps) ->
             ("↵", "edit / next", KeyCode::Enter),
             ("n", "new", KeyCode::Char('n')),
             ("d", "delete", KeyCode::Char('d')),
+            ("esc", "back", KeyCode::Esc),
+        ],
+        Screen::SandboxFolders(_) => vec![
+            ("↑↓/tab", "move", KeyCode::Down),
+            ("←→", "access", KeyCode::Right),
+            ("↵", "add / next", KeyCode::Enter),
+            ("d", "drop", KeyCode::Char('d')),
             ("esc", "back", KeyCode::Esc),
         ],
         Screen::Skills(_) => vec![
@@ -1312,6 +1321,39 @@ mod tests {
         assert_eq!(colour("/srv/out", "read-write"), theme::WARN);
         // The access row's pick says it too, while read-write is picked.
         assert_eq!(colour("◉ read-write", "◉ read-write"), theme::WARN);
+    }
+
+    #[test]
+    fn the_sandbox_folders_screen_lists_its_folders_and_marks_the_new_ones() {
+        let mut app = app_with(populated());
+        let sandbox = app.sandboxes[0].name.clone();
+        let label = app.sandboxes[0].label.clone();
+        let form = crate::app::SandboxFoldersForm {
+            sandbox,
+            folders: vec!["/srv/kb:ro".into(), "/srv/out".into()],
+            original: vec!["/srv/kb:ro".into()],
+            focus: 2,
+            ..Default::default()
+        };
+        app.screen = Screen::SandboxFolders(form);
+        let buffer = buffer_at(&mut app, 110, 34);
+        let colour = |path: &str, access: &str| {
+            let (_, y) = lines_with(&buffer, path)[0];
+            let x = column_of(&buffer, y, access).expect(access);
+            buffer[(x, y)].fg
+        };
+        assert_eq!(colour("/srv/kb", "read-only"), theme::MUTED);
+        assert_eq!(colour("/srv/out", "read-write"), theme::WARN);
+        let screen = super::tests_support::render_at(&mut app, 110, 34);
+        assert!(screen.contains(&format!("Folders of {label}")), "{screen}");
+        let line = |path: &str| {
+            let (_, y) = lines_with(&buffer, path)[0];
+            column_of(&buffer, y, "(new)").is_some()
+        };
+        assert!(line("/srv/out"), "{screen}");
+        assert!(!line("/srv/kb"), "{screen}");
+        assert!(screen.contains("Apply rebuilds the sandbox"), "{screen}");
+        render_all_sizes(&mut app);
     }
 
     fn render_all_sizes(app: &mut App) {

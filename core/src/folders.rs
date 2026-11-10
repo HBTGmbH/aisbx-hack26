@@ -328,6 +328,21 @@ pub fn spec_host(spec: &str) -> (&str, bool) {
     (path, access == Access::Read)
 }
 
+/// The extra workspace `spec` (`PATH[:TARGET][:ro]`) with its access set to `access`: `:ro`
+/// added for read-only, dropped for read-write. Path and target stay as they are.
+pub fn spec_with_access(spec: &str, access: Access) -> String {
+    let (path, target, _) = entry_parts(spec);
+    let mut out = path.to_string();
+    if let Some(target) = target {
+        out.push(':');
+        out.push_str(target);
+    }
+    if access == Access::Read {
+        out.push_str(":ro");
+    }
+    out
+}
+
 /// Where sbx mounts a clone-mode sandbox's source, a target no folder may take.
 pub const CLONE_SOURCE: &str = "/run/sandbox/source";
 
@@ -733,6 +748,21 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         fs::canonicalize(&dir).unwrap()
+    }
+
+    #[test]
+    fn switching_a_specs_access_keeps_its_path_and_target() {
+        for (spec, access, want) in [
+            ("/data", Access::Read, "/data:ro"),
+            ("/data:ro", Access::Write, "/data"),
+            ("/data:ro", Access::Read, "/data:ro"),
+            ("/data:/mnt/d", Access::Read, "/data:/mnt/d:ro"),
+            ("C:/data:ro", Access::Write, "C:/data"),
+        ] {
+            let got = spec_with_access(spec, access);
+            assert_eq!(got, want, "{spec}");
+            assert_eq!(spec_host(&got).1, access == Access::Read, "{spec}");
+        }
     }
 
     fn entry(path: &Path, access: Access, purpose: &str) -> Entry {

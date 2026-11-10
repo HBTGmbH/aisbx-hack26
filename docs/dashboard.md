@@ -185,6 +185,7 @@ Each sandbox is one row of three columns. The columns line up down the list.
 | `S` | [every secret stored on the host](accounts.md#stored-secrets-s); add (`n`), edit (`↵`) or delete (`d`) a LiteLLM connection |
 | `K` | [the shared agent-skills store](skills.md#shared-agent-skills); its *Repo skills for all sandboxes* row picks [repo skills](skills.md#skills-from-skill-repos-aisbx-skill) for every sandbox |
 | `i` | this sandbox's own [repo skills](skills.md#skills-from-skill-repos-aisbx-skill), and *Sync now* |
+| `f` | [the folders this sandbox mounts](sandboxes.md#a-sandboxs-own-folders-f) beside its workspace: add one, switch its access (`←→`) or drop it (`d`), then *Apply* to rebuild |
 | `F` | [the host folders every sandbox mounts](sandboxes.md#host-folders-f-and-companionjson): add, edit (`↵`) or delete (`d`) one |
 | `T` | sbx's settings for this host: [telemetry](network.md#sbxs-own-telemetry-t), [clipboard copy and image paste](sandboxes.md#the-host-clipboard-t) and [FUSE](sandboxes.md#fuse-filesystems-t), each turned on or off with `↵`, and the [skills default](skills.md#share-modes), which `↵`, `←` and `→` walk |
 | `p` / `u` | [publish / unpublish a port](sandboxes.md#ports-p--u) |

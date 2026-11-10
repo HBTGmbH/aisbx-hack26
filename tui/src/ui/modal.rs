@@ -78,6 +78,8 @@ const HELP: &[(&str, &[(&str, &str)])] = &[
             ("S", "the stored secrets: tokens, keys, LiteLLM connections"),
             ("K", "the shared skills"),
             ("F", "the folders every sandbox mounts"),
+            ("f", "the folders this sandbox mounts beside its workspace"),
+            ("", "a change applies with a rebuild"),
             ("T", "sbx's settings on this computer, such as telemetry"),
             ("i", "skills from skill repositories, for this sandbox"),
             (

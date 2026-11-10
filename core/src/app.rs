@@ -1390,6 +1390,127 @@ impl FoldersForm {
 pub const FOLDERS_NOTE: &str = "Every sandbox mounts these folders too, from its next create or \
      rebuild. The agent learns what each folder is for.";
 
+/// A focusable line of one sandbox's folders screen (`f`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SandboxFoldersRow {
+    /// One folder of the sandbox's list, by index into [`SandboxFoldersForm::folders`]: ←→ or
+    /// space switch its access, `d` drops it.
+    Folder(usize),
+    Path,
+    /// Opens the folder picker on the host; Use puts the picked folder into Path.
+    Browse,
+    /// Read-only or read-write for the folder in Path; ←→ and space pick.
+    Access,
+    /// Puts the folder in Path on the list.
+    Add,
+    /// Saves the list and offers the rebuild that mounts it.
+    Apply,
+    Close,
+}
+
+/// The folders one sandbox mounts beside its workspace, as the create wizard's *Mount a
+/// folder…* picked them ([`Registry::extra_folders`]). sbx fixes a sandbox's mounts when it
+/// creates it, so a change applies with a rebuild.
+#[derive(Debug, Clone, Default)]
+pub struct SandboxFoldersForm {
+    /// The sbx name.
+    pub sandbox: String,
+    /// The sandbox's workspace: a folder in it or above it cannot be added.
+    pub workspace: PathBuf,
+    /// The list being edited, each `PATH[:TARGET][:ro]` as `sbx create` takes it.
+    pub folders: Vec<String>,
+    /// The list as the registry held it when the screen opened.
+    pub original: Vec<String>,
+    pub path: TextInput,
+    pub access: folders::Access,
+    pub focus: usize,
+}
+
+impl SandboxFoldersForm {
+    /// Apply and Close, one line of buttons.
+    pub const BUTTONS: usize = 2;
+
+    pub fn rows(&self) -> Vec<SandboxFoldersRow> {
+        let mut rows: Vec<SandboxFoldersRow> = (0..self.folders.len())
+            .map(SandboxFoldersRow::Folder)
+            .collect();
+        rows.extend([
+            SandboxFoldersRow::Path,
+            SandboxFoldersRow::Browse,
+            SandboxFoldersRow::Access,
+            SandboxFoldersRow::Add,
+            SandboxFoldersRow::Apply,
+            SandboxFoldersRow::Close,
+        ]);
+        rows
+    }
+
+    pub fn focused(&self) -> SandboxFoldersRow {
+        let rows = self.rows();
+        rows[self.focus.min(rows.len() - 1)]
+    }
+
+    /// Has the list changed since the screen opened?
+    pub fn changed(&self) -> bool {
+        self.folders != self.original
+    }
+
+    /// The host path of folder `i` with `~` for home, and its access.
+    pub fn shown(&self, i: usize) -> Option<(String, folders::Access)> {
+        let spec = self.folders.get(i)?;
+        let (path, read_only) = folders::spec_host(spec);
+        let access = match read_only {
+            true => folders::Access::Read,
+            false => folders::Access::Write,
+        };
+        Some((model::tilde(Path::new(path)), access))
+    }
+
+    /// What `row` is about, for the TUI's help strip and the GUI's tooltip.
+    pub fn help(&self, row: SandboxFoldersRow) -> crate::create::Help {
+        use crate::create::Help;
+        use crate::folders::Access;
+        let said = |access: Access| {
+            let mut label = access.label().to_string();
+            label[..1].make_ascii_uppercase();
+            format!("{label}: {}.", access.meaning())
+        };
+        match row {
+            SandboxFoldersRow::Folder(i) => match self.shown(i) {
+                Some((path, access)) => Help::new(
+                    path,
+                    format!("{} ←→ switches it, d drops it.", said(access)),
+                ),
+                None => Help::new("", ""),
+            },
+            SandboxFoldersRow::Path => Help::new(
+                "folder",
+                "A folder on this computer, such as ~/notes. Not in the workspace, not your home \
+                 folder or a folder above it, and not a folder with credentials.",
+            ),
+            SandboxFoldersRow::Browse => {
+                Help::new("browse", "Pick the folder instead of typing it.")
+            }
+            SandboxFoldersRow::Access => Help::new(
+                "access",
+                format!("{} {}", said(Access::Read), said(Access::Write)),
+            ),
+            SandboxFoldersRow::Add => Help::new("Add", "Put the folder on the list."),
+            SandboxFoldersRow::Apply => Help::new(
+                "Apply",
+                "Save the list and rebuild the sandbox, which mounts it. sbx fixes a sandbox's \
+                 folders when it creates it.",
+            ),
+            SandboxFoldersRow::Close => Help::new("Close", "Leave, changing nothing."),
+        }
+    }
+}
+
+/// What a sandbox's folders screen says under its title.
+pub const SANDBOX_FOLDERS_NOTE: &str = "The folders this sandbox mounts beside its workspace, \
+     each at its own path. A change applies with a rebuild, which keeps the workspace and the \
+     session history. The host folders (F) come on top.";
+
 /// A focusable line in the `A` form of a LiteLLM sandbox.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConnSwitchRow {
@@ -2192,6 +2313,8 @@ pub enum StartDirTarget {
     /// The host folders screen, whose Path field takes the pick. The form travels inside, as
     /// for `New`.
     HostFolder(Box<FoldersForm>),
+    /// A sandbox's folders screen, whose Path field takes the pick, as for `HostFolder`.
+    SandboxFolder(Box<SandboxFoldersForm>),
     /// One more host folder for the create form ([`CreateRow::Folder`]), which travels inside,
     /// as for `New`.
     Folder(Box<CreateForm>),
@@ -2203,7 +2326,10 @@ impl StartDirForm {
     pub fn buttons(&self) -> usize {
         match self.target {
             StartDirTarget::Sandbox(_) => 3,
-            StartDirTarget::New(_) | StartDirTarget::HostFolder(_) | StartDirTarget::Folder(_) => 2,
+            StartDirTarget::New(_)
+            | StartDirTarget::HostFolder(_)
+            | StartDirTarget::SandboxFolder(_)
+            | StartDirTarget::Folder(_) => 2,
         }
     }
 
@@ -2623,6 +2749,8 @@ pub enum Screen {
     ConnSwitch(ConnSwitchForm),
     /// The host folders every sandbox mounts beside its workspace (`F`).
     Folders(FoldersForm),
+    /// The folders one sandbox mounts beside its workspace (`f`).
+    SandboxFolders(SandboxFoldersForm),
     Settings(SettingsForm),
 }
 
@@ -3703,6 +3831,7 @@ impl App {
             Screen::Connection(_) => self.conn_key(key),
             Screen::ConnSwitch(_) => self.conn_switch_key(key),
             Screen::Folders(_) => self.folders_key(key),
+            Screen::SandboxFolders(_) => self.sandbox_folders_key(key),
             Screen::Settings(_) => self.settings_key(key),
         }
     }
@@ -3895,6 +4024,7 @@ impl App {
             Screen::Connection(f) => (f.focus, f.rows().len(), ConnForm::BUTTONS),
             Screen::ConnSwitch(f) => (f.focus, f.rows().len(), ConnSwitchForm::BUTTONS),
             Screen::Folders(f) => (f.focus, f.rows().len(), FoldersForm::BUTTONS),
+            Screen::SandboxFolders(f) => (f.focus, f.rows().len(), SandboxFoldersForm::BUTTONS),
             _ => return false,
         };
         // `>=`, not `==`: a stale focus past the end is clamped onto the last row, a button.
@@ -3945,6 +4075,7 @@ impl App {
             Screen::StartDir(f) => f.rows().len(),
             Screen::Approvals(_) => self.approval_rows().len(),
             Screen::Folders(f) => f.rows().len(),
+            Screen::SandboxFolders(f) => f.rows().len(),
             Screen::Settings(f) => f.rows().len(),
             Screen::List => 0,
         };
@@ -3964,6 +4095,7 @@ impl App {
             Screen::StartDir(f) => f.focus = index,
             Screen::Approvals(f) => f.focus = index,
             Screen::Folders(f) => f.focus = index,
+            Screen::SandboxFolders(f) => f.focus = index,
             Screen::Settings(f) => f.focus = index,
             Screen::List => {}
         }
@@ -4075,6 +4207,20 @@ impl App {
                 if matches!(
                     rows[index],
                     FoldersRow::Browse | FoldersRow::Save | FoldersRow::Close
+                ) {
+                    self.on_key(KeyEvent::from(KeyCode::Enter));
+                }
+            }
+            Screen::SandboxFolders(form) => {
+                let rows = form.rows();
+                if index >= rows.len() {
+                    return;
+                }
+                form.focus = index;
+                // The folder rows and the Path field only take the cursor.
+                if !matches!(
+                    rows[index],
+                    SandboxFoldersRow::Folder(_) | SandboxFoldersRow::Path
                 ) {
                     self.on_key(KeyEvent::from(KeyCode::Enter));
                 }
@@ -5702,6 +5848,20 @@ impl App {
                     )),
                 }
             }
+            Action::SandboxFolders => {
+                let sb = selected.ok_or(Refusal::Silent)?;
+                if !sb.is_managed() {
+                    return Err(Refusal::Error(
+                        "only sandboxes created from this repo's kits can be rebuilt with other \
+                         folders"
+                            .into(),
+                    ));
+                }
+                match self.rebuild_blocker_text(&sb.name) {
+                    Some(why) => Err(Refusal::Error(why)),
+                    None => Ok(()),
+                }
+            }
             Action::Stop => match selected.ok_or(Refusal::Silent)? {
                 sb if !sb.running => Err(Refusal::Info(format!("{} is already stopped", sb.label))),
                 _ => Ok(()),
@@ -5752,6 +5912,7 @@ impl App {
             Action::StartDir => self.action_start_dir(),
             Action::Skills => self.screen = Screen::Skills(SkillsForm::default()),
             Action::Folders => self.open_folders(None),
+            Action::SandboxFolders => self.action_sandbox_folders(),
             Action::Settings => self.open_settings(),
             Action::RepoSkills => self.action_sandbox_repo_skills(),
             Action::Approvals => self.action_approvals(),
@@ -6594,6 +6755,7 @@ impl App {
                 self.screen = Screen::Create(*create)
             }
             StartDirTarget::HostFolder(folders) => self.screen = Screen::Folders(*folders),
+            StartDirTarget::SandboxFolder(form) => self.screen = Screen::SandboxFolders(*form),
             StartDirTarget::Sandbox(_) => {}
         }
     }
@@ -6658,6 +6820,7 @@ impl App {
         let name = match &form.target {
             StartDirTarget::Sandbox(name) => name.clone(),
             StartDirTarget::HostFolder(_) => return self.use_host_folder(here),
+            StartDirTarget::SandboxFolder(_) => return self.use_sandbox_folder(here),
             StartDirTarget::Folder(_) => return self.use_picked_folder(here),
             StartDirTarget::New(_) => {
                 let Screen::StartDir(form) = std::mem::replace(&mut self.screen, Screen::List)
@@ -8355,6 +8518,262 @@ impl App {
             "{} dropped — a sandbox keeps it until its next rebuild",
             path.display()
         ));
+    }
+
+    // --- one sandbox's folders --------------------------------------------------------------
+
+    /// `f`: open the folders screen on the selected sandbox's list as the registry holds it.
+    fn action_sandbox_folders(&mut self) {
+        let Some(sb) = self.selected() else { return };
+        let recorded = self.registry.extra_folders(&sb.name);
+        let form = SandboxFoldersForm {
+            sandbox: sb.name.clone(),
+            workspace: sb.workspace.clone(),
+            // The cursor opens on the Path field, below the list.
+            focus: recorded.len(),
+            folders: recorded.clone(),
+            original: recorded,
+            ..Default::default()
+        };
+        self.screen = Screen::SandboxFolders(form);
+    }
+
+    fn sandbox_folders_key(&mut self, key: KeyEvent) {
+        let Screen::SandboxFolders(form) = &mut self.screen else {
+            return;
+        };
+        let rows = form.rows();
+        let row = form.focused();
+        if row == SandboxFoldersRow::Path && edit_text(&mut form.path, key) {
+            return;
+        }
+        let step = |focus, delta| step_form(focus, rows.len(), SandboxFoldersForm::BUTTONS, delta);
+        let switch = |access| match access {
+            folders::Access::Read => folders::Access::Write,
+            folders::Access::Write => folders::Access::Read,
+        };
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => self.screen = Screen::List,
+            KeyCode::Up | KeyCode::BackTab | KeyCode::Char('k') => {
+                form.focus = step(form.focus, -1)
+            }
+            KeyCode::Down | KeyCode::Tab | KeyCode::Char('j') => form.focus = step(form.focus, 1),
+            KeyCode::Left
+            | KeyCode::Right
+            | KeyCode::Char(' ')
+            | KeyCode::Char('h')
+            | KeyCode::Char('l')
+                if matches!(
+                    row,
+                    SandboxFoldersRow::Access | SandboxFoldersRow::Folder(_)
+                ) =>
+            {
+                match row {
+                    SandboxFoldersRow::Folder(i) => {
+                        if let Some((_, access)) = form.shown(i) {
+                            form.folders[i] =
+                                folders::spec_with_access(&form.folders[i], switch(access));
+                        }
+                    }
+                    _ => form.access = switch(form.access),
+                }
+            }
+            KeyCode::Char(' ') | KeyCode::Right | KeyCode::Char('l')
+                if row == SandboxFoldersRow::Browse =>
+            {
+                self.browse_sandbox_folder()
+            }
+            KeyCode::Left | KeyCode::Right => {
+                let delta = if key.code == KeyCode::Left { -1 } else { 1 };
+                if let Some(next) =
+                    step_button(form.focus, rows.len(), SandboxFoldersForm::BUTTONS, delta)
+                {
+                    form.focus = next;
+                }
+            }
+            KeyCode::Char('d') | KeyCode::Delete => {
+                if let SandboxFoldersRow::Folder(i) = row {
+                    form.folders.remove(i);
+                    // Stay on the list while it has rows; an empty list puts Path first.
+                    form.focus = i.min(form.folders.len().saturating_sub(1));
+                }
+            }
+            KeyCode::Enter => match row {
+                SandboxFoldersRow::Path => {
+                    form.focus = rows
+                        .iter()
+                        .position(|r| *r == SandboxFoldersRow::Access)
+                        .unwrap_or(form.focus)
+                }
+                SandboxFoldersRow::Access => self.add_sandbox_folder(),
+                SandboxFoldersRow::Browse => self.browse_sandbox_folder(),
+                SandboxFoldersRow::Add => self.add_sandbox_folder(),
+                SandboxFoldersRow::Apply => self.apply_sandbox_folders(),
+                SandboxFoldersRow::Close => self.screen = Screen::List,
+                SandboxFoldersRow::Folder(_) => form.focus = step(form.focus, 1),
+            },
+            _ => {}
+        }
+    }
+
+    /// Open the folder picker for the Path field, on the folder typed there, else on home.
+    fn browse_sandbox_folder(&mut self) {
+        let Screen::SandboxFolders(form) = &self.screen else {
+            return;
+        };
+        let home = model::home_dir();
+        let start = folders::typed_path(&form.path.value, home.as_deref())
+            .ok()
+            .filter(|p| p.is_dir())
+            .or(home)
+            .unwrap_or_else(|| self.cwd.clone());
+        let (root, rel) = host_root(&start);
+        let Screen::SandboxFolders(form) = std::mem::replace(&mut self.screen, Screen::List) else {
+            return;
+        };
+        let label = format!("folder for {}", form.sandbox);
+        self.screen = Screen::StartDir(StartDirForm::open(
+            StartDirTarget::SandboxFolder(Box::new(form)),
+            label,
+            root,
+            Some(rel),
+        ));
+    }
+
+    /// Put the picked folder into the Path field, unless it may not be mounted; then the picker
+    /// stays open.
+    fn use_sandbox_folder(&mut self, here: PathBuf) {
+        if let Some(why) = model::home_dir().and_then(|home| {
+            let real = std::fs::canonicalize(&here).unwrap_or_else(|_| here.clone());
+            model::mount_refusal(&real, &home)
+        }) {
+            return self.set_error(format!("{}: {why}", model::tilde(&here)));
+        }
+        let Screen::StartDir(picker) = std::mem::replace(&mut self.screen, Screen::List) else {
+            return;
+        };
+        let StartDirTarget::SandboxFolder(mut form) = picker.target else {
+            return;
+        };
+        form.path = TextInput::new(model::tilde(&here));
+        form.focus = form
+            .rows()
+            .iter()
+            .position(|r| *r == SandboxFoldersRow::Access)
+            .unwrap_or(0);
+        self.screen = Screen::SandboxFolders(*form);
+    }
+
+    /// Put the folder in the Path field on the list, checked as the rebuild will check it: an
+    /// existing folder outside the workspace, not refused, not on the list or the host's list.
+    fn add_sandbox_folder(&mut self) {
+        let Screen::SandboxFolders(form) = &self.screen else {
+            return;
+        };
+        let home = model::home_dir();
+        let path = match folders::typed_path(&form.path.value, home.as_deref()) {
+            Ok(path) => path,
+            Err(why) => return self.set_error(why),
+        };
+        let mut spec = path.display().to_string();
+        if form.access == folders::Access::Read {
+            spec.push_str(":ro");
+        }
+        let plan = self.folder_plan(&form.workspace);
+        let wanted: Vec<&str> = (form.folders.iter().map(String::as_str))
+            .chain([spec.as_str()])
+            .collect();
+        let (extra, problems) = folders::extras_of(wanted, &plan, home.as_deref());
+        // Only the new entry's problem refuses it: one already on the list says so at Apply.
+        let mine = format!("“{spec}”");
+        if let Some(problem) = problems.iter().find(|p| p.starts_with(&mine)) {
+            return self.set_error(problem.clone());
+        }
+        let Some(added) = extra.iter().find(|f| f.sbx_spec() == spec).cloned() else {
+            return self.set_error(format!("{} is on the list already", model::tilde(&path)));
+        };
+        let Screen::SandboxFolders(form) = &mut self.screen else {
+            return;
+        };
+        form.folders.push(added.sbx_spec());
+        form.path = TextInput::default();
+        form.access = folders::Access::Read;
+        form.focus = form.folders.len();
+        self.set_info(format!(
+            "{} added ({}) — Apply rebuilds the sandbox to mount it",
+            model::tilde(&added.path),
+            added.access.label()
+        ));
+    }
+
+    /// Save the list and offer the rebuild that mounts it. Nothing changed: just close.
+    fn apply_sandbox_folders(&mut self) {
+        let Screen::SandboxFolders(form) = &self.screen else {
+            return;
+        };
+        if !form.changed() {
+            self.screen = Screen::List;
+            return self.set_info("No folder changed — the sandbox stays as it is");
+        }
+        let plan = self.folder_plan(&form.workspace);
+        let home = model::home_dir();
+        let (_, problems) = folders::extras_of(
+            form.folders.iter().map(String::as_str),
+            &plan,
+            home.as_deref(),
+        );
+        if let Some(problem) = problems.into_iter().next() {
+            return self.set_error(format!("{problem} — drop it with d"));
+        }
+        let (name, specs, original) = (
+            form.sandbox.clone(),
+            form.folders.clone(),
+            form.original.clone(),
+        );
+        let Some(addons) = (self.sandboxes.iter())
+            .find(|s| s.name == name)
+            .map(|s| s.addons.clone())
+        else {
+            return self.set_error(format!("{name} is gone"));
+        };
+        let shown = |spec: &String| {
+            let (path, read_only) = folders::spec_host(spec);
+            let access = match read_only {
+                true => folders::Access::Read,
+                false => folders::Access::Write,
+            };
+            format!("{} ({})", model::tilde(Path::new(path)), access.label())
+        };
+        let mut body = Vec::new();
+        let added: Vec<String> = (specs.iter())
+            .filter(|s| !original.contains(s))
+            .map(shown)
+            .collect();
+        let dropped: Vec<String> = (original.iter())
+            .filter(|s| !specs.contains(s))
+            .map(shown)
+            .collect();
+        if !added.is_empty() {
+            body.push(format!("Mounting {}.", added.join(", ")));
+        }
+        if !dropped.is_empty() {
+            body.push(format!("No longer mounting {}.", dropped.join(", ")));
+        }
+        body.push(
+            "sbx fixes a sandbox's folders when it creates it, so the sandbox is rebuilt. The \
+             list is saved now: if you cancel, the next rebuild mounts it."
+                .into(),
+        );
+        self.registry.set_extra_folders(&name, specs);
+        if let Err(e) = self.registry.save() {
+            self.registry.set_extra_folders(&name, original);
+            return self.set_error(format!("could not save the folders: {e}"));
+        }
+        self.screen = Screen::List;
+        match self.recreate_confirm(&name, &addons, None, "Apply folder changes", body) {
+            Some(c) => self.modal = Some(Modal::Confirm(c)),
+            None => self.set_error(self.rebuild_refusal_text(&name)),
+        }
     }
 
     /// Back to `S`, on the row of that connection when it has one.
@@ -13501,6 +13920,141 @@ mod tests {
         let body = confirm.body.join("\n");
         let note = format!("Not mounted: “{gone}”: the folder does not exist.");
         assert!(body.contains(&note), "{body}");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// A managed sandbox on `root/proj` with the folders `data`, `more` and `state` beside it,
+    /// on the sandbox folders screen (`f`) with `recorded` as its list.
+    fn on_sandbox_folders(root_name: &str, recorded: &[&str]) -> (App, PathBuf, String) {
+        let root = std::env::temp_dir().join(format!("{root_name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for d in ["proj", "data", "more", "state"] {
+            std::fs::create_dir_all(root.join(d)).unwrap();
+        }
+        let root = std::fs::canonicalize(&root).unwrap();
+        let mut sb = model::sample("claude-litellm-folders", Some("claude-litellm"), &[]);
+        sb.workspace = root.join("proj");
+        let name = sb.name.clone();
+        let mut app = App::for_test(Catalog::load().unwrap(), vec![sb]);
+        app.mounts_state = root.join("state");
+        let specs = recorded
+            .iter()
+            .map(|r| r.replace("ROOT", &root.display().to_string()));
+        app.registry.set_extra_folders(&name, specs.collect());
+        let at = app.cells.iter().position(|c| matches!(c, Cell::Sandbox(_)));
+        app.select(at.unwrap());
+        app.perform(Action::SandboxFolders);
+        (app, root, name)
+    }
+
+    fn type_text(app: &mut App, text: &str) {
+        for c in text.chars() {
+            app.on_key(KeyEvent::from(KeyCode::Char(c)));
+        }
+    }
+
+    fn sandbox_folders(app: &App) -> &SandboxFoldersForm {
+        match &app.screen {
+            Screen::SandboxFolders(form) => form,
+            other => panic!("not on the sandbox folders screen: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn f_opens_the_sandboxs_list_on_the_folder_field() {
+        let (app, root, name) =
+            on_sandbox_folders("aisbx-tests-sbx-folders-open", &["ROOT/data:ro"]);
+        let form = sandbox_folders(&app);
+        assert_eq!(form.sandbox, name);
+        assert_eq!(form.folders, form.original);
+        assert_eq!(form.folders.len(), 1);
+        assert_eq!(form.focused(), SandboxFoldersRow::Path);
+        assert!(!form.changed());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_typed_folder_is_added_checked_and_its_access_switched() {
+        let (mut app, root, _) =
+            on_sandbox_folders("aisbx-tests-sbx-folders-add", &["ROOT/data:ro"]);
+        let more = root.join("more").display().to_string();
+        type_text(&mut app, &more);
+        app.on_key(KeyEvent::from(KeyCode::Enter)); // to Access
+        app.on_key(KeyEvent::from(KeyCode::Char(' '))); // read-write
+        app.on_key(KeyEvent::from(KeyCode::Enter)); // adds it
+        let form = sandbox_folders(&app);
+        assert_eq!(form.folders.last(), Some(&more), "{:?}", form.folders);
+        assert!(form.path.value.is_empty());
+        assert!(form.changed());
+        assert_eq!(form.focused(), SandboxFoldersRow::Path);
+
+        // The same folder again, or one in the workspace, is refused and the list stays.
+        type_text(&mut app, &more);
+        app.on_key(KeyEvent::from(KeyCode::Enter));
+        app.on_key(KeyEvent::from(KeyCode::Enter));
+        assert_eq!(sandbox_folders(&app).folders.len(), 2);
+        assert!(app.status.as_ref().is_some_and(|s| s.1), "{:?}", app.status);
+        if let Screen::SandboxFolders(form) = &mut app.screen {
+            form.path = TextInput::new(root.join("proj").display().to_string());
+        }
+        app.add_sandbox_folder();
+        assert_eq!(sandbox_folders(&app).folders.len(), 2);
+
+        // ←→ on a listed folder switches its access; d drops it.
+        app.click(Hit::FormFocus(0));
+        app.on_key(KeyEvent::from(KeyCode::Right));
+        let data = root.join("data").display().to_string();
+        assert_eq!(sandbox_folders(&app).folders[0], data);
+        app.on_key(KeyEvent::from(KeyCode::Char('d')));
+        assert_eq!(sandbox_folders(&app).folders, vec![more]);
+        assert_eq!(sandbox_folders(&app).focus, 0);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn apply_saves_the_list_and_offers_the_rebuild_that_mounts_it() {
+        let (mut app, root, name) =
+            on_sandbox_folders("aisbx-tests-sbx-folders-apply", &["ROOT/data:ro"]);
+        let more = format!("{}:ro", root.join("more").display());
+        if let Screen::SandboxFolders(form) = &mut app.screen {
+            form.folders = vec![more.clone()];
+        }
+        app.apply_sandbox_folders();
+        assert!(matches!(app.screen, Screen::List));
+        assert_eq!(app.registry.extra_folders(&name), vec![more.clone()]);
+        let Some(Modal::Confirm(confirm)) = &app.modal else {
+            panic!("no rebuild confirmation: {:?}", app.status);
+        };
+        let create = (confirm.job.steps.iter())
+            .find(|s| s.argv.get(1).is_some_and(|a| a == "create"))
+            .unwrap();
+        assert!(create.argv.contains(&more), "{:?}", create.argv);
+        let data = root.join("data").display().to_string();
+        assert!(
+            !create.argv.iter().any(|a| a.starts_with(&data)),
+            "{:?}",
+            create.argv
+        );
+        let body = confirm.body.join("\n");
+        assert!(
+            body.contains("Mounting ") && body.contains("/more (read-only)"),
+            "{body}"
+        );
+        assert!(
+            body.contains("No longer mounting ") && body.contains("/data"),
+            "{body}"
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn apply_with_nothing_changed_just_closes() {
+        let (mut app, root, name) =
+            on_sandbox_folders("aisbx-tests-sbx-folders-same", &["ROOT/data:ro"]);
+        app.apply_sandbox_folders();
+        assert!(matches!(app.screen, Screen::List));
+        assert!(app.modal.is_none());
+        assert_eq!(app.registry.extra_folders(&name).len(), 1);
         std::fs::remove_dir_all(&root).unwrap();
     }
 

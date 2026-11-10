@@ -35,6 +35,7 @@ pub const GROUPS: [(&str, &[Action]); 3] = [
             Action::EditKits,
             Action::Auth,
             Action::StartDir,
+            Action::SandboxFolders,
             Action::RepoSkills,
             Action::RefreshModels,
         ],

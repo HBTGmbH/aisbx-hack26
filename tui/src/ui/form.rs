@@ -11,8 +11,8 @@ use ratatui::Frame;
 use super::{panel, Hits};
 use crate::app::{
     AccountChoice, App, ApprovalRow, AuthRow, ConnMode, ConnRow, ConnSwitchRow, ConnectRow,
-    CreateForm, CreateRow, Empty, FoldersRow, Hit, KitsRow, Screen, SecretRow, SettingTone,
-    SettingsRow, SkillRow, StartDirRow, TargetLaunch, TextInput,
+    CreateForm, CreateRow, Empty, FoldersRow, Hit, KitsRow, SandboxFoldersRow, Screen, SecretRow,
+    SettingTone, SettingsRow, SkillRow, StartDirRow, TargetLaunch, TextInput,
 };
 use crate::create::account_notes;
 use crate::model::{self, Auth};
@@ -889,7 +889,9 @@ pub(super) fn render_start_dir(frame: &mut Frame, app: &App, area: Rect) -> Hits
             .find(|s| s.name == *name)
             .and_then(|s| s.start_dir.clone()),
         crate::app::StartDirTarget::New(create) => create.workspace.start_dir.clone(),
-        crate::app::StartDirTarget::HostFolder(_) | crate::app::StartDirTarget::Folder(_) => {
+        crate::app::StartDirTarget::HostFolder(_)
+        | crate::app::StartDirTarget::SandboxFolder(_)
+        | crate::app::StartDirTarget::Folder(_) => {
             return render_host_folder_pick(frame, form, area)
         }
     };
@@ -1024,9 +1026,9 @@ fn browse_rows(out: &mut Lines, form: &crate::app::StartDirForm, at_root: &str) 
         );
         // Where the folder is, whole: a long name is cut on its row.
         let path = match form.target {
-            crate::app::StartDirTarget::HostFolder(_) | crate::app::StartDirTarget::Folder(_) => {
-                model::tilde(&form.here().join(name))
-            }
+            crate::app::StartDirTarget::HostFolder(_)
+            | crate::app::StartDirTarget::SandboxFolder(_)
+            | crate::app::StartDirTarget::Folder(_) => model::tilde(&form.here().join(name)),
             _ => crate::startdir::describe(&form.root, Some(form.rel.join(name).as_path())),
         };
         out.explain_lines(focused == StartDirRow::Dir(i), name.clone(), &[path]);
@@ -1054,11 +1056,18 @@ fn render_host_folder_pick(frame: &mut Frame, form: &crate::app::StartDirForm, a
             "Mount it",
             "Adds this folder to the sandbox, read-only.",
         ),
-        false => (
-            "Pick a host folder",
-            "Use",
-            "Puts this folder in the folder field. Save there keeps it.",
-        ),
+        false => match form.target {
+            crate::app::StartDirTarget::SandboxFolder(_) => (
+                "Pick a folder to mount",
+                "Use",
+                "Puts this folder in the folder field. Add there puts it on the list.",
+            ),
+            _ => (
+                "Pick a host folder",
+                "Use",
+                "Puts this folder in the folder field. Save there keeps it.",
+            ),
+        },
     };
     let buttons = [
         (StartDirRow::Use, use_label, use_help),
@@ -2701,6 +2710,130 @@ pub(super) fn render_folders(frame: &mut Frame, app: &App, area: Rect) -> Hits {
         ),
     ];
     framed(frame, area, "Host folders", out, &looks(&buttons))
+}
+
+/// `f`: the folders one sandbox mounts beside its workspace, and the fields that add one.
+pub(super) fn render_sandbox_folders(frame: &mut Frame, app: &App, area: Rect) -> Hits {
+    let Screen::SandboxFolders(form) = &app.screen else {
+        return Hits::new();
+    };
+    let rows = form.rows();
+    let focused = form.focused();
+    let row_index = |row: SandboxFoldersRow| rows.iter().position(|r| *r == row).unwrap_or(0);
+    let help = |out: &mut Lines, row: SandboxFoldersRow| {
+        let h = form.help(row);
+        out.explain_lines(focused == row, h.title, &[h.text]);
+    };
+    let label = (app.sandboxes.iter())
+        .find(|s| s.name == form.sandbox)
+        .map_or(form.sandbox.as_str(), |s| s.label.as_str());
+
+    let mut out = Lines::new(area);
+    out.para(crate::app::SANDBOX_FOLDERS_NOTE);
+    out.blank();
+    out.section("Folders");
+    if form.folders.is_empty() {
+        out.note("     (none yet)");
+    }
+    let shown: Vec<_> = (0..form.folders.len())
+        .filter_map(|i| form.shown(i))
+        .collect();
+    let path_w = (shown.iter())
+        .map(|(p, _)| p.chars().count())
+        .max()
+        .unwrap_or(0);
+    for (i, (path, access)) in shown.iter().enumerate() {
+        let row = SandboxFoldersRow::Folder(i);
+        let new = !form.original.contains(&form.folders[i]);
+        out.row(
+            vec![
+                Span::raw("     "),
+                Span::raw(format!("{path:<path_w$}")),
+                Span::styled(format!("  {:<10}", access.label()), access_style(*access)),
+                Span::styled(if new { "  (new)" } else { "" }, theme::muted()),
+            ],
+            focused == row,
+            row_index(row),
+        );
+        help(&mut out, row);
+    }
+    if form.changed() {
+        out.note("     Apply rebuilds the sandbox with this list.");
+    }
+    out.blank();
+    out.section("Add a folder");
+    out.row(
+        conn_field_spans(
+            "folder",
+            &form.path,
+            focused == SandboxFoldersRow::Path,
+            false,
+            "(an absolute path or ~/…)",
+            out.width,
+        ),
+        focused == SandboxFoldersRow::Path,
+        row_index(SandboxFoldersRow::Path),
+    );
+    help(&mut out, SandboxFoldersRow::Path);
+    out.row(
+        vec![Span::raw(format!("{:>12}  ", "")), Span::raw("[ Browse… ]")],
+        focused == SandboxFoldersRow::Browse,
+        row_index(SandboxFoldersRow::Browse),
+    );
+    help(&mut out, SandboxFoldersRow::Browse);
+    let mark = |on: bool| if on { "◉" } else { "○" };
+    out.row(
+        vec![
+            Span::styled(format!("{:>12}  ", "access"), theme::muted()),
+            Span::raw(format!(
+                "{} read-only   ",
+                mark(form.access == crate::folders::Access::Read)
+            )),
+            Span::styled(
+                format!(
+                    "{} read-write",
+                    mark(form.access == crate::folders::Access::Write)
+                ),
+                match form.access {
+                    crate::folders::Access::Write => access_style(form.access),
+                    crate::folders::Access::Read => Style::default(),
+                },
+            ),
+        ],
+        focused == SandboxFoldersRow::Access,
+        row_index(SandboxFoldersRow::Access),
+    );
+    help(&mut out, SandboxFoldersRow::Access);
+    out.row(
+        vec![Span::raw(format!("{:>12}  ", "")), Span::raw("[ Add ]")],
+        focused == SandboxFoldersRow::Add,
+        row_index(SandboxFoldersRow::Add),
+    );
+    help(&mut out, SandboxFoldersRow::Add);
+    help(&mut out, SandboxFoldersRow::Apply);
+    help(&mut out, SandboxFoldersRow::Close);
+
+    let buttons = [
+        (
+            "Apply",
+            focused == SandboxFoldersRow::Apply,
+            false,
+            row_index(SandboxFoldersRow::Apply),
+        ),
+        (
+            "Close",
+            focused == SandboxFoldersRow::Close,
+            false,
+            row_index(SandboxFoldersRow::Close),
+        ),
+    ];
+    framed(
+        frame,
+        area,
+        &format!("Folders of {label}"),
+        out,
+        &looks(&buttons),
+    )
 }
 
 /// `A` on a LiteLLM sandbox: which connection it is on, and the one to move it to.

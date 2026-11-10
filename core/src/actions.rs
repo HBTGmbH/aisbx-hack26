@@ -17,6 +17,7 @@ pub enum Action {
     Skills,
     RepoSkills,
     Folders,
+    SandboxFolders,
     Settings,
     Approvals,
     KeepRunning,
@@ -46,7 +47,7 @@ pub enum Refusal {
 }
 
 impl Action {
-    pub const ALL: [Action; 26] = [
+    pub const ALL: [Action; 27] = [
         Action::Start,
         Action::Shell,
         Action::New,
@@ -58,6 +59,7 @@ impl Action {
         Action::Skills,
         Action::RepoSkills,
         Action::Folders,
+        Action::SandboxFolders,
         Action::Settings,
         Action::Approvals,
         Action::KeepRunning,
@@ -90,6 +92,7 @@ impl Action {
             Action::Skills => (Char('K'), "Skills"),
             Action::RepoSkills => (Char('i'), "Repo skills"),
             Action::Folders => (Char('F'), "Host folders"),
+            Action::SandboxFolders => (Char('f'), "Sandbox folders"),
             Action::Settings => (Char('T'), "Settings"),
             Action::Approvals => (Char('y'), "Approvals"),
             Action::KeepRunning => (Char('b'), "Keep running"),
@@ -146,6 +149,9 @@ impl Action {
             Action::Skills => "Manage the shared skills",
             Action::RepoSkills => "Pick the skills from skill repositories this sandbox gets",
             Action::Folders => "Choose the folders every sandbox mounts",
+            Action::SandboxFolders => {
+                "Add or drop the folders this sandbox mounts, then rebuild it"
+            }
             Action::Settings => "Change sbx's settings on this computer, such as telemetry",
             Action::Approvals => "Answer the network requests waiting for approval",
             Action::KeepRunning => "Keep the sandbox running without a session, or stop doing so",

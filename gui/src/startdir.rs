@@ -24,16 +24,19 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
     let chosen = picker.chosen();
     let host = matches!(
         picker.target,
-        StartDirTarget::HostFolder(_) | StartDirTarget::Folder(_)
+        StartDirTarget::HostFolder(_)
+            | StartDirTarget::SandboxFolder(_)
+            | StartDirTarget::Folder(_)
     );
     let target = match &picker.target {
         StartDirTarget::Sandbox(name) => format!("For sandbox {name}."),
         StartDirTarget::New(_) => "For the new sandbox.".to_string(),
         StartDirTarget::HostFolder(_) => "For the host folders list.".to_string(),
+        StartDirTarget::SandboxFolder(f) => format!("For the folders of sandbox {}.", f.sandbox),
         StartDirTarget::Folder(_) => "The new sandbox mounts it read-only.".to_string(),
     };
     let use_label = match &picker.target {
-        StartDirTarget::HostFolder(_) => "Use this folder",
+        StartDirTarget::HostFolder(_) | StartDirTarget::SandboxFolder(_) => "Use this folder",
         StartDirTarget::Folder(_) => "Mount this folder",
         StartDirTarget::Sandbox(_) | StartDirTarget::New(_) => "Use, don't start",
     };
@@ -53,7 +56,9 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
     });
     let title = match &picker.target {
         StartDirTarget::HostFolder(_) => "Pick a host folder".to_string(),
-        StartDirTarget::Folder(_) => "Pick a folder to mount".to_string(),
+        StartDirTarget::Folder(_) | StartDirTarget::SandboxFolder(_) => {
+            "Pick a folder to mount".to_string()
+        }
         StartDirTarget::Sandbox(_) | StartDirTarget::New(_) => {
             format!("Start folder — {}", picker.label)
         }

@@ -35,7 +35,8 @@ change, to remove a kit, or to leave detached mode.
 
 A rebuild deletes the container and everything you installed in it. It keeps the workspace files, the `/login`, a
 named setup token, and the agent's session history. It carries over
-published ports, clone mode, the skills mode, the MCP set, the CPU and memory limits, `sbx mount` folders, the
+published ports, clone mode, the skills mode, the MCP set, the CPU and memory limits, the sandbox's own folders
+([`f`](#a-sandboxs-own-folders-f)), `sbx mount` folders, the
 sandbox's own network rules and detached mode. The confirmation names each one.
 
 #### Limits
@@ -226,6 +227,8 @@ A sandbox can mount more folders beside its workspace, each at its own host path
   read-only or read-write.
 - **The wizard's *Mount a folder…***, for one sandbox. Pick each folder in the folder picker. A picked folder is
   read-only until you pick read-write on its row. A rebuild mounts them again.
+- **The sandbox's own list**, for one sandbox. Press `f` on a sandbox to change it. See
+  [A sandbox's own folders](#a-sandboxs-own-folders-f).
 
 A `companion.json` looks like this:
 
@@ -237,6 +240,21 @@ The agent's instructions file names each folder, its access and its purpose. A c
 create or rebuild. Read-only holds also for `sudo` in the sandbox. aisbx never mounts a missing folder, one inside the
 workspace, your home folder or a folder above it, or a folder that holds credentials. The folder picker refuses such
 a folder and says why, and the wizard's Review names each one from the lists.
+
+### A sandbox's own folders (`f`)
+
+Press `f` on a sandbox to see the folders it mounts beside its workspace: the ones picked with *Mount a folder…* when
+it was created, and the ones added here later. In the GUI this is *Sandbox folders* under *Setup*.
+
+- Type a folder or pick it with *Browse…*, choose read-only or read-write, and press *Add*. The folder is checked as at
+  creation: it must exist, lie outside the workspace and not be on the host's list already.
+- On a listed folder, `←` / `→` switches its access and `d` drops it. New folders are marked *(new)*.
+- *Apply* saves the list and asks to rebuild the sandbox. The confirmation names the folders it mounts and the ones it
+  stops mounting. sbx sets a sandbox's mounts when it creates it, so a change needs a rebuild. The rebuild keeps the
+  workspace files and the session history. If you cancel, the list stays saved and the next rebuild mounts it.
+
+To mount a folder into a running sandbox without a rebuild, run `sbx mount <name> <host-path>` on the host. aisbx
+does not offer that itself, but a rebuild mounts these folders again.
 
 **`.git` read-only.** Tick *`.git` read-only* in the create wizard. The agent can read the history but cannot commit,
 check out, or change the hooks or config, so no hook it writes runs on your host. You cannot hide `.git` from the
@@ -287,6 +305,7 @@ build and a Gradle build ran as fast at 4 CPUs and 4 GiB.
 | Connect over SSH | `sbx setup ssh` once, then `ssh <name>.sbx` |
 | Detach an MCP server | `sbx mcp unload notion --sandbox my-sandbox` |
 | Create without MCP servers | `sbx create --static-mcp none …` |
+| A sandbox's own folders | `sbx create ./kits/claude-anthropic . ~/notes:ro` at creation; later, `sbx mount <name> ~/notes` |
 | Host folders | `aisbx folders add ~/notes --purpose "..."` (`--write` for read-write), `aisbx folders ls`, `aisbx folders rm ~/notes` |
 | A folder at a path of its own | `sbx create ./kits/claude-anthropic . ~/libs:/workspace/libs:ro` |
 | `.git` read-only | `aisbx up --git-readonly` |

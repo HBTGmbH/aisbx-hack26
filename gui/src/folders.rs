@@ -1,8 +1,13 @@
 //! The host folders screen (`F`): the folders every sandbox mounts beside its workspace, each
 //! with its access and purpose, and the fields that add a folder or change one. Browse… opens
 //! core's folder picker for the folder field. Core keeps the list and saves it.
+//!
+//! One sandbox's folders screen (`f`) is here too: the folders it mounts beside its workspace,
+//! a field to add one, and Apply, which saves the list and offers the rebuild that mounts it.
 
-use aisbx_core::app::{App, FoldersRow, Hit, Screen, FOLDERS_NOTE};
+use aisbx_core::app::{
+    App, FoldersRow, Hit, SandboxFoldersRow, Screen, FOLDERS_NOTE, SANDBOX_FOLDERS_NOTE,
+};
 use aisbx_core::folders::Access;
 use aisbx_core::input::{KeyCode, KeyEvent};
 use aisbx_core::model;
@@ -186,6 +191,146 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
         // Off the text fields first, or the key is typed into the one the cursor is on.
         app.click(Hit::FormFocus(index(FoldersRow::Save).unwrap_or(0)));
         app.on_key(KeyEvent::from(code));
+    }
+}
+
+/// A sandbox folder's buttons and the key each one sends: space switches its access, `d` drops
+/// it.
+const SANDBOX_ROW_ACTIONS: [(&str, KeyCode, Look); 2] = [
+    ("Switch access", KeyCode::Char(' '), Look::Plain),
+    ("Drop", KeyCode::Char('d'), Look::Danger),
+];
+
+pub fn show_sandbox(ui: &mut egui::Ui, app: &mut App) {
+    let Screen::SandboxFolders(form) = &app.screen else {
+        return;
+    };
+    let rows = form.rows();
+    let focus = form.focus.min(rows.len() - 1);
+    let focused = rows[focus];
+    let mut list = Rows::new(ui, "sandbox-folders", focus);
+    let index = |row: SandboxFoldersRow| form::index_of(&rows, row);
+    let dark = ui.visuals().dark_mode;
+    let mut picked = None;
+    let mut action = None;
+    let mut access = None;
+    let label = (app.sandboxes.iter())
+        .find(|s| s.name == form.sandbox)
+        .map_or(form.sandbox.clone(), |s| s.label.clone());
+
+    page::bar(ui, "sandbox-folders", |ui| {
+        list.buttons(
+            ui,
+            &[
+                ("Apply", index(SandboxFoldersRow::Apply), false),
+                ("Close", index(SandboxFoldersRow::Close), false),
+            ],
+        );
+    });
+    let title = format!("Folders of {label}");
+    page::body(ui, "sandbox-folders", &title, SANDBOX_FOLDERS_NOTE, |ui| {
+        let weak = ui.visuals().weak_text_color();
+        page::heading(ui, "Folders", "");
+        if form.folders.is_empty() {
+            page::paragraph(ui, "None yet.", weak);
+        } else {
+            let labels: Vec<(&str, Look)> = (SANDBOX_ROW_ACTIONS.iter())
+                .map(|(l, _, k)| (*l, *k))
+                .collect();
+            let reserve = page::actions_width(ui, &labels);
+            page::group(ui, |ui| {
+                for i in 0..form.folders.len() {
+                    let Some((path, folder_access)) = form.shown(i) else {
+                        continue;
+                    };
+                    let title = format!("`{path}`");
+                    let new = !form.original.contains(&form.folders[i]);
+                    let item = Item {
+                        title: &title,
+                        mark: None,
+                        meta: if new { "new" } else { "" },
+                        state: Some(State {
+                            text: wizard::sentence(folder_access.label()),
+                            color: access_color(folder_access, ui.visuals()),
+                            value: false,
+                        }),
+                        actions: &labels,
+                        reserve,
+                        selected: list.is_focused(i),
+                        rule: i > 0,
+                    };
+                    let got = page::item(ui, item, list.follows(i), |_| {});
+                    if got.item {
+                        picked = Some(i);
+                    }
+                    if let Some(a) = got.action {
+                        action = Some((i, SANDBOX_ROW_ACTIONS[a].1));
+                    }
+                }
+            });
+        }
+        if form.changed() {
+            page::paragraph(ui, "Apply rebuilds the sandbox with this list.", weak);
+        }
+        page::heading(ui, "Add a folder", "");
+        let width = ui.available_width().min(FIELD);
+        let row = SandboxFoldersRow::Path;
+        let gloss = form.help(row).text;
+        let response = controls::labelled(ui, "Folder", &gloss, None, |ui| {
+            let field = Input {
+                label: "Folder",
+                input: &form.path,
+                masked: false,
+                placeholder: "/path/to/folder or ~/folder",
+                focused: focused == row,
+                problem: false,
+                monospace: true,
+                suggested: false,
+            };
+            controls::input_box(ui, field, width)
+        });
+        list.take(&response, index(row));
+        ui.add_space(4.0);
+        list.button(ui, "Browse…", index(SandboxFoldersRow::Browse), Look::Plain)
+            .on_hover_text(form.help(SandboxFoldersRow::Browse).text);
+        let at = index(SandboxFoldersRow::Access).unwrap_or(0);
+        ui.add_space(4.0);
+        ui.label(theme::strong(egui::RichText::new("Access").size(13.5)));
+        let half = (width - ui.spacing().item_spacing.x) / 2.0;
+        ui.horizontal_top(|ui| {
+            for value in Access::ALL {
+                let item = controls::Item {
+                    mark: Mark::Radio,
+                    title: &wizard::sentence(value.label()),
+                    detail: value.meaning(),
+                    badges: Vec::new(),
+                    color: theme::accent(dark),
+                    checked: form.access == value,
+                    enabled: true,
+                    focused: focused == SandboxFoldersRow::Access && form.access == value,
+                };
+                if controls::check_item(ui, item, half).clicked() {
+                    access = Some((at, value));
+                }
+            }
+        });
+        ui.add_space(4.0);
+        list.button(ui, "Add folder", index(SandboxFoldersRow::Add), Look::Plain)
+            .on_hover_text(form.help(SandboxFoldersRow::Add).text);
+    });
+    if let Some((i, code)) = action {
+        app.click(Hit::FormFocus(i));
+        app.on_key(KeyEvent::from(code));
+    } else if let Some(i) = picked {
+        app.click(Hit::FormFocus(i));
+    } else if let Some((at, value)) = access {
+        app.click(Hit::FormFocus(at));
+        let current = matches!(&app.screen, Screen::SandboxFolders(f) if f.access == value);
+        if !current {
+            app.on_key(KeyEvent::from(KeyCode::Char(' ')));
+        }
+    } else if let Some(hit) = list.clicked {
+        app.click(hit);
     }
 }
 
