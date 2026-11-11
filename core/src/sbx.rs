@@ -799,16 +799,18 @@ pub fn ports(name: &str) -> Result<Vec<Port>> {
 /// Ask the daemon whether the policy in force for `sandbox` would allow reaching `target`.
 /// Read-only: it opens no connection and creates no approval request.
 pub fn check_host(sandbox: &str, target: &str) -> Result<Reachability> {
+    check_target(sandbox, target, None)
+}
+
+/// [`check_host`] for one protocol (`tcp` or `udp`); `None` is the daemon's default, TCP.
+pub fn check_target(sandbox: &str, target: &str, protocol: Option<&str>) -> Result<Reachability> {
+    let mut args = vec!["policy", "check", "network", "--json", "--sandbox", sandbox];
+    if let Some(protocol) = protocol {
+        args.extend(["--protocol", protocol]);
+    }
+    args.push(target);
     let out = Command::new("sbx")
-        .args([
-            "policy",
-            "check",
-            "network",
-            "--json",
-            "--sandbox",
-            sandbox,
-            target,
-        ])
+        .args(&args)
         .output()
         .with_context(|| format!("running `sbx policy check network {target}`"))?;
     // A deny exits 1 with the answer on stdout, so the status alone decides nothing.
@@ -1620,6 +1622,12 @@ pub const POLICY_INIT_HINT: &str = "the network policy is not initialized — ru
 /// allow-lists are the whole egress story; under `balanced` this is GitHub, npm, Maven Central and
 /// the rest of its rule sets. Read from `sbx policy ls --json` (no sandbox: the global rules).
 pub fn global_network_allows() -> Result<Vec<String>> {
+    Ok(global_allows(&global_policy_rules()?))
+}
+
+/// Every rule of the host's local policy, `sbx policy ls --json` without a sandbox: the presets,
+/// the fallback and what `sbx policy allow|deny` added globally.
+pub fn global_policy_rules() -> Result<Vec<PolicyRule>> {
     let out = Command::new("sbx")
         .args(["policy", "ls", "--json"])
         .output()
@@ -1632,7 +1640,7 @@ pub fn global_network_allows() -> Result<Vec<String>> {
     }
     let parsed: PolicyLsOutput =
         parse_json(&out.stdout).context("parsing `sbx policy ls --json`")?;
-    Ok(global_allows(&parsed.rules))
+    Ok(parsed.rules)
 }
 
 fn global_allows(rules: &[PolicyRule]) -> Vec<String> {

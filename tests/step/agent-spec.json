@@ -1,0 +1,4 @@
+{"protocol": 1, "name": "sf-step-agent", "backend": "claude-anthropic", "workspace": "/private/tmp/sf-step-ws",
+ "allow_hosts": ["api.anthropic.com"], "probe_hosts": ["github.com", "registry.npmjs.org", "example.com", "claude.ai"],
+ "work": {"agent": {"prompt_file": "/private/tmp/sf-step-runs/prompt.md", "model": "haiku", "max_turns": 2, "args": ["--tools", "Read", "--strict-mcp-config", "--disable-slash-commands"]}},
+ "timeout_seconds": 120}

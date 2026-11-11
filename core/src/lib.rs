@@ -32,6 +32,7 @@ pub mod skill_source;
 pub mod startdir;
 pub mod state;
 pub mod stats;
+pub mod step;
 pub mod terminal;
 #[cfg(any(test, feature = "test-support"))]
 pub mod testkit;

@@ -41,6 +41,22 @@ Touch every one of these, or a test or a doc table goes stale:
 - Usually only `sbx/shell-image` is pulled locally. Say so when you have not tried a kit on the other workload images
   (`docker/sandbox-templates:claude-code-docker`, `sbx/shell-docker-image`, `sbx/antigravity-image`).
 
+## The step primitive
+
+`core/src/step.rs` is `aisbx step`: one sandboxed unit of work per process, for pipelines that must never trust a
+sandbox. [docs/step-protocol.md](docs/step-protocol.md) is its contract.
+
+- The lifecycle order is fixed and security-relevant: refuse, create (with every deny at create time), prove, log,
+  work, log, remove, report. Never reorder it, never read the workspace for the caller, never skip the removal, and
+  never let an exit code of 0 mean the agent succeeded. A removal that fails is exit 125 whatever happened before.
+- `tests/step/` holds golden events, specs and reports from real runs. Another repository reads them as contract
+  tests. A change to an event, a report field or an exit code updates the fixtures, and an incompatible one bumps
+  `PROTOCOL` and the version table in the protocol page. The plant repository pins the protocol version through
+  `aisbx step --protocol`, so a silent change breaks it.
+- `step` creates through `up_inner` and removes through `rm_inner`, so a sandbox made by `step` is the same sandbox
+  `up` makes. Keep it that way: the dashboard then shows and rebuilds it like any other.
+- Run `sh tests/step-test.sh` after a change; it needs a signed-in sbx and makes one sandbox.
+
 ## Before you commit
 
 Run all four CONTRIBUTING checks: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`,

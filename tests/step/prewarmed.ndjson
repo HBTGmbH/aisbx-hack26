@@ -1,0 +1,19 @@
+{"detail":"","kind":"phase","ms":0,"phase":"refuse","seq":1,"status":"start","t":"2026-11-11T08:12:12.206Z"}
+{"detail":"continuing a pre-warmed sandbox","kind":"phase","ms":89,"phase":"refuse","seq":2,"status":"ok","t":"2026-11-11T08:12:12.295Z"}
+{"detail":"network-before.json","kind":"phase","ms":0,"phase":"log","seq":3,"status":"start","t":"2026-11-11T08:12:12.295Z"}
+{"argv":["sbx","policy","log","sf-step-pre","--json"],"exit":0,"kind":"sbx","ms":85,"phase":"log","seq":4,"t":"2026-11-11T08:12:12.380Z"}
+{"detail":"network-before.json","kind":"phase","ms":85,"phase":"log","seq":5,"status":"ok","t":"2026-11-11T08:12:12.381Z"}
+{"detail":"","kind":"phase","ms":0,"phase":"work","seq":6,"status":"start","t":"2026-11-11T08:12:12.381Z"}
+{"argv":["sbx","exec","-w","/private/tmp/sf-step-ws/app","sf-step-pre","node","--version"],"exit":0,"kind":"sbx","ms":294,"phase":"work","seq":7,"t":"2026-11-11T08:12:12.676Z"}
+{"argv":["node","--version"],"exit":0,"index":0,"kind":"check","ms":294,"phase":"work","seq":8,"t":"2026-11-11T08:12:12.676Z","timed_out":false,"workdir":"app"}
+{"argv":["sbx","exec","-w","/private/tmp/sf-step-ws","sf-step-pre","sh","-c","pwd; echo $CI; ls"],"exit":0,"kind":"sbx","ms":273,"phase":"work","seq":9,"t":"2026-11-11T08:12:12.950Z"}
+{"argv":["sh","-c","pwd; echo $CI; ls"],"exit":0,"index":1,"kind":"check","ms":274,"phase":"work","seq":10,"t":"2026-11-11T08:12:12.950Z","timed_out":false,"workdir":""}
+{"detail":"","kind":"phase","ms":569,"phase":"work","seq":11,"status":"ok","t":"2026-11-11T08:12:12.950Z"}
+{"detail":"network-after.json","kind":"phase","ms":0,"phase":"log","seq":12,"status":"start","t":"2026-11-11T08:12:12.950Z"}
+{"argv":["sbx","policy","log","sf-step-pre","--json"],"exit":0,"kind":"sbx","ms":86,"phase":"log","seq":13,"t":"2026-11-11T08:12:13.037Z"}
+{"detail":"network-after.json","kind":"phase","ms":87,"phase":"log","seq":14,"status":"ok","t":"2026-11-11T08:12:13.038Z"}
+{"detail":"","kind":"phase","ms":0,"phase":"remove","seq":15,"status":"start","t":"2026-11-11T08:12:13.038Z"}
+{"argv":["sbx","rm","--force","sf-step-pre"],"exit":0,"kind":"sbx","ms":402,"phase":"remove","seq":16,"t":"2026-11-11T08:12:13.440Z"}
+{"argv":["sbx","ls","--json"],"exit":0,"kind":"sbx","ms":115,"phase":"remove","seq":17,"t":"2026-11-11T08:12:13.557Z"}
+{"detail":"","kind":"phase","ms":518,"phase":"remove","seq":18,"status":"ok","t":"2026-11-11T08:12:13.557Z"}
+{"detail":"","kind":"phase","ms":1350,"phase":"report","seq":19,"status":"ok","t":"2026-11-11T08:12:13.645Z"}

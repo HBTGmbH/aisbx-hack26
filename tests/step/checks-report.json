@@ -1,0 +1,56 @@
+{
+  "aisbx_version": "0.51.0.2",
+  "created_at": "2026-11-11T08:10:54.702Z",
+  "error": null,
+  "exit": 0,
+  "finished_at": "2026-11-11T08:11:04.738Z",
+  "image": "sandbox-kit-assembled:ccfd4c0a01206904",
+  "ms": {
+    "create": 8637,
+    "prove": 95,
+    "remove": 354,
+    "total": 10036,
+    "work": 558
+  },
+  "name": "sf-step-checks",
+  "network": {
+    "blocked": [],
+    "foreign": []
+  },
+  "ok": true,
+  "phase": "report",
+  "prewarm": false,
+  "proof_cached": true,
+  "protocol": 1,
+  "sbx_version": "v0.51.0",
+  "work": {
+    "kind": "checks",
+    "results": [
+      {
+        "argv": [
+          "node",
+          "--version"
+        ],
+        "exit": 0,
+        "index": 0,
+        "stderr_bytes": 0,
+        "stdout_bytes": 9,
+        "timed_out": false,
+        "workdir": "app"
+      },
+      {
+        "argv": [
+          "sh",
+          "-c",
+          "pwd; echo $CI; ls"
+        ],
+        "exit": 0,
+        "index": 1,
+        "stderr_bytes": 0,
+        "stdout_bytes": 39,
+        "timed_out": false,
+        "workdir": ""
+      }
+    ]
+  }
+}

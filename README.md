@@ -57,7 +57,8 @@ aisbx builds on these sbx features. It does not replace them.
   ([Skill repositories](docs/skills.md#skill-repositories-aisbx-skill-repo)).
 - **A dashboard** in the terminal (`aisbx`) and as a desktop window (`aisbx-ui`): many sandboxes per project, a
   create wizard, approvals, rebuilds that keep your settings, and update detection ([The aisbx dashboard](docs/dashboard.md)).
-- **Headless commands** for scripts and CI ([Headless use](docs/headless.md)).
+- **Headless commands** for scripts and CI, and `aisbx step`, one sandboxed unit of work per process with a
+  fixed, proven lifecycle for pipelines ([Headless use](docs/headless.md), [The step protocol](docs/step-protocol.md)).
 - **No telemetry** from the agents, and sbx's own telemetry off unless you turned it on
   ([sbx's own telemetry](docs/network.md#sbxs-own-telemetry-t)). Keys stay in the host keychain
   ([one exception](docs/agents.md#antigravity-agy)).
@@ -244,8 +245,12 @@ $ aisbx status nightly --json
 $ aisbx rm nightly
 ```
 
-`up` creates the sandbox and prints its name, and `run` runs the agent once on a prompt.
-[Headless use](docs/headless.md) describes every command.
+`up` creates the sandbox and prints its name, and `run` runs the agent once on a prompt. `aisbx step` does a
+whole unit of work in one process: it creates a sandbox with the network closed down to the hosts you name, proves
+that, runs the agent or your check commands, reads the proxy log, removes the sandbox and writes a report, with
+NDJSON events on stdout while it runs. A pipeline such as a software factory calls it once per step.
+[Headless use](docs/headless.md) describes every command, and [the step protocol](docs/step-protocol.md) is the
+contract of `step`.
 
 ## Backends
 
@@ -315,7 +320,8 @@ token ([LiteLLM connections](docs/litellm.md#the-generated-kit),
 | [Network and privacy](docs/network.md)                 | set the network policy, see what each kit allows, block hosts, check telemetry |
 | [Shared agent skills](docs/skills.md)                  | give the agents your skills, from the host or from Git repositories |
 | [Stackable kits](docs/addons.md)                       | choose and configure the addons                                    |
-| [Headless use](docs/headless.md)                       | run agents from scripts and CI with `aisbx up` and `aisbx run`     |
+| [Headless use](docs/headless.md)                       | run agents from scripts and CI with `aisbx up`, `aisbx run` and `aisbx step` |
+| [The step protocol](docs/step-protocol.md)             | drive one sandboxed step per process from a pipeline: spec, events, report, exit codes |
 | [Kits](docs/kits.md)                                   | see every kit, write a kit, use your own kits                      |
 | [Development](docs/development.md)                     | build and test the dashboard, upgrade sbx                          |
 

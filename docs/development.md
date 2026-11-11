@@ -16,7 +16,8 @@ core/tests/docs.rs        # checks every link and anchor in README.md and docs/*
 tui/src/                  # aisbx, the terminal dashboard (Ratatui)
 gui/src/                  # aisbx-ui, the desktop window (eframe)
 kits/<name>/              # <name>.yaml, <name>.dockerfile, scripts under files/<topic>/
-tests/                    # shell tests: kit-hooks/, repo-skills-test.sh, workspace/layout-test.sh
+tests/                    # shell tests: kit-hooks/, repo-skills-test.sh, step-test.sh, workspace/layout-test.sh
+tests/step/               # the step protocol's golden events, specs and reports (contract fixtures)
 scripts/package.py        # packs a release archive; its test is scripts/test_package.py
 .github/                  # CI and release workflows, Dependabot, issue templates
 ```
@@ -29,7 +30,7 @@ The modules in `core/src/`:
 | sbx and state        | `sbx` (every sbx call), `state` (`registry.json`), `bindings`, `job`                      |
 | Kits and accounts    | `kits`, `tokens`, `litellm`, `models`, `model_fetch`, `model_picks`, `tmpfs`               |
 | Sandboxes            | `model`, `folders`, `startdir`, `remote`, `terminal`, `skill_source`, `skill_repos`, `skill_select` |
-| Scripts and tests    | `headless`, `testkit`                                                                    |
+| Scripts and tests    | `headless`, `step` (`aisbx step` and `aisbx doctor`), `testkit`                          |
 
 Turn on the `test-support` feature of `aisbx-core` only in the `[dev-dependencies]` of a frontend.
 
@@ -45,6 +46,7 @@ $ cargo clippy --workspace --all-targets -- -D warnings
 $ sh tests/workspace/layout-test.sh
 $ sh tests/kit-hooks/claude-workloads-test.sh      # one script per kit topic
 $ sh tests/repo-skills-test.sh
+$ sh tests/step-test.sh                           # one live checks step; skips when sbx is not signed in
 ```
 
 - The launchers run `cargo build --release -p aisbx` and `cargo build --release -p aisbx-ui`.

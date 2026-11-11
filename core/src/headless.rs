@@ -73,6 +73,14 @@ HEADLESS USE — the same kits and names as the dashboard, for scripts:
         --ssh-agent            forward the host SSH agent (off by default)
         Agents: Claude Code, Codex, Antigravity (agy), Pi and OpenCode.
 
+    aisbx step --spec FILE --dir DIR [--prewarm]
+        One unit of work in a fresh sandbox, in one process: create, close the network, prove
+        it, run the agent or the checks, read the proxy log, remove the sandbox, report.
+        NDJSON events on stdout, the artefacts in DIR; docs/step-protocol.md is the contract.
+        --prewarm              create and prove only; a later step with the same spec continues
+    aisbx step --protocol          print the step protocol version
+    aisbx doctor [--json]          versions, sign-in, the policy fallback, the kit folders
+
     aisbx ls [--json]              every sandbox: name, status, agent, workspace, label
     aisbx kits [--json]            every kit --kit takes: name, kind, source (aisbx or user),
                                    folder; then the user kit folders searched and the ones
@@ -155,6 +163,8 @@ pub fn is_subcommand(arg: &str) -> bool {
     matches!(
         arg,
         "up" | "run"
+            | "step"
+            | "doctor"
             | "ls"
             | "kits"
             | "status"
@@ -207,6 +217,8 @@ pub fn main(args: &[String]) -> u8 {
     let result = match cmd.as_str() {
         "up" => up(rest),
         "run" => run(rest),
+        "step" => crate::step::main(rest),
+        "doctor" => doctor(rest),
         "ls" => ls(rest),
         "kits" => kits_cmd(rest),
         "status" => status(rest),
@@ -235,7 +247,7 @@ pub fn main(args: &[String]) -> u8 {
 /// The subcommands that drive sandboxes, before which sbx's telemetry is turned off where nobody
 /// chose a value.
 fn runs_sandboxes(cmd: &str) -> bool {
-    matches!(cmd, "up" | "run" | "ls" | "status" | "stop" | "rm")
+    matches!(cmd, "up" | "run" | "step" | "ls" | "status" | "stop" | "rm")
 }
 
 /// [`sbx::disable_telemetry_by_default`], said on stderr; a failure only warns.
@@ -248,20 +260,20 @@ fn telemetry_off_by_default() {
 }
 
 #[derive(Debug)]
-struct Fail {
-    code: u8,
-    message: String,
+pub(crate) struct Fail {
+    pub(crate) code: u8,
+    pub(crate) message: String,
 }
 
 impl Fail {
-    fn usage(message: impl Into<String>) -> Self {
+    pub(crate) fn usage(message: impl Into<String>) -> Self {
         Self {
             code: EXIT_USAGE,
             message: message.into(),
         }
     }
 
-    fn sandbox(message: impl Into<String>) -> Self {
+    pub(crate) fn sandbox(message: impl Into<String>) -> Self {
         Self {
             code: EXIT_SANDBOX,
             message: message.into(),
@@ -269,7 +281,7 @@ impl Fail {
     }
 
     /// Exit 1: the command ran and did not work out.
-    fn failed(message: impl Into<String>) -> Self {
+    pub(crate) fn failed(message: impl Into<String>) -> Self {
         Self {
             code: 1,
             message: message.into(),
@@ -277,21 +289,21 @@ impl Fail {
     }
 }
 
-type Outcome = Result<u8, Fail>;
+pub(crate) type Outcome = Result<u8, Fail>;
 
 // --- argument parsing ------------------------------------------------------------------------------
 
 /// A minimal `--flag value` / `--flag=value` / positional parser; `--` ends the options, and what
 /// follows is kept verbatim (for `run`, the agent's own arguments).
 #[derive(Debug, Default)]
-struct Args {
+pub(crate) struct Args {
     flags: Vec<(String, Option<String>)>,
-    positional: Vec<String>,
-    trailing: Vec<String>,
+    pub(crate) positional: Vec<String>,
+    pub(crate) trailing: Vec<String>,
 }
 
 impl Args {
-    fn parse(raw: &[String], switches: &[&str], valued: &[&str]) -> Result<Self, Fail> {
+    pub(crate) fn parse(raw: &[String], switches: &[&str], valued: &[&str]) -> Result<Self, Fail> {
         let mut out = Self::default();
         let mut it = raw.iter();
         while let Some(arg) = it.next() {
@@ -331,11 +343,11 @@ impl Args {
         Ok(out)
     }
 
-    fn has(&self, key: &str) -> bool {
+    pub(crate) fn has(&self, key: &str) -> bool {
         self.flags.iter().any(|(k, _)| k == key)
     }
 
-    fn one(&self, key: &str) -> Result<Option<String>, Fail> {
+    pub(crate) fn one(&self, key: &str) -> Result<Option<String>, Fail> {
         let mut values = self.all(key);
         match values.len() {
             0 => Ok(None),
@@ -368,7 +380,7 @@ impl Args {
 /// `sbx` that never asks ([`sbx::no_input`]: no person answers a headless run), without the host
 /// SSH agent unless `ssh_agent`: sbx forwards the agent of every client that creates, starts or
 /// joins a sandbox.
-fn sbx_command(argv: &[String], ssh_agent: bool) -> Command {
+pub(crate) fn sbx_command(argv: &[String], ssh_agent: bool) -> Command {
     let argv = sbx::no_input(argv);
     let (program, args) = argv.split_first().expect("an argv names its program");
     let mut cmd = Command::new(program);
@@ -411,7 +423,7 @@ fn stderr_stdio() -> Stdio {
 }
 
 /// Run an sbx step whose output belongs on stderr, and say whether it succeeded.
-fn step(argv: &[String], ssh_agent: bool) -> std::io::Result<ExitStatus> {
+pub(crate) fn step(argv: &[String], ssh_agent: bool) -> std::io::Result<ExitStatus> {
     sbx_command(argv, ssh_agent)
         .stdin(Stdio::null())
         .stdout(stderr_stdio())
@@ -420,7 +432,7 @@ fn step(argv: &[String], ssh_agent: bool) -> std::io::Result<ExitStatus> {
 }
 
 /// Run an sbx step quietly; `true` when it exited 0.
-fn quiet(argv: &[String]) -> bool {
+pub(crate) fn quiet(argv: &[String]) -> bool {
     sbx_command(argv, false)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -431,7 +443,11 @@ fn quiet(argv: &[String]) -> bool {
 
 /// The agent's headless command line for `run`, or the usage error that stops `run` before it
 /// starts anything.
-fn agent_argv(name: &str, agent: &str, run: &HeadlessRun<'_>) -> Result<Vec<String>, Fail> {
+pub(crate) fn agent_argv(
+    name: &str,
+    agent: &str,
+    run: &HeadlessRun<'_>,
+) -> Result<Vec<String>, Fail> {
     if run.effort.is_some() && !kits::accepts_effort(agent) {
         return Err(Fail::usage(format!(
             "{name} runs {agent:?}; OpenCode has no effort flag: drop --effort"
@@ -444,7 +460,7 @@ fn agent_argv(name: &str, agent: &str, run: &HeadlessRun<'_>) -> Result<Vec<Stri
     })
 }
 
-fn find(name: &str) -> Result<Option<sbx::LsEntry>, Fail> {
+pub(crate) fn find(name: &str) -> Result<Option<sbx::LsEntry>, Fail> {
     let list = sbx::list().map_err(|e| Fail::sandbox(format!("{e:#}")))?;
     Ok(list.into_iter().find(|e| e.name == name))
 }
@@ -452,6 +468,14 @@ fn find(name: &str) -> Result<Option<sbx::LsEntry>, Fail> {
 // --- up --------------------------------------------------------------------------------------------
 
 fn up(raw: &[String]) -> Outcome {
+    let name = up_inner(raw)?;
+    println!("{name}");
+    Ok(0)
+}
+
+/// `up` without its one line of stdout: the sandbox's name, created or reused. `aisbx step`
+/// creates its sandbox through it, so both commands make the same sandbox from the same flags.
+pub(crate) fn up_inner(raw: &[String]) -> Result<String, Fail> {
     let args = Args::parse(
         raw,
         &[
@@ -650,8 +674,7 @@ fn up(raw: &[String]) -> Outcome {
             warn_all(&notes);
             sync_after_up(&name);
         }
-        println!("{name}");
-        return Ok(0);
+        return Ok(name);
     }
     // Checked before anything is created; recorded once the sandbox exists.
     let (skill_picks, skill_notes) =
@@ -809,8 +832,7 @@ fn up(raw: &[String]) -> Outcome {
         }
         Err(e) => eprintln!("aisbx: warning: the skill selection was not recorded ({e:#})"),
     }
-    println!("{name}");
-    Ok(0)
+    Ok(name)
 }
 
 /// The fixed MCP set `up` asks sbx for: none at all with `--no-mcp`, else sbx's default (no flag).
@@ -1028,7 +1050,7 @@ fn template_reuse(name: &str, template: Option<&str>) -> Result<(), Fail> {
 
 /// sbx's naming rule, as `model::unique_sandbox_name` produces it: `^[a-zA-Z0-9][a-zA-Z0-9.-]+$`,
 /// at most 63 characters, ending in a letter or digit, never `default`.
-fn valid_sandbox_name(name: &str) -> bool {
+pub(crate) fn valid_sandbox_name(name: &str) -> bool {
     let bytes = name.as_bytes();
     (2..=63).contains(&bytes.len())
         && name != "default"
@@ -1271,7 +1293,12 @@ fn approve_credentials<P: AsRef<Path>>(dirs: &[P]) {
 }
 
 /// Copy the prompt into the sandbox's run dir, through `sbx exec -i`'s stdin.
-fn upload_prompt(name: &str, run_dir: &str, prompt: &str, ssh_agent: bool) -> Result<(), Fail> {
+pub(crate) fn upload_prompt(
+    name: &str,
+    run_dir: &str,
+    prompt: &str,
+    ssh_agent: bool,
+) -> Result<(), Fail> {
     let mut child = sbx_command(&sbx::prompt_upload_argv(name, run_dir), ssh_agent)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
@@ -1313,21 +1340,28 @@ fn watch(
         if timed_out || stop {
             report.timed_out = timed_out && !stop;
             report.interrupted = stop;
-            quiet(&sbx::headless_kill_argv(name, run_dir));
-            let grace = Instant::now() + Duration::from_secs(15);
-            while Instant::now() < grace {
-                if let Ok(Some(status)) = child.try_wait() {
-                    return Some(status);
-                }
-                std::thread::sleep(Duration::from_millis(200));
-            }
-            eprintln!("aisbx: {name}: the agent did not stop — stopping the sandbox");
-            let _ = child.kill();
-            quiet(&sbx::stop_argv(name));
-            return child.wait().ok();
+            return stop_agent(child, name, run_dir);
         }
         std::thread::sleep(Duration::from_millis(200));
     }
+}
+
+/// Stop the agent inside the sandbox (its whole process tree, by the PID its launch recorded),
+/// wait up to fifteen seconds for the `sbx exec` client to end, and stop the sandbox itself if
+/// the agent stays. `aisbx run` and `aisbx step` share it.
+pub(crate) fn stop_agent(child: &mut Child, name: &str, run_dir: &str) -> Option<ExitStatus> {
+    quiet(&sbx::headless_kill_argv(name, run_dir));
+    let grace = Instant::now() + Duration::from_secs(15);
+    while Instant::now() < grace {
+        if let Ok(Some(status)) = child.try_wait() {
+            return Some(status);
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    eprintln!("aisbx: {name}: the agent did not stop — stopping the sandbox");
+    let _ = child.kill();
+    quiet(&sbx::stop_argv(name));
+    child.wait().ok()
 }
 
 /// The requests `name` holds, out of one read of every pending request, or the warning to print
@@ -1346,7 +1380,7 @@ fn held_by(
 
 /// The requests this sandbox is holding for approval, reported on stderr — and dismissed unless
 /// the caller asked to keep them for the dashboard.
-fn held_requests(name: &str, dismiss: bool) -> Vec<String> {
+pub(crate) fn held_requests(name: &str, dismiss: bool) -> Vec<String> {
     let mine = match held_by(name, sbx::approvals()) {
         Ok(mine) => mine,
         Err(warning) => {
@@ -1593,21 +1627,42 @@ fn stop(raw: &[String]) -> Outcome {
 
 fn rm(raw: &[String]) -> Outcome {
     let args = Args::parse(raw, &[], &[])?;
-    let name = args.name()?;
-    match step(&sbx::rm_argv(&name), false) {
+    rm_inner(&args.name()?)?;
+    Ok(0)
+}
+
+/// `rm` for one name: the sandbox, then what aisbx remembers about it. `aisbx step` removes its
+/// sandbox through it.
+pub(crate) fn rm_inner(name: &str) -> Result<(), Fail> {
+    match step(&sbx::rm_argv(name), false) {
         Ok(s) if s.success() => {}
         Ok(s) => return Err(Fail::sandbox(format!("sbx rm {name} failed ({s})"))),
         Err(e) => return Err(Fail::sandbox(format!("could not run sbx: {e}"))),
     }
     // As the dashboard's delete. A named token stays: other sandboxes may use it.
     let mut registry = state::Registry::load();
-    registry.forget(&name);
+    registry.forget(name);
     let _ = registry.save();
-    let _ = models::remove_kit(&name);
-    let _ = folders::remove_kit(&name);
+    let _ = models::remove_kit(name);
+    let _ = folders::remove_kit(name);
     // Its skill selection too: a later sandbox of this name starts with none.
-    if let Err(e) = skill_select::forget(&state::state_dir(), &name) {
+    if let Err(e) = skill_select::forget(&state::state_dir(), name) {
         eprintln!("aisbx: warning: the skill selection of {name} was not dropped ({e:#})");
+    }
+    Ok(())
+}
+
+/// `aisbx doctor [--json]`: what a script needs to know before its first `up` or `step`.
+fn doctor(raw: &[String]) -> Outcome {
+    let args = Args::parse(raw, &["json"], &[])?;
+    if let Some(extra) = args.positional.first().or(args.trailing.first()) {
+        return Err(Fail::usage(format!("doctor takes no argument: {extra}")));
+    }
+    let doc = crate::step::doctor_json();
+    if args.has("json") {
+        println!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
+    } else {
+        println!("{}", crate::step::doctor_text(&doc));
     }
     Ok(0)
 }

@@ -934,6 +934,39 @@ pub fn capabilities(doc: &Yaml) -> Vec<Capability> {
     out
 }
 
+/// The hosts a kit folder's descriptor opens at runtime (`network-policy@1`, `runtime.allow`),
+/// in the descriptor's order; none when the folder has no descriptor or no such capability.
+/// `aisbx step` denies each of them that its caller did not allow.
+pub fn runtime_allows(dir: &Path) -> Vec<String> {
+    let Ok(text) = std::fs::read_to_string(descriptor_path(dir)) else {
+        return Vec::new();
+    };
+    let Ok(doc) = load_descriptor(&text) else {
+        return Vec::new();
+    };
+    capabilities(&doc)
+        .iter()
+        .filter(|c| c.kind.starts_with("network-policy@"))
+        .flat_map(|c| {
+            c.config["runtime"]["allow"]
+                .as_vec()
+                .into_iter()
+                .flatten()
+                .filter_map(|s| s.as_str().map(str::to_string))
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+/// The agent flag that caps a headless run's turns, for an sbx agent name: Claude Code's
+/// `--max-turns`. The other agents have none; the step timeout bounds them.
+pub fn max_turns_args(agent: &str, turns: u32) -> Vec<String> {
+    match cli(agent) {
+        Some(Cli::Claude) => vec!["--max-turns".into(), turns.to_string()],
+        _ => Vec::new(),
+    }
+}
+
 /// Why `sbx kit add` would not apply this kit to a live v3 sandbox, or `None` when it can be
 /// added.
 fn kit_add_blocker(caps: &[Capability]) -> Option<&'static str> {

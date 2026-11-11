@@ -1,0 +1,54 @@
+{"detail":"","kind":"phase","ms":0,"phase":"refuse","seq":1,"status":"start","t":"2026-11-11T08:10:54.702Z"}
+{"detail":"","kind":"phase","ms":198,"phase":"refuse","seq":2,"status":"ok","t":"2026-11-11T08:10:54.900Z"}
+{"detail":"","kind":"phase","ms":0,"phase":"create","seq":3,"status":"start","t":"2026-11-11T08:10:54.900Z"}
+{"argv":["aisbx","up","--backend","claude-anthropic","--skills","off","--no-mcp","--no-host-folders","--tmpfs-volumes","--name","sf-step-checks","--deny-network","**","/private/tmp/sf-step-ws"],"exit":0,"kind":"sbx","ms":7095,"phase":"create","seq":4,"t":"2026-11-11T08:11:01.995Z"}
+{"argv":["sbx","policy","ls","sf-step-checks","--json"],"exit":0,"kind":"sbx","ms":105,"phase":"create","seq":5,"t":"2026-11-11T08:11:02.101Z"}
+{"argv":["sbx","policy","deny","network","--sandbox","sf-step-checks","api.anthropic.com"],"exit":0,"kind":"sbx","ms":99,"phase":"create","seq":6,"t":"2026-11-11T08:11:02.201Z"}
+{"kind":"warn","message":"api.anthropic.com was open to the sandbox beyond the kits' descriptors; denied now","phase":"create","seq":7,"t":"2026-11-11T08:11:02.201Z"}
+{"argv":["sbx","policy","deny","network","--sandbox","sf-step-checks","claude.ai"],"exit":0,"kind":"sbx","ms":97,"phase":"create","seq":8,"t":"2026-11-11T08:11:02.298Z"}
+{"kind":"warn","message":"claude.ai was open to the sandbox beyond the kits' descriptors; denied now","phase":"create","seq":9,"t":"2026-11-11T08:11:02.298Z"}
+{"argv":["sbx","policy","deny","network","--sandbox","sf-step-checks","platform.claude.com"],"exit":0,"kind":"sbx","ms":95,"phase":"create","seq":10,"t":"2026-11-11T08:11:02.394Z"}
+{"kind":"warn","message":"platform.claude.com was open to the sandbox beyond the kits' descriptors; denied now","phase":"create","seq":11,"t":"2026-11-11T08:11:02.394Z"}
+{"argv":["sbx","policy","deny","network","--sandbox","sf-step-checks","claude.com"],"exit":0,"kind":"sbx","ms":94,"phase":"create","seq":12,"t":"2026-11-11T08:11:02.489Z"}
+{"kind":"warn","message":"claude.com was open to the sandbox beyond the kits' descriptors; denied now","phase":"create","seq":13,"t":"2026-11-11T08:11:02.489Z"}
+{"argv":["sbx","policy","deny","network","--sandbox","sf-step-checks","mcp-proxy.anthropic.com"],"exit":0,"kind":"sbx","ms":94,"phase":"create","seq":14,"t":"2026-11-11T08:11:02.584Z"}
+{"kind":"warn","message":"mcp-proxy.anthropic.com was open to the sandbox beyond the kits' descriptors; denied now","phase":"create","seq":15,"t":"2026-11-11T08:11:02.584Z"}
+{"argv":["sbx","policy","deny","network","--sandbox","sf-step-checks","bridge.claudeusercontent.com"],"exit":0,"kind":"sbx","ms":99,"phase":"create","seq":16,"t":"2026-11-11T08:11:02.683Z"}
+{"kind":"warn","message":"bridge.claudeusercontent.com was open to the sandbox beyond the kits' descriptors; denied now","phase":"create","seq":17,"t":"2026-11-11T08:11:02.684Z"}
+{"argv":["sbx","policy","deny","network","--sandbox","sf-step-checks","downloads.claude.ai"],"exit":0,"kind":"sbx","ms":96,"phase":"create","seq":18,"t":"2026-11-11T08:11:02.780Z"}
+{"kind":"warn","message":"downloads.claude.ai was open to the sandbox beyond the kits' descriptors; denied now","phase":"create","seq":19,"t":"2026-11-11T08:11:02.780Z"}
+{"argv":["sbx","policy","deny","network","--sandbox","sf-step-checks","code.claude.com"],"exit":0,"kind":"sbx","ms":93,"phase":"create","seq":20,"t":"2026-11-11T08:11:02.874Z"}
+{"kind":"warn","message":"code.claude.com was open to the sandbox beyond the kits' descriptors; denied now","phase":"create","seq":21,"t":"2026-11-11T08:11:02.874Z"}
+{"argv":["sbx","policy","deny","network","--sandbox","sf-step-checks","plugins.gradle.org"],"exit":0,"kind":"sbx","ms":93,"phase":"create","seq":22,"t":"2026-11-11T08:11:02.968Z"}
+{"kind":"warn","message":"plugins.gradle.org was open to the sandbox beyond the kits' descriptors; denied now","phase":"create","seq":23,"t":"2026-11-11T08:11:02.968Z"}
+{"argv":["sbx","policy","deny","network","--sandbox","sf-step-checks","plugins-artifacts.gradle.org"],"exit":0,"kind":"sbx","ms":95,"phase":"create","seq":24,"t":"2026-11-11T08:11:03.063Z"}
+{"kind":"warn","message":"plugins-artifacts.gradle.org was open to the sandbox beyond the kits' descriptors; denied now","phase":"create","seq":25,"t":"2026-11-11T08:11:03.063Z"}
+{"argv":["sbx","policy","deny","network","--sandbox","sf-step-checks","ports.ubuntu.com"],"exit":0,"kind":"sbx","ms":97,"phase":"create","seq":26,"t":"2026-11-11T08:11:03.161Z"}
+{"kind":"warn","message":"ports.ubuntu.com was open to the sandbox beyond the kits' descriptors; denied now","phase":"create","seq":27,"t":"2026-11-11T08:11:03.161Z"}
+{"argv":["sbx","policy","deny","network","--sandbox","sf-step-checks","archive.ubuntu.com"],"exit":0,"kind":"sbx","ms":93,"phase":"create","seq":28,"t":"2026-11-11T08:11:03.255Z"}
+{"kind":"warn","message":"archive.ubuntu.com was open to the sandbox beyond the kits' descriptors; denied now","phase":"create","seq":29,"t":"2026-11-11T08:11:03.255Z"}
+{"argv":["sbx","policy","deny","network","--sandbox","sf-step-checks","security.ubuntu.com"],"exit":0,"kind":"sbx","ms":95,"phase":"create","seq":30,"t":"2026-11-11T08:11:03.350Z"}
+{"kind":"warn","message":"security.ubuntu.com was open to the sandbox beyond the kits' descriptors; denied now","phase":"create","seq":31,"t":"2026-11-11T08:11:03.350Z"}
+{"argv":["sbx","policy","deny","network","--sandbox","sf-step-checks","download.docker.com"],"exit":0,"kind":"sbx","ms":95,"phase":"create","seq":32,"t":"2026-11-11T08:11:03.446Z"}
+{"kind":"warn","message":"download.docker.com was open to the sandbox beyond the kits' descriptors; denied now","phase":"create","seq":33,"t":"2026-11-11T08:11:03.446Z"}
+{"detail":"","kind":"phase","ms":8637,"phase":"create","seq":34,"status":"ok","t":"2026-11-11T08:11:03.538Z"}
+{"detail":"","kind":"phase","ms":0,"phase":"prove","seq":35,"status":"start","t":"2026-11-11T08:11:03.538Z"}
+{"argv":["sbx","policy","ls","sf-step-checks","--json"],"exit":0,"kind":"sbx","ms":93,"phase":"prove","seq":36,"t":"2026-11-11T08:11:03.631Z"}
+{"cached":true,"detail":"","kind":"phase","ms":95,"phase":"prove","probes":6,"seq":37,"status":"ok","t":"2026-11-11T08:11:03.633Z"}
+{"detail":"network-before.json","kind":"phase","ms":0,"phase":"log","seq":38,"status":"start","t":"2026-11-11T08:11:03.633Z"}
+{"argv":["sbx","policy","log","sf-step-checks","--json"],"exit":0,"kind":"sbx","ms":94,"phase":"log","seq":39,"t":"2026-11-11T08:11:03.728Z"}
+{"detail":"network-before.json","kind":"phase","ms":95,"phase":"log","seq":40,"status":"ok","t":"2026-11-11T08:11:03.729Z"}
+{"detail":"","kind":"phase","ms":0,"phase":"work","seq":41,"status":"start","t":"2026-11-11T08:11:03.729Z"}
+{"argv":["sbx","exec","-w","/private/tmp/sf-step-ws/app","sf-step-checks","node","--version"],"exit":0,"kind":"sbx","ms":273,"phase":"work","seq":42,"t":"2026-11-11T08:11:04.002Z"}
+{"argv":["node","--version"],"exit":0,"index":0,"kind":"check","ms":273,"phase":"work","seq":43,"t":"2026-11-11T08:11:04.002Z","timed_out":false,"workdir":"app"}
+{"argv":["sbx","exec","-w","/private/tmp/sf-step-ws","sf-step-checks","sh","-c","pwd; echo $CI; ls"],"exit":0,"kind":"sbx","ms":284,"phase":"work","seq":44,"t":"2026-11-11T08:11:04.286Z"}
+{"argv":["sh","-c","pwd; echo $CI; ls"],"exit":0,"index":1,"kind":"check","ms":284,"phase":"work","seq":45,"t":"2026-11-11T08:11:04.286Z","timed_out":false,"workdir":""}
+{"detail":"","kind":"phase","ms":558,"phase":"work","seq":46,"status":"ok","t":"2026-11-11T08:11:04.287Z"}
+{"detail":"network-after.json","kind":"phase","ms":0,"phase":"log","seq":47,"status":"start","t":"2026-11-11T08:11:04.287Z"}
+{"argv":["sbx","policy","log","sf-step-checks","--json"],"exit":0,"kind":"sbx","ms":94,"phase":"log","seq":48,"t":"2026-11-11T08:11:04.382Z"}
+{"detail":"network-after.json","kind":"phase","ms":95,"phase":"log","seq":49,"status":"ok","t":"2026-11-11T08:11:04.383Z"}
+{"detail":"","kind":"phase","ms":0,"phase":"remove","seq":50,"status":"start","t":"2026-11-11T08:11:04.383Z"}
+{"argv":["sbx","rm","--force","sf-step-checks"],"exit":0,"kind":"sbx","ms":254,"phase":"remove","seq":51,"t":"2026-11-11T08:11:04.638Z"}
+{"argv":["sbx","ls","--json"],"exit":0,"kind":"sbx","ms":99,"phase":"remove","seq":52,"t":"2026-11-11T08:11:04.738Z"}
+{"detail":"","kind":"phase","ms":354,"phase":"remove","seq":53,"status":"ok","t":"2026-11-11T08:11:04.738Z"}
+{"detail":"","kind":"phase","ms":10036,"phase":"report","seq":54,"status":"ok","t":"2026-11-11T08:11:04.829Z"}

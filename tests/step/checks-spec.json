@@ -1,0 +1,4 @@
+{"protocol": 1, "name": "sf-step-checks", "backend": "claude-anthropic", "workspace": "/private/tmp/sf-step-ws",
+ "allow_hosts": ["api.anthropic.com"], "probe_hosts": ["github.com", "registry.npmjs.org", "example.com"], "network": false,
+ "work": {"checks": [{"workdir": "app", "argv": ["node", "--version"], "env": {"CI": "1"}}, {"workdir": "", "argv": ["sh", "-c", "pwd; echo $CI; ls"]}]},
+ "timeout_seconds": 60}
