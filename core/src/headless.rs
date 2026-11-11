@@ -602,6 +602,7 @@ pub(crate) fn up_inner(raw: &[String]) -> Result<String, Fail> {
     };
     let workspace = workspace
         .canonicalize()
+        .map(sbx::plain_path)
         .map_err(|e| Fail::usage(format!("workspace {}: {e}", workspace.display())))?;
 
     let name = match args.one("name")? {
@@ -949,11 +950,12 @@ fn mount_arg(raw: &str, home: Option<&Path>) -> Result<String, Fail> {
     }
     let real = given
         .canonicalize()
+        .map(sbx::plain_path)
         .map_err(|e| Fail::usage(format!("--mount {raw:?}: {e}")))?;
     if !real.is_dir() {
         return Err(Fail::usage(format!("--mount {raw:?}: not a directory")));
     }
-    if let Some(home) = home.and_then(|h| h.canonicalize().ok()) {
+    if let Some(home) = home.and_then(|h| h.canonicalize().ok().map(sbx::plain_path)) {
         if let Some(why) = model::mount_refusal(&real, &home) {
             return Err(Fail::usage(format!("--mount {raw:?}: {why}")));
         }
@@ -961,7 +963,9 @@ fn mount_arg(raw: &str, home: Option<&Path>) -> Result<String, Fail> {
     let text = real
         .to_str()
         .ok_or_else(|| Fail::usage(format!("--mount {raw:?}: not UTF-8")))?;
-    if text.contains(':') || text.contains(',') {
+    // sbx reads `PATH[:TARGET][:ro]` and keeps a drive letter (`C:\data`) as part of the path
+    let body = sbx::without_drive(text);
+    if body.contains(':') || body.contains(',') {
         return Err(Fail::usage(format!(
             "--mount {raw:?}: sbx cannot take a path with ':' or ','"
         )));

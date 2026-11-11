@@ -2594,6 +2594,64 @@ fn kit_ref(dir: &Path) -> String {
     dir.display().to_string()
 }
 
+/// The text after a Windows drive letter (`\data` of `C:\data`); any other text as it is.
+pub fn without_drive(text: &str) -> &str {
+    let bytes = text.as_bytes();
+    match bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+        true => &text[2..],
+        false => text,
+    }
+}
+
+/// A host path as sbx expects it. On Windows `std::fs::canonicalize` returns a verbatim path
+/// (`\\?\C:\data`), which sbx mounts at `/?/C:/data` instead of `/c/data`; this drops the prefix of a
+/// verbatim drive path and keeps every other path as it is.
+pub fn plain_path(path: std::path::PathBuf) -> std::path::PathBuf {
+    let text = path.to_string_lossy().into_owned();
+    match text.strip_prefix(r"\\?\") {
+        Some(rest) if without_drive(rest).starts_with('\\') && rest.len() > 2 => {
+            std::path::PathBuf::from(rest)
+        }
+        _ => path,
+    }
+}
+
+/// Where a sandbox sees a host path that sbx mounted: the path itself on Unix, and for a Windows
+/// drive path the drive letter in lower case as the first folder, with `/` (`C:\data` is `/c/data`).
+/// `sbx exec -w` takes this form only.
+pub fn sandbox_path(host: &Path) -> String {
+    let text = plain_path(host.to_path_buf()).display().to_string();
+    let rest = without_drive(&text);
+    if rest.len() == text.len() {
+        return text;
+    }
+    let drive = text[..1].to_ascii_lowercase();
+    format!("/{drive}{}", rest.replace('\\', "/"))
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn windows_paths_map_to_their_sandbox_folders() {
+        assert_eq!(sandbox_path(Path::new("/w/app")), "/w/app");
+        assert_eq!(sandbox_path(Path::new(r"C:\Users\me")), "/c/Users/me");
+        assert_eq!(sandbox_path(Path::new(r"\\?\D:\data\x")), "/d/data/x");
+        assert_eq!(
+            plain_path(PathBuf::from(r"\\?\C:\data")),
+            PathBuf::from(r"C:\data")
+        );
+        assert_eq!(
+            plain_path(PathBuf::from(r"\\?\UNC\server\share")),
+            PathBuf::from(r"\\?\UNC\server\share")
+        );
+        assert_eq!(without_drive(r"C:\data"), r"\data");
+        assert_eq!(without_drive("/w:x"), "/w:x");
+    }
+}
+
 #[cfg(test)]
 mod daemon_tests {
     use super::*;

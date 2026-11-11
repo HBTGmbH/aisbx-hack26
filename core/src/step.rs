@@ -447,6 +447,20 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     (y, m, d)
 }
 
+/// The `sbx exec -w` folder of a check. Like `docker exec -w` it names a folder inside the sandbox, so it is
+/// the workspace where sbx mounted it ([`sbx::sandbox_path`]: `/c/Users/me/w` for `C:\Users\me\w` on
+/// Windows) and the check's relative `workdir`, joined with `/`.
+fn check_workdir(workspace: &Path, workdir: &str) -> String {
+    let mut path = sbx::sandbox_path(workspace);
+    for part in workdir.split('/').filter(|p| !p.is_empty() && *p != ".") {
+        if !path.ends_with('/') {
+            path.push('/');
+        }
+        path.push_str(part);
+    }
+    path
+}
+
 fn epoch_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -697,6 +711,7 @@ pub(crate) fn main(raw: &[String]) -> Outcome {
     let workspace = spec
         .workspace
         .canonicalize()
+        .map(sbx::plain_path)
         .map_err(|e| Fail::usage(format!("workspace {}: {e}", spec.workspace.display())))?;
     let catalog = Catalog::load().map_err(|e| Fail::sandbox(format!("{e:#}")))?;
     let backend = catalog
@@ -1319,10 +1334,7 @@ impl Step {
                 code = headless::EXIT_INTERRUPTED;
                 break;
             }
-            let workdir = match check.workdir.is_empty() {
-                true => self.workspace.display().to_string(),
-                false => format!("{}/{}", self.workspace.display(), check.workdir),
-            };
+            let workdir = check_workdir(&self.workspace, &check.workdir);
             let run_dir = format!(
                 "/tmp/aisbx-step-{}-{}-{index}",
                 epoch_secs(),
@@ -1694,6 +1706,24 @@ pub fn doctor_text(doc: &serde_json::Value) -> String {
 mod tests {
     use super::*;
     use crate::headless::EXIT_USAGE;
+
+    #[test]
+    fn a_check_workdir_is_a_folder_inside_the_sandbox() {
+        assert_eq!(check_workdir(Path::new("/w"), ""), "/w");
+        assert_eq!(check_workdir(Path::new("/w"), "app"), "/w/app");
+        assert_eq!(check_workdir(Path::new("/w"), "web/src/./"), "/w/web/src");
+        #[cfg(windows)]
+        {
+            assert_eq!(
+                check_workdir(Path::new(r"C:\Users\me\source"), "pwr-webclient/sub"),
+                "/c/Users/me/source/pwr-webclient/sub"
+            );
+            assert_eq!(
+                check_workdir(Path::new(r"\\?\C:\Users\me\source"), "app"),
+                "/c/Users/me/source/app"
+            );
+        }
+    }
 
     const SPEC: &str = r#"{"protocol": 1, "name": "sf-1", "backend": "claude-anthropic", "kits": ["jdk25"],
       "workspace": "/w", "mounts": [{"path": "/w/node_modules", "readonly": true}],
