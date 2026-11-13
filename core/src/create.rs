@@ -3350,7 +3350,7 @@ mod tests {
         for d in ["proj/sub", "data"] {
             std::fs::create_dir_all(root.join(d)).unwrap();
         }
-        let root = std::fs::canonicalize(&root).unwrap();
+        let root = crate::sbx::plain_path(std::fs::canonicalize(&root).unwrap());
         let mut app = App::for_test(Catalog::load().unwrap(), Vec::new());
         app.cwd = root.join("proj");
         app.open_create();

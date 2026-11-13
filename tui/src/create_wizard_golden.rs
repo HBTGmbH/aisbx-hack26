@@ -499,7 +499,7 @@ fn w7b_more_folders() {
     for d in ["data", "proj-more"] {
         std::fs::create_dir_all(base.join(d)).unwrap();
     }
-    let base = std::fs::canonicalize(&base).unwrap();
+    let base = sbx::plain_path(std::fs::canonicalize(&base).unwrap());
     let data = base.join("data");
     let cwd = base.join("proj-more");
     let picked = format!("{}:ro", data.display());

@@ -416,7 +416,9 @@ pub fn extras_of<'a>(
             problems.push(problem("listed twice"));
             continue;
         }
-        let at = target.clone().unwrap_or_else(|| crate::sbx::sandbox_path(&real));
+        let at = target
+            .clone()
+            .unwrap_or_else(|| crate::sbx::sandbox_path(&real));
         let taken = |f: &Folder| f.sandbox_path() == at;
         let why = match &target {
             Some(t) if t.trim_end_matches('/').is_empty() => Some("the target cannot be /"),
@@ -769,12 +771,28 @@ mod tests {
         }];
         let planned = plan(Path::new(""), &host, None);
         let folder = &planned.folders[0];
-        assert!(!folder.sbx_spec().starts_with(r"\\?\"), "{}", folder.sbx_spec());
-        assert!(folder.sandbox_path().starts_with('/'), "{}", folder.sandbox_path());
-        assert!(!folder.sandbox_path().contains('?'), "{}", folder.sandbox_path());
+        assert!(
+            !folder.sbx_spec().starts_with(r"\\?\"),
+            "{}",
+            folder.sbx_spec()
+        );
+        assert!(
+            folder.sandbox_path().starts_with('/'),
+            "{}",
+            folder.sandbox_path()
+        );
+        assert!(
+            !folder.sandbox_path().contains('?'),
+            "{}",
+            folder.sandbox_path()
+        );
         let (extras, problems) = extras_of([data.to_str().unwrap()], &Plan::default(), None);
         assert!(problems.is_empty(), "{problems:?}");
-        assert!(!extras[0].sbx_spec().starts_with(r"\\?\"), "{}", extras[0].sbx_spec());
+        assert!(
+            !extras[0].sbx_spec().starts_with(r"\\?\"),
+            "{}",
+            extras[0].sbx_spec()
+        );
         let _ = fs::remove_dir_all(&root);
     }
 

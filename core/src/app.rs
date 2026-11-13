@@ -6709,7 +6709,9 @@ impl App {
     /// Add the picked folder to the sandbox being created, unless a create would refuse it; then
     /// the picker stays open, saying why.
     fn use_picked_folder(&mut self, here: PathBuf) {
-        let real = std::fs::canonicalize(&here).unwrap_or_else(|_| here.clone());
+        let real = std::fs::canonicalize(&here)
+            .map(sbx::plain_path)
+            .unwrap_or_else(|_| here.clone());
         let refusal = model::home_dir().and_then(|home| model::mount_refusal(&real, &home));
         let Screen::StartDir(picker) = &self.screen else {
             return;
@@ -6718,7 +6720,9 @@ impl App {
             return;
         };
         let workspace = create.workspace_root(&self.cwd);
-        let inside = std::fs::canonicalize(&workspace).is_ok_and(|ws| real.starts_with(ws))
+        let inside = std::fs::canonicalize(&workspace)
+            .map(sbx::plain_path)
+            .is_ok_and(|ws| real.starts_with(ws))
             || real.starts_with(&workspace);
         let why = match (refusal, inside) {
             (Some(why), _) => Some(why),
@@ -8438,7 +8442,9 @@ impl App {
     /// refuse it; then the picker stays open.
     fn use_host_folder(&mut self, here: PathBuf) {
         if let Some(why) = model::home_dir().and_then(|home| {
-            let real = std::fs::canonicalize(&here).unwrap_or_else(|_| here.clone());
+            let real = std::fs::canonicalize(&here)
+                .map(sbx::plain_path)
+                .unwrap_or_else(|_| here.clone());
             model::mount_refusal(&real, &home)
         }) {
             return self.set_error(format!("{}: {why}", model::tilde(&here)));
@@ -8482,7 +8488,9 @@ impl App {
                 .join(" "),
         };
         if let Some(why) = model::home_dir().and_then(|home| {
-            let real = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+            let real = std::fs::canonicalize(&path)
+                .map(sbx::plain_path)
+                .unwrap_or_else(|_| path.clone());
             model::mount_refusal(&real, &home)
         }) {
             return self.set_error(format!("{}: {why}", path.display()));
@@ -8652,7 +8660,9 @@ impl App {
     /// stays open.
     fn use_sandbox_folder(&mut self, here: PathBuf) {
         if let Some(why) = model::home_dir().and_then(|home| {
-            let real = std::fs::canonicalize(&here).unwrap_or_else(|_| here.clone());
+            let real = std::fs::canonicalize(&here)
+                .map(sbx::plain_path)
+                .unwrap_or_else(|_| here.clone());
             model::mount_refusal(&real, &home)
         }) {
             return self.set_error(format!("{}: {why}", model::tilde(&here)));
@@ -11375,7 +11385,7 @@ mod tests {
         for d in ["proj-dev/.git", "proj", "kb", "state"] {
             std::fs::create_dir_all(root.join(d)).unwrap();
         }
-        let root = std::fs::canonicalize(&root).unwrap();
+        let root = crate::sbx::plain_path(std::fs::canonicalize(&root).unwrap());
         let ws = root.join("proj-dev");
         std::fs::write(ws.join(folders::COMPANION_FILE), r#"{"public": "../proj"}"#).unwrap();
         let state = root.join("state");
@@ -11404,7 +11414,7 @@ mod tests {
         let text = std::fs::read_to_string(crate::kits::descriptor_path(Path::new(kit))).unwrap();
         assert!(text.contains(&format!(
             "`{}` (read-only): the knowledge base",
-            root.join("kb").display()
+            crate::sbx::sandbox_path(&root.join("kb"))
         )));
         assert!(text.contains("`.git` folder is mounted read-only"));
 
@@ -13858,10 +13868,13 @@ mod tests {
         for d in ["proj/.git", "kb", "state"] {
             std::fs::create_dir_all(root.join(d)).unwrap();
         }
-        let root = std::fs::canonicalize(&root).unwrap();
+        let root = crate::sbx::plain_path(std::fs::canonicalize(&root).unwrap());
         let mut sb = model::sample("claude-litellm-proj", Some("claude-litellm"), &[]);
         sb.workspace = root.join("proj");
-        sb.ro_mounts = vec![root.join("proj/.git"), PathBuf::from("/gone/from/the/list")];
+        sb.ro_mounts = vec![
+            root.join("proj").join(".git"),
+            PathBuf::from("/gone/from/the/list"),
+        ];
         let name = sb.name.clone();
         let mut app = App::for_test(Catalog::load().unwrap(), vec![sb]);
         app.mounts_state = root.join("state");
@@ -13879,7 +13892,7 @@ mod tests {
             .unwrap();
         let has = |spec: String| create.argv.contains(&spec);
         assert!(
-            has(format!("{}:ro", root.join("proj/.git").display())),
+            has(format!("{}:ro", root.join("proj").join(".git").display())),
             "{:?}",
             create.argv
         );
@@ -13903,7 +13916,7 @@ mod tests {
         for d in ["proj", "data", "state"] {
             std::fs::create_dir_all(root.join(d)).unwrap();
         }
-        let root = std::fs::canonicalize(&root).unwrap();
+        let root = crate::sbx::plain_path(std::fs::canonicalize(&root).unwrap());
         let mut sb = model::sample("claude-litellm-more", Some("claude-litellm"), &[]);
         sb.workspace = root.join("proj");
         let name = sb.name.clone();

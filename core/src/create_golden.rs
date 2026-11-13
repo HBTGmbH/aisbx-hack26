@@ -656,7 +656,7 @@ fn g7b_more_folders() {
     for d in ["data", "proj-more"] {
         std::fs::create_dir_all(base.join(d)).unwrap();
     }
-    let base = std::fs::canonicalize(&base).unwrap();
+    let base = crate::sbx::plain_path(std::fs::canonicalize(&base).unwrap());
     let (workspace, data) = (base.join("proj-more"), base.join("data"));
     let spec = format!("{}:ro", path(&data));
 
