@@ -300,7 +300,7 @@ impl Folder {
     pub fn sandbox_path(&self) -> String {
         match &self.target {
             Some(target) => target.clone(),
-            None => self.path.display().to_string(),
+            None => crate::sbx::sandbox_path(&self.path),
         }
     }
 }
@@ -343,6 +343,12 @@ pub fn spec_with_access(spec: &str, access: Access) -> String {
     out
 }
 
+/// `path` with every link resolved, without the `\\?\` prefix `fs::canonicalize` puts on a Windows
+/// drive path: sbx would mount `\\?\C:\data` at `/?/C:/data` instead of `/c/data`.
+fn real_path(path: &Path) -> io::Result<PathBuf> {
+    fs::canonicalize(path).map(crate::sbx::plain_path)
+}
+
 /// Where sbx mounts a clone-mode sandbox's source, a target no folder may take.
 pub const CLONE_SOURCE: &str = "/run/sandbox/source";
 
@@ -361,8 +367,8 @@ pub fn extras_of<'a>(
     let (workspace, planned) = (plan.workspace.as_path(), plan.folders.as_slice());
     let mut folders: Vec<Folder> = Vec::new();
     let mut problems = Vec::new();
-    let workspace_real = fs::canonicalize(workspace).ok();
-    let home_real = home.map(|h| fs::canonicalize(h).unwrap_or_else(|_| h.to_path_buf()));
+    let workspace_real = real_path(workspace).ok();
+    let home_real = home.map(|h| real_path(h).unwrap_or_else(|_| h.to_path_buf()));
     let in_workspace = |p: &str| {
         let p = Path::new(p);
         !workspace.as_os_str().is_empty()
@@ -381,7 +387,7 @@ pub fn extras_of<'a>(
             problems.push(problem("give the host folder as an absolute path or ~/…"));
             continue;
         }
-        let Ok(real) = fs::canonicalize(&expanded) else {
+        let Ok(real) = real_path(&expanded) else {
             problems.push(problem("the folder does not exist"));
             continue;
         };
@@ -410,7 +416,7 @@ pub fn extras_of<'a>(
             problems.push(problem("listed twice"));
             continue;
         }
-        let at = target.clone().unwrap_or_else(|| real.display().to_string());
+        let at = target.clone().unwrap_or_else(|| crate::sbx::sandbox_path(&real));
         let taken = |f: &Folder| f.sandbox_path() == at;
         let why = match &target {
             Some(t) if t.trim_end_matches('/').is_empty() => Some("the target cannot be /"),
@@ -486,12 +492,12 @@ pub fn plan(workspace: &Path, host: &[Entry], home: Option<&Path>) -> Plan {
     for e in host {
         wanted.push((e.path.clone(), e.access, one_line(&e.purpose), Origin::Host));
     }
-    let workspace_real = fs::canonicalize(workspace).ok();
-    let home_real = home.map(|h| fs::canonicalize(h).unwrap_or_else(|_| h.to_path_buf()));
+    let workspace_real = real_path(workspace).ok();
+    let home_real = home.map(|h| real_path(h).unwrap_or_else(|_| h.to_path_buf()));
     let mut folders: Vec<Folder> = Vec::new();
     for (path, access, purpose, origin) in wanted {
         let shown = path.display().to_string();
-        let Ok(real) = fs::canonicalize(&path) else {
+        let Ok(real) = real_path(&path) else {
             notes.push(format!("{shown}: not mounted, the folder does not exist"));
             continue;
         };
@@ -747,7 +753,29 @@ mod tests {
             std::env::temp_dir().join(format!("aisbx-tests-folders-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
-        fs::canonicalize(&dir).unwrap()
+        real_path(&dir).unwrap()
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_planned_windows_folder_is_mounted_at_its_drive_path_not_a_verbatim_one() {
+        let root = scratch("verbatim");
+        let data = root.join("data");
+        fs::create_dir_all(&data).unwrap();
+        let host = [Entry {
+            path: data.clone(),
+            access: Access::Read,
+            purpose: String::new(),
+        }];
+        let planned = plan(Path::new(""), &host, None);
+        let folder = &planned.folders[0];
+        assert!(!folder.sbx_spec().starts_with(r"\\?\"), "{}", folder.sbx_spec());
+        assert!(folder.sandbox_path().starts_with('/'), "{}", folder.sandbox_path());
+        assert!(!folder.sandbox_path().contains('?'), "{}", folder.sandbox_path());
+        let (extras, problems) = extras_of([data.to_str().unwrap()], &Plan::default(), None);
+        assert!(problems.is_empty(), "{problems:?}");
+        assert!(!extras[0].sbx_spec().starts_with(r"\\?\"), "{}", extras[0].sbx_spec());
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -911,7 +939,7 @@ mod tests {
         for dir in [&ws, &data, &docs, &home, &ws.join("inner")] {
             fs::create_dir_all(dir).unwrap();
         }
-        let real = |p: &Path| fs::canonicalize(p).unwrap();
+        let real = |p: &Path| real_path(p).unwrap();
         let text = format!(
             "{}, {}:ro, {}:/workspace/data:ro",
             data.display(),
