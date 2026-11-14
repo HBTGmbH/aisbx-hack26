@@ -79,7 +79,13 @@ HEADLESS USE — the same kits and names as the dashboard, for scripts:
         NDJSON events on stdout, the artefacts in DIR; docs/step-protocol.md is the contract.
         --prewarm              create and prove only; a later step with the same spec continues
     aisbx step --protocol          print the step protocol version
-    aisbx doctor [--json]          versions, sign-in, the policy fallback, the kit folders
+    aisbx kit build --kit NAME… [--backend B] [--json]
+        Build (or find cached) the kit images a step with these kits and backend (default
+        claude-anthropic) creates from, so that a step with kits_prebuilt never builds. Prints
+        each kit's image, built or cached, and the image key the step looks up.
+    aisbx doctor [--json] [--backend B] [--kit K[,K…]]…
+        Versions, sign-in, the policy fallback, the kit folders; with --kit, whether the kit
+        images of each set (one per --kit, kits separated by commas) are ready, missing or stale
 
     aisbx ls [--json]              every sandbox: name, status, agent, workspace, label
     aisbx kits [--json]            every kit --kit takes: name, kind, source (aisbx or user),
@@ -166,6 +172,7 @@ pub fn is_subcommand(arg: &str) -> bool {
             | "step"
             | "doctor"
             | "ls"
+            | "kit"
             | "kits"
             | "status"
             | "stop"
@@ -220,6 +227,7 @@ pub fn main(args: &[String]) -> u8 {
         "step" => crate::step::main(rest),
         "doctor" => doctor(rest),
         "ls" => ls(rest),
+        "kit" => crate::kit_build::main(rest),
         "kits" => kits_cmd(rest),
         "status" => status(rest),
         "stop" => stop(rest),
@@ -356,7 +364,7 @@ impl Args {
         }
     }
 
-    fn all(&self, key: &str) -> Vec<String> {
+    pub(crate) fn all(&self, key: &str) -> Vec<String> {
         self.flags
             .iter()
             .filter(|(k, _)| k == key)
@@ -404,7 +412,7 @@ fn fetch_steps(conn: &litellm::Connection, kit: &Path, exists: bool) -> Vec<crat
 }
 
 /// A child's stdout routed to our stderr, so stdout stays what the contract says it is.
-fn stderr_stdio() -> Stdio {
+pub(crate) fn stderr_stdio() -> Stdio {
     #[cfg(unix)]
     {
         use std::os::fd::AsFd;
@@ -1755,11 +1763,31 @@ pub(crate) fn rm_inner(name: &str) -> Result<(), Fail> {
 
 /// `aisbx doctor [--json]`: what a script needs to know before its first `up` or `step`.
 fn doctor(raw: &[String]) -> Outcome {
-    let args = Args::parse(raw, &["json"], &[])?;
+    let args = Args::parse(raw, &["json"], &["kit", "backend"])?;
     if let Some(extra) = args.positional.first().or(args.trailing.first()) {
         return Err(Fail::usage(format!("doctor takes no argument: {extra}")));
     }
-    let doc = crate::step::doctor_json();
+    let mut doc = crate::step::doctor_json();
+    let sets: Vec<Vec<String>> = args
+        .all("kit")
+        .iter()
+        .map(|v| crate::kit_build::split_kits(std::slice::from_ref(v)))
+        .collect();
+    if !sets.is_empty() || args.has("backend") {
+        let backend = args
+            .one("backend")?
+            .unwrap_or_else(|| crate::kit_build::DEFAULT_BACKEND.into());
+        let sets = match sets.is_empty() {
+            true => vec![Vec::new()],
+            false => sets,
+        };
+        let (rows, problems) = crate::kit_build::doctor_kit_images(&backend, &sets);
+        doc["kit_images"] = rows;
+        if let Some(list) = doc["problems"].as_array_mut() {
+            list.extend(problems.into_iter().map(serde_json::Value::from));
+            doc["ok"] = list.is_empty().into();
+        }
+    }
     if args.has("json") {
         println!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
     } else {

@@ -30,7 +30,7 @@ The modules in `core/src/`:
 | sbx and state        | `sbx` (every sbx call), `state` (`registry.json`), `bindings`, `job`                      |
 | Kits and accounts    | `kits`, `tokens`, `litellm`, `models`, `model_fetch`, `model_picks`, `tmpfs`               |
 | Sandboxes            | `model`, `folders`, `startdir`, `remote`, `terminal`, `skill_source`, `skill_repos`, `skill_select` |
-| Scripts and tests    | `headless`, `step` (`aisbx step` and `aisbx doctor`), `testkit`                          |
+| Scripts and tests    | `headless`, `step` (`aisbx step` and `aisbx doctor`), `kit_build` (`aisbx kit build`), `testkit` |
 
 Turn on the `test-support` feature of `aisbx-core` only in the `[dev-dependencies]` of a frontend.
 

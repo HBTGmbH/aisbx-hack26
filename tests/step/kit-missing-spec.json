@@ -1,0 +1,4 @@
+{"protocol": 2, "name": "sf-step-kit-missing", "backend": "claude-anthropic", "kits": ["sfprobe"], "kits_prebuilt": true,
+ "workspace": "/private/tmp/sf-step-ws", "network": false,
+ "work": {"checks": [{"workdir": "", "argv": ["sh", "-c", "echo $SFPROBE_MARK"]}]},
+ "timeout_seconds": 120}

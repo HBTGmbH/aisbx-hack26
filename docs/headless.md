@@ -37,7 +37,8 @@ They use the same kits, sandbox names, LiteLLM connections and setup tokens, and
 | `aisbx status` | `sbx ls --json`, `sbx inspect --json` and `sbx policy approval ls --json` |
 | `aisbx stop` / `rm` | `sbx stop` / `sbx rm --force` |
 | `aisbx step` | `up` with `--deny-network`, `sbx policy ls`, `sbx policy check network` (in parallel), `sbx policy log`, the agent or checks and the commands before and after them through `sbx exec`, `sbx inspect`, then `rm` and `sbx ls` to prove the removal ([The step protocol](step-protocol.md)) |
-| `aisbx doctor` | `sbx version --json`, `sbx ls --json`, `sbx policy ls --json`; the kit folders on this computer |
+| `aisbx kit build` | `sbx kit validate` for each kit folder a step would create from |
+| `aisbx doctor` | `sbx version --json`, `sbx ls --json`, `sbx policy ls --json`; the kit folders on this computer; with `--kit`, `sbx template ls --json` |
 
 ![A script runs aisbx up, which runs sbx create and prints the sandbox name. aisbx run NAME runs sbx exec for the agent update and the prompt upload, then the agent in print mode, whose output reaches the script on stdout, then dismisses held network requests. aisbx rm runs sbx rm --force.](images/headless-run.png)
 
@@ -221,12 +222,23 @@ it runs, and finds the artefacts (`stream.ndjson` or `checks.json`, `policy.json
 prints the protocol version a script pins. [The step protocol](step-protocol.md) is the contract, with the spec
 file, every event, the report and the exit codes.
 
+### `aisbx kit build`
+
+`kit build --kit NAME… [--backend B] [--json]` builds the kit images a step with these kits and backend creates
+from, or finds them built, outside any step. A step whose spec says `kits_prebuilt` then never builds: it creates
+from them, or stops at once. `--backend` defaults to `claude-anthropic`. [Kit images](step-protocol.md#kit-images-protocol-2)
+describes the output and the image key.
+
 ### `aisbx doctor`
 
 `doctor [--json]` says what a script needs before its first `up` or `step`: the aisbx version and its step
 protocol, the sbx version and whether it is new enough, whether sbx is signed in, whether the policy has its
 deny-all fallback, the user kit folders searched, and every kit found or skipped. It exits 0 whatever it finds; the
 `problems` list and `ok` say what is wrong.
+
+`doctor --kit K[,K…] [--kit …] [--backend B]` also says, for each kit set, whether its kit images are `ready` for a
+step with `kits_prebuilt`, `missing` or `stale` (built before a kit file changed). Each `--kit` is one set, its
+kits separated by commas. A set that is not ready is a problem that names the `aisbx kit build` to run.
 
 ### `aisbx ls`, `status`, `stop` and `rm`
 

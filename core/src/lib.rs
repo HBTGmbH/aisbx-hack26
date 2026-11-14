@@ -15,6 +15,7 @@ pub mod headless;
 pub mod input;
 pub mod insight;
 pub mod job;
+pub mod kit_build;
 pub mod kits;
 pub mod litellm;
 pub mod local;

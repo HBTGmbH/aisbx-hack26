@@ -1,0 +1,23 @@
+{
+  "backend": "claude-anthropic",
+  "images": [
+    {
+      "dir": "/private/tmp/sf-step-state/aisbx/tmpfs/claude-anthropic",
+      "image": "sbx-kit-src:claude-anthropic-af90cd7af0ea",
+      "kit": "claude-anthropic",
+      "status": "cached"
+    },
+    {
+      "dir": "/private/tmp/sf-step-kits/sfprobe",
+      "image": "sbx-kit-src:sfprobe-b0ad549edac6",
+      "kit": "sfprobe",
+      "status": "built"
+    }
+  ],
+  "key": "9b566ffa0a815e81",
+  "kits": [
+    "sfprobe"
+  ],
+  "sbx_version": "v0.51.0",
+  "status": "built"
+}

@@ -1,0 +1,7 @@
+{"detail":"","kind":"phase","ms":0,"phase":"refuse","seq":1,"status":"start","t":"2026-11-14T13:11:45.163Z"}
+{"detail":"","kind":"phase","ms":192,"phase":"refuse","seq":2,"status":"ok","t":"2026-11-14T13:11:45.355Z"}
+{"detail":"","kind":"phase","ms":0,"phase":"create","seq":3,"status":"start","t":"2026-11-14T13:11:45.355Z"}
+{"argv":["sbx","version","--json"],"exit":0,"kind":"sbx","ms":88,"phase":"create","seq":4,"t":"2026-11-14T13:11:45.443Z"}
+{"argv":["sbx","template","ls","--json"],"exit":0,"kind":"sbx","ms":177,"phase":"create","seq":5,"t":"2026-11-14T13:11:45.623Z"}
+{"detail":"kit image not built: claude-anthropic, sfprobe; run aisbx kit build --backend claude-anthropic --kit sfprobe","kind":"phase","ms":268,"phase":"create","seq":6,"status":"fail","t":"2026-11-14T13:11:45.624Z"}
+{"detail":"kit image not built: claude-anthropic, sfprobe; run aisbx kit build --backend claude-anthropic --kit sfprobe","kind":"phase","ms":461,"phase":"report","seq":7,"status":"fail","t":"2026-11-14T13:11:45.715Z"}
