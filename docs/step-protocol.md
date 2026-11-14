@@ -20,7 +20,7 @@ Protocol version: **1**. A caller pins the version and refuses another one.
 | 1 | everything on this page that is not marked *protocol 2* | complete; `aisbx step --protocol` prints `1` |
 | 2 | all of protocol 1, and: | being built; a spec may say `"protocol": 2` already and gets the parts that are in |
 | | `work.before`, `work.after` and `work.after_reserve_seconds`: fixed commands around the agent ([#1](https://github.com/HBTGmbH/aisbx-hack26/issues/1)) | **in** |
-| | `work.agent.usage_stop`, `work.stopped` and `work.usage`: stop at a usage threshold ([#2](https://github.com/HBTGmbH/aisbx-hack26/issues/2)) | not yet |
+| | `work.agent.usage_stop`, `work.stopped` and `work.usage`: stop at a usage threshold ([#2](https://github.com/HBTGmbH/aisbx-hack26/issues/2)) | **in** |
 | | `kits_prebuilt` and `aisbx kit build`: a step never builds a kit image ([#3](https://github.com/HBTGmbH/aisbx-hack26/issues/3)) | **in** |
 | | no local settings or memory files from the workspace for the agent, and `--setting-sources` in `work.agent.args` ([#4](https://github.com/HBTGmbH/aisbx-hack26/issues/4)) | **in** |
 | | `network: "open"` with `deny_hosts`, its proof, and the refusal of too many concurrent steps ([#5](https://github.com/HBTGmbH/aisbx-hack26/issues/5)) | not yet |
@@ -54,7 +54,9 @@ The agent runs in print mode with `--output-format stream-json --verbose` (Claud
 stream. `max_turns` becomes Claude Code's `--max-turns`; the other agents have no such flag, and the timeout bounds
 them. The kits switch non-essential agent traffic off. `args` go after aisbx's own flags, before the prompt.
 From protocol 2 on aisbx's own flags include `--setting-sources user,project` for Claude Code; see
-[Configuration the agent reads](#configuration-the-agent-reads-from-the-workspace-protocol-2).
+[Configuration the agent reads](#configuration-the-agent-reads-from-the-workspace-protocol-2). Protocol 2 adds
+`"usage_stop": {"five_hour": number?, "seven_day": number?}`; see
+[Stop at a usage threshold](#stop-at-a-usage-threshold-protocol-2).
 
 `work.checks`: `[{"workdir": string, "argv": [string], "env": {string: string}}]`, run in order with `sbx exec`,
 each with the step timeout, stdout and stderr captured up to a limit (the limit is part of the report).
@@ -76,7 +78,8 @@ timeout, an HTTP 429 or a Ctrl-C.
   `work.started: false`, and an `error` that names the entry. A `before` entry that runs into the timeout ends the
   step the same way with exit `124`, a Ctrl-C with exit `130`.
 - **`after`** runs once the agent has ended, whatever ended it: a clean exit, an error exit, the turn limit, the
-  timeout, a Ctrl-C (the first one). It does not run if the agent never started. **Every entry runs**, in order,
+  timeout, a Ctrl-C (the first one), a [usage stop](#stop-at-a-usage-threshold-protocol-2). It does not run if the
+  agent never started. **Every entry runs**, in order,
   whatever the entries before it exited; only the deadline or a second Ctrl-C ends `after` early. The deadline stops
   the running entry (`timed_out: true`) and skips the rest; a second Ctrl-C stops the running entry and skips the
   rest. An entry that did not run is missing from `work.after`.
@@ -93,6 +96,39 @@ timeout, an HTTP 429 or a Ctrl-C.
 - **Checks steps** may carry `before` and `after` too; there "the agent" reads as "the checks", and `after` runs once
   at least one check ran.
 - **Pre-warming** never runs either: `before` runs only in the continued step.
+
+### Stop at a usage threshold (protocol 2)
+
+With a Claude subscription the agent's stream carries `rate_limit_event` lines, each with the utilization of the
+subscription's usage windows (`rate_limit_info.unifiedWindows.<window>.utilization`, `status`, `resetsAt`). A step
+that shares a window with other use can stop its agent at a threshold, before the window is used up and the agent
+dies with HTTP 429:
+
+```json
+"work": {"agent": {"…": "…", "usage_stop": {"five_hour": 0.95, "seven_day": 0.98}}, "after": ["…"]}
+```
+
+- **Keys.** `five_hour` (the 5-hour window) and `seven_day` (the 7-day window), each optional, each a number with
+  `0 < x ≤ 1`. Any other key, a value outside that range, or `usage_stop` in a protocol 1 spec is a spec error
+  (exit 2). `{}` is valid and never stops.
+- **When.** aisbx reads every agent line as it arrives. As soon as a `rate_limit_event` gives a window with a
+  threshold a `utilization` at or above it (`0.95` stops at `0.95`), aisbx stops the agent. If both windows are over,
+  the report names `five_hour`.
+- **How.** The same way as the first Ctrl-C and the timeout: TERM to the agent and every process it started, up to
+  10 s for the agent to exit, then KILL; then up to 15 s for its `sbx exec` to end, after which aisbx ends that
+  process and stops the sandbox. So aisbx waits **at most 25 s** after the stop before `work.after` starts, and
+  `after` starts at once when the agent is gone (measured: about 1 s from the event to the start of `after`).
+  `after` gets the rest of `timeout_seconds`; the usage stop takes nothing from its reserve.
+- **Outcome.** `after` runs. The step ends with **exit 75** (`EX_TEMPFAIL`: run it again once the window resets),
+  `ok: true`, `phase: "report"`; the `work` phase event ends `fail` with a detail that names the window. The report
+  has `work.stopped: "usage"` and `work.usage_stop` (below). A timeout or Ctrl-C that comes first wins: then
+  `stopped` is `timeout` or `interrupt`, the exit is 124 or 130, and `usage_stop` is `null`.
+- **Without a stop** the windows are still followed: every protocol 2 agent step emits `usage` events and reports
+  `work.usage`, with or without `usage_stop`. A 429 that ends the agent below the threshold leaves `work.usage` as
+  the last `rate_limit_event` gave it, with the window that event named as limiting (`rateLimitType`) set to
+  `status: "rejected"` when the agent's `result` line says `api_error_status: 429`.
+- **Other backends.** An agent that prints no `rate_limit_event` (Codex, OpenCode, agy, Pi, an API key, a LiteLLM
+  connection) accepts `usage_stop` and never stops for it; `work.usage` is `null` and no `usage` event comes.
 
 ### Configuration the agent reads from the workspace (protocol 2)
 
@@ -287,6 +323,7 @@ One JSON object per line. Every event has `t` (RFC 3339 with milliseconds), `seq
 | `agent` | `line` (the agent's own JSON line, as an object) | every line the agent prints |
 | `check` | `index`, `argv`, `workdir`, `exit`, `ms`, `timed_out`; `phase` is `work` for `work.checks`, `before` or `after` for those entries | every check or entry finished |
 | `warn` | `message` | non-fatal problems, e.g. held approvals dismissed |
+| `usage` | `window` (`five_hour`, `seven_day`, or another name the agent gives), `utilization` (0 to 1), `status` (the agent's, e.g. `allowed`, `allowed_warning`, `rejected`), `resets_at` (RFC 3339); `phase` is `work` | protocol 2 agent steps: for every window of the first `rate_limit_event`, then whenever a window's utilization changes; right after the `agent` event of that line |
 
 `before` and `after` (protocol 2) run inside `work`: `work` starts, `before` starts and ends, the agent's events
 follow, `after` starts and ends, and `work` ends last. Each `before` or `after` entry gives one `sbx` and one `check`
@@ -331,6 +368,26 @@ A protocol 2 report adds:
   cause that has one. Today that is `"kit_image"`: `kits_prebuilt` found a kit image missing. A caller tests it
   rather than parse `error`.
 - `kit_key`: with `kits_prebuilt`, the image key the create looked up (`null` if it could not compute one).
+- For agent steps, always (see [Stop at a usage threshold](#stop-at-a-usage-threshold-protocol-2)):
+  - `work.stopped`: what made aisbx stop the agent, `null` (nothing: the agent ended by itself, or never started),
+    `"usage"`, `"timeout"` or `"interrupt"`.
+  - `work.usage`: the windows as the last `rate_limit_event` gave them,
+    `{"<window>": {"utilization", "status", "resets_at"}}`, also when nothing stopped the agent; `null` when the agent
+    printed no such line.
+  - `work.usage_stop`: after a usage stop, the window that reached its threshold,
+    `{"window", "threshold", "utilization", "status", "resets_at"}`, else `null`.
+
+A usage stop (`tests/step/agent-usage-report.json`, abridged):
+
+```json
+{"protocol": 2, "phase": "report", "ok": true, "exit": 75, "error": null,
+ "work": {"kind": "agent", "started": true, "exit": 143, "stopped": "usage", "result_seen": false,
+          "usage": {"five_hour": {"utilization": 0.58, "status": "allowed", "resets_at": "2026-11-14T22:30:00.000Z"},
+                    "seven_day": {"utilization": 0.96, "status": "allowed_warning", "resets_at": "2026-11-17T08:00:00.000Z"}},
+          "usage_stop": {"window": "five_hour", "threshold": 0.01, "utilization": 0.58, "status": "allowed",
+                         "resets_at": "2026-11-14T22:30:00.000Z"},
+          "before": [], "after": [{"index": 0, "exit": 0, "…": "…"}]}}
+```
 
 A `before` that failed:
 
@@ -350,6 +407,7 @@ A `before` that failed:
 | 2 | spec or usage error; nothing was created |
 | 3 | refused before create (name exists, skills active, no fallback rule) |
 | 4 | the proof failed; the sandbox was removed |
+| 75 | `work.agent.usage_stop` stopped the agent: a usage window reached its threshold; `work.after` ran and the sandbox was removed (protocol 2) |
 | 124 | the work timed out; the sandbox was removed |
 | 125 | the sandbox failed, or could not be removed (phase `remove` in the report), or a kit image is not built (`kits_prebuilt`, phase `create`, `error_kind: "kit_image"`) |
 | 130 | interrupted; the sandbox was removed |
@@ -392,4 +450,5 @@ fixtures in `tests/step/` are these very runs.
 | A kit folder copied to another path | the same kit image (the digest is of the content); another assembled image (sbx's key for it includes the paths) |
 | Protocol 2 checks step with `kits_prebuilt` after `kit build` (`prebuilt.*`) | both kit images `cached`, nothing built; sbx stacked them in 3.1 s. Most of the create is the kits' install commands: the Claude Code update of `claude-anthropic` took 25 to 28 s with the network closed |
 | A kit file changed after `kit build`, then the same step (`kit-missing.*`) | exit 125 in phase `create`, 0.46 s after the start, `error_kind: "kit_image"`, no sandbox; `doctor --kit` said `stale`; `kit build` built the changed kit, and the step ran (`tests/step-test.sh`) |
+| Protocol 2 agent step, `haiku`, a prompt that asks for a `sleep 120` in Bash, `usage_stop` `0.01` for both windows (`agent-usage.*`) | the first `rate_limit_event` came after the first answer (Claude Code refused the bare `sleep`, so the agent went on to its next turn), 2.4 s into the work, with `five_hour` 0.58 and `seven_day` 0.96; one `usage` event per window, the agent stopped (its `sbx exec` exit 143) about 1 s later, `after` ran and wrote its file: exit 75, `stopped: "usage"`, `usage_stop.window: "five_hour"`. Threshold 0.01 because no real stream may run to a high one here; the detection at 0.95 and 0.98 is tested on that recorded event with other utilizations (`cargo test`) |
 | `claude-anthropic` with only `api.anthropic.com` allowed | the proxy blocks `platform.claude.com:443` once at start (the OAuth token endpoint of the subscription sign-in); the run succeeded. A caller allows it, or expects it in `network.blocked` |

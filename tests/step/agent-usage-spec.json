@@ -1,0 +1,7 @@
+{"protocol": 2, "name": "sf-step-agent-usage", "backend": "claude-anthropic", "workspace": "/private/tmp/sf-step-usage-ws",
+ "allow_hosts": ["api.anthropic.com"], "probe_hosts": ["github.com"],
+ "work": {"agent": {"prompt_file": "/private/tmp/sf-step-usage-runs/prompt.md", "model": "haiku", "max_turns": 3,
+                    "args": ["--tools", "Bash"], "usage_stop": {"five_hour": 0.01, "seven_day": 0.01}},
+          "after": [{"workdir": "", "argv": ["sh", "-c", "echo checkpoint > .factory-checkpoint"]}],
+          "after_reserve_seconds": 60},
+ "timeout_seconds": 300}
