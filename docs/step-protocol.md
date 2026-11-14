@@ -22,7 +22,7 @@ Protocol version: **1**. A caller pins the version and refuses another one.
 | | `work.before`, `work.after` and `work.after_reserve_seconds`: fixed commands around the agent ([#1](https://github.com/HBTGmbH/aisbx-hack26/issues/1)) | **in** |
 | | `work.agent.usage_stop`, `work.stopped` and `work.usage`: stop at a usage threshold ([#2](https://github.com/HBTGmbH/aisbx-hack26/issues/2)) | not yet |
 | | `kits_prebuilt` and `aisbx kit build`: a step never builds a kit image ([#3](https://github.com/HBTGmbH/aisbx-hack26/issues/3)) | not yet |
-| | no local settings or memory files from the workspace for the agent ([#4](https://github.com/HBTGmbH/aisbx-hack26/issues/4)) | not yet |
+| | no local settings or memory files from the workspace for the agent, and `--setting-sources` in `work.agent.args` ([#4](https://github.com/HBTGmbH/aisbx-hack26/issues/4)) | **in** |
 | | `network: "open"` with `deny_hosts`, its proof, and the refusal of too many concurrent steps ([#5](https://github.com/HBTGmbH/aisbx-hack26/issues/5)) | not yet |
 
 `aisbx step --protocol` prints `2` only once all five parts are in. Until then it prints `1`, and a caller that
@@ -52,6 +52,8 @@ One JSON object. Unknown fields are an error (exit 2).
 The agent runs in print mode with `--output-format stream-json --verbose` (Claude Code) or the agent's own JSON
 stream. `max_turns` becomes Claude Code's `--max-turns`; the other agents have no such flag, and the timeout bounds
 them. The kits switch non-essential agent traffic off. `args` go after aisbx's own flags, before the prompt.
+From protocol 2 on aisbx's own flags include `--setting-sources user,project` for Claude Code; see
+[Configuration the agent reads](#configuration-the-agent-reads-from-the-workspace-protocol-2).
 
 `work.checks`: `[{"workdir": string, "argv": [string], "env": {string: string}}]`, run in order with `sbx exec`,
 each with the step timeout, stdout and stderr captured up to a limit (the limit is part of the report).
@@ -90,6 +92,44 @@ timeout, an HTTP 429 or a Ctrl-C.
 - **Checks steps** may carry `before` and `after` too; there "the agent" reads as "the checks", and `after` runs once
   at least one check ran.
 - **Pre-warming** never runs either: `before` runs only in the continued step.
+
+### Configuration the agent reads from the workspace (protocol 2)
+
+A workspace that is kept across steps may hold files that an earlier agent left behind, uncommitted. From protocol 2
+on an agent step starts Claude Code with `--setting-sources user,project`, without `local`, so the agent loads no
+local settings and no local memory file from the workspace. A protocol 1 spec runs without the flag, as it did.
+
+These are the workspace files Claude Code reads as configuration. *Measured* means an agent step of this aisbx
+showed it (Claude Code 2.1.325, the `claude-anthropic` image); the rest is from Claude Code's documentation.
+
+| File in the workspace | Source | Read by a protocol 2 agent step |
+|---|---|---|
+| `.claude/settings.local.json`, at the workspace's top only | local | **no** (measured: its `SessionStart` hook did not run; without the flag it runs) |
+| `CLAUDE.local.md`, at the top and in every subfolder (a subfolder's when the agent reads a file there) | local | **no** (measured, top and subfolder; without the flag both are loaded) |
+| `.claude/settings.json`, at the top only | project | yes (measured: its hooks run) |
+| `CLAUDE.md`, at the top and in every subfolder (a subfolder's when the agent reads a file there) | project | yes (measured) |
+| `.claude/CLAUDE.md`, `.claude/rules/`, `.claude/agents/`, `.claude/commands/`, `.claude/skills/`, `.mcp.json` | project | yes, by Claude Code's documentation |
+
+The **local configuration** is exactly the first two rows: `.claude/settings.local.json` and every `CLAUDE.local.md`
+in the workspace. A caller that also deletes them in `work.before`, as defence in depth, deletes that list. Measured
+as never read, with or without `local`: `.claude/settings.local.json` in a subfolder, and `.claude/CLAUDE.local.md`.
+
+- **Project files are read whether or not they are committed.** Claude Code tells local from project by the file
+  name, not by git: an uncommitted `CLAUDE.md` in a subfolder is loaded like a committed one. A caller that keeps a
+  workspace across runs and trusts only committed content checks or cleans the uncommitted project files itself,
+  for example in `work.before`.
+- **Outside the workspace** the agent reads its user settings under `/home/agent/.claude` (the image's), and a
+  `CLAUDE.md` that sbx writes into the workspace's parent folder inside the sandbox (the sandbox's and the kits'
+  instructions; it is not on the host, and the workspace cannot change it).
+- **`--setting-sources` in `work.agent.args`.** `args` may carry it, as `--setting-sources <value>` or
+  `--setting-sources=<value>`, for example `user,project` as defence in depth. `args` come after aisbx's flag, and
+  with the flag twice Claude Code takes the last one (measured), so the caller's value is the one that holds: the
+  same `user,project` changes nothing, `project` narrows it. A value that names `local` would load the local files
+  again, so in a protocol 2 spec it is a spec error (exit 2).
+- **No `ignore_files`.** The issue asked for a spec option that removes files before the agent starts if
+  `CLAUDE.local.md` were still read with the flag. It is not, so there is no such option.
+- **Other agents** (Codex, OpenCode, agy, Pi) have no setting sources; aisbx adds nothing for them and this page
+  claims nothing about what they read. A caller treats every workspace file as their configuration.
 
 ### User, home and paths
 
@@ -247,4 +287,6 @@ fixtures in `tests/step/` are these very runs.
 | Pre-warm, then a continued protocol 2 step whose first `before` entry exits 5 (`before-failed.*`) | the pre-warm ran no `before`; the continued step ran only that entry, then removed the sandbox: exit 1, phase `work`, `work.started: false`, no `after` |
 | Ctrl-C once during the work, then again during `after` (`tests/step-test.sh`) | exit 130; the first `after` entry ran, the second was stopped, the third skipped |
 | `id -un` and `$HOME` in `before` | `agent` and `/home/agent` |
+| Protocol 2 agent step, `haiku`, a workspace with `.claude/settings.local.json` (a `SessionStart` hook), `CLAUDE.local.md` and `sub/CLAUDE.local.md`, the project's `.claude/settings.json` logging `InstructionsLoaded` (`agent-local.*`) | no local hook marker; the log names `CLAUDE.md` and `sub/CLAUDE.md`, no `CLAUDE.local.md`, and the answer has neither local codeword. Without the flag (a protocol 1 agent's argv) the same workspace runs the local hook and loads both `CLAUDE.local.md` |
+| `--setting-sources` twice in Claude Code's argv | the last one holds: `user,project` then `user,project,local` loads the local files, the reverse does not |
 | `claude-anthropic` with only `api.anthropic.com` allowed | the proxy blocks `platform.claude.com:443` once at start (the OAuth token endpoint of the subscription sign-in); the run succeeded. A caller allows it, or expects it in `network.blocked` |

@@ -8,11 +8,13 @@
 #   3. protocol 2: Ctrl-C once (work.after runs), and again during work.after (the rest is skipped);
 #   4. protocol 2: pre-warm (work.before does not run), then the continued step, whose
 #      work.before fails (the checks and work.after do not run).
+#   5. protocol 2: an agent step on a workspace with .claude/settings.local.json (a SessionStart
+#      hook) and CLAUDE.local.md files: the agent loads neither, but the project's own settings.
 #
 #   sh tests/step-test.sh            static checks, then the live steps (skipped when sbx is not signed in)
 #   sh tests/step-test.sh --static   the static checks only
 #
-# Makes four sandboxes, sf-step-test-<pid>-<n>, and removes them. Needs python3 for the JSON
+# Makes five sandboxes, sf-step-test-<pid>-<n>, and removes them. Needs python3 for the JSON
 # checks.
 
 root=$(cd "$(dirname "$0")/.." && pwd) || exit 2
@@ -106,7 +108,7 @@ assert ($2), d
 
 # --- static: the golden fixtures ---------------------------------------------------------------
 
-for f in checks agent prewarmed fixed agent-fixed before-failed; do
+for f in checks agent prewarmed fixed agent-fixed before-failed agent-local; do
   check "fixture $f.ndjson follows the event rules" events_ok "$fixtures/$f.ndjson"
 done
 check "fixture checks-report.json is a checks report" report_ok "$fixtures/checks-report.json" checks
@@ -115,6 +117,8 @@ check "fixture fixed-report.json is a protocol 2 checks report" report_ok "$fixt
 check "fixture agent-fixed-report.json is a protocol 2 agent report" report_ok "$fixtures/agent-fixed-report.json" agent 2
 check "fixture before-failed-report.json is a protocol 2 checks report" \
   report_ok "$fixtures/before-failed-report.json" checks 2
+check "fixture agent-local-report.json is a protocol 2 agent report" \
+  report_ok "$fixtures/agent-local-report.json" agent 2
 check "the agent fixture holds the init, an assistant and the result event" \
   python3 -c "
 import json, sys
@@ -128,6 +132,9 @@ check "the agent-fixed fixture ran work.after once the turn limit ended the agen
 check "the before-failed fixture: the checks never started" \
   json_ok "$fixtures/before-failed-report.json" \
   "d['exit'] == 1 and d['phase'] == 'work' and not d['ok'] and not d['work']['started'] and d['work']['after'] == []"
+check "the agent-local fixture: no local hook ran and no CLAUDE.local.md was loaded" \
+  json_ok "$fixtures/agent-local-report.json" \
+  "d['ok'] and d['work']['started'] and d['work']['result_seen'] and [e['exit'] for e in d['work']['after']] == [0]"
 check "the protocol page names version 1" grep -q 'Protocol version: \*\*1\*\*' "$root/docs/step-protocol.md"
 
 [ "${1:-}" = "--static" ] && { [ "$failures" -eq 0 ]; exit; }
@@ -301,6 +308,59 @@ check "4: the report says the checks never started, in phase work" \
 check "4: only the failing before entry ran" \
   sh -c "[ -s '$work/4/ws/before.txt' ] && [ ! -e '$work/4/ws/never.txt' ] && [ ! -e '$work/4/ws/checks.txt' ] && [ ! -e '$work/4/ws/after.txt' ]"
 check "4: the sandbox is gone" gone "$name"
+
+# 5. protocol 2: no local settings or memory files from the workspace. The project's settings
+#    log every instruction file the agent loads (InstructionsLoaded) and touch a marker
+#    (SessionStart); the local ones would touch another marker and carry a codeword.
+mkdir -p "$work/5/ws/.claude" "$work/5/ws/sub" "$work/5/run"
+cat > "$work/5/ws/.claude/settings.json" <<'EOF'
+{"hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": "touch \"$CLAUDE_PROJECT_DIR/project-hook-marker\""}]}],
+           "InstructionsLoaded": [{"hooks": [{"type": "command", "command": "cat >> \"$CLAUDE_PROJECT_DIR/instructions.log\"; echo >> \"$CLAUDE_PROJECT_DIR/instructions.log\""}]}]}}
+EOF
+cat > "$work/5/ws/.claude/settings.local.json" <<'EOF'
+{"hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": "touch \"$CLAUDE_PROJECT_DIR/local-hook-marker\""}]}]}}
+EOF
+printf 'The codeword of CLAUDE.md is PROJECTTOP.\n' > "$work/5/ws/CLAUDE.md"
+printf 'The codeword of CLAUDE.local.md is LOCALTOP.\n' > "$work/5/ws/CLAUDE.local.md"
+printf 'The codeword of sub/CLAUDE.md is PROJECTSUB.\n' > "$work/5/ws/sub/CLAUDE.md"
+printf 'The codeword of sub/CLAUDE.local.md is LOCALSUB.\n' > "$work/5/ws/sub/CLAUDE.local.md"
+printf 'nothing here\n' > "$work/5/ws/sub/data.txt"
+printf 'Read the file sub/data.txt with the Read tool. Then list every codeword in your instructions and memory, and nothing else.\n' > "$work/5/prompt.md"
+name=sf-step-test-$$-5
+names="$names $name"
+cat > "$work/5/spec.json" <<EOF
+{"protocol": 2, "name": "$name", "backend": "claude-anthropic", "workspace": "$work/5/ws",
+ "allow_hosts": ["api.anthropic.com"], "probe_hosts": ["github.com"],
+ "work": {"agent": {"prompt_file": "$work/5/prompt.md", "model": "haiku", "max_turns": 3,
+                    "args": ["--tools", "Read", "--setting-sources", "user,project"]},
+          "after": [{"workdir": "", "argv": ["sh", "-c", "test ! -e local-hook-marker && test -e project-hook-marker && grep -q sub/CLAUDE.md instructions.log && ! grep -q CLAUDE.local.md instructions.log"]}]},
+ "timeout_seconds": 240}
+EOF
+run=$work/5/run
+sed 's/"user,project"\]/"user,project", "--setting-sources=local"]/' "$work/5/spec.json" > "$work/5/local-spec.json"
+"$bin" step --spec "$work/5/local-spec.json" --dir "$work/5/refused" > /dev/null 2>&1
+check "5: args that ask for the local setting source are a spec error" [ $? -eq 2 ]
+"$bin" step --spec "$work/5/spec.json" --dir "$run" > "$work/5/events.ndjson" 2> "$work/5/stderr.txt"
+code=$?
+check "5: the step exits 0" [ "$code" -eq 0 ]
+check "5: stdout carries only events" events_ok "$work/5/events.ndjson"
+check "5: the report is a protocol 2 agent report" report_ok "$run/report.json" agent 2
+check "5: the agent ran to its result" json_ok "$run/report.json" "d['work']['started'] and d['work']['result_seen']"
+check "5: the project's SessionStart hook ran, the local one did not" \
+  sh -c "[ -e '$work/5/ws/project-hook-marker' ] && [ ! -e '$work/5/ws/local-hook-marker' ]"
+check "5: the agent loaded CLAUDE.md and sub/CLAUDE.md, no CLAUDE.local.md (InstructionsLoaded)" \
+  python3 -c "
+import json
+loaded = [json.loads(l) for l in open('$work/5/ws/instructions.log') if l.strip()]
+paths = [l['file_path'] for l in loaded]
+assert any(p.endswith('/ws/CLAUDE.md') for p in paths), paths
+assert any(p.endswith('/ws/sub/CLAUDE.md') for p in paths), paths
+assert not any(p.endswith('CLAUDE.local.md') or l['memory_type'] == 'Local' for p, l in zip(paths, loaded)), paths
+"
+check "5: the codewords of the local files are not in the result" \
+  sh -c "! grep -q 'LOCALTOP\|LOCALSUB' '$run/stream.ndjson'"
+check "5: the after entry found the same" json_ok "$run/report.json" "[e['exit'] for e in d['work']['after']] == [0]"
+check "5: the sandbox is gone" gone "$name"
 
 for name in $names; do
   sbx rm --force "$name" >/dev/null 2>&1

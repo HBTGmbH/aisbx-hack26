@@ -1,0 +1,6 @@
+{"protocol": 2, "name": "sf-step-agent-local", "backend": "claude-anthropic", "workspace": "/private/tmp/sf-step-local-ws",
+ "allow_hosts": ["api.anthropic.com"], "probe_hosts": ["github.com"],
+ "work": {"agent": {"prompt_file": "/private/tmp/sf-step-local-runs/prompt.md", "model": "haiku", "max_turns": 3,
+                    "args": ["--tools", "Read", "--setting-sources", "user,project"]},
+          "after": [{"workdir": "", "argv": ["sh", "-c", "test ! -e local-hook-marker && test -e project-hook-marker && grep -q sub/CLAUDE.md instructions.log && ! grep -q CLAUDE.local.md instructions.log"]}]},
+ "timeout_seconds": 240}

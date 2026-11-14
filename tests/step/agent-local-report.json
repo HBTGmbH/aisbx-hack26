@@ -1,0 +1,62 @@
+{
+  "aisbx_version": "0.51.0.6",
+  "created_at": "2026-11-14T13:03:25.452Z",
+  "error": null,
+  "exit": 0,
+  "finished_at": "2026-11-14T13:04:03.150Z",
+  "image": "sandbox-kit-assembled:3f9a2e62d59ae8d6",
+  "ms": {
+    "after": 298,
+    "before": 0,
+    "create": 29667,
+    "prove": 101,
+    "remove": 375,
+    "total": 37698,
+    "work": 6799
+  },
+  "name": "sf-step-agent-local",
+  "network": {
+    "blocked": [],
+    "foreign": [
+      "mcp-gateway.docker.internal:80"
+    ]
+  },
+  "ok": true,
+  "phase": "report",
+  "prewarm": false,
+  "proof_cached": true,
+  "protocol": 2,
+  "sandbox_paths": {
+    "mounts": [],
+    "workspace": "/private/tmp/sf-step-local-ws"
+  },
+  "sbx_version": "v0.51.0",
+  "work": {
+    "after": [
+      {
+        "argv": [
+          "sh",
+          "-c",
+          "test ! -e local-hook-marker && test -e project-hook-marker && grep -q sub/CLAUDE.md instructions.log && ! grep -q CLAUDE.local.md instructions.log"
+        ],
+        "exit": 0,
+        "index": 0,
+        "ms": 297,
+        "stderr_bytes": 0,
+        "stdout_bytes": 0,
+        "timed_out": false,
+        "workdir": ""
+      }
+    ],
+    "assistant_seen": true,
+    "before": [],
+    "exit": 0,
+    "init_seen": true,
+    "interrupted": false,
+    "kind": "agent",
+    "lines": 13,
+    "result_seen": true,
+    "started": true,
+    "timed_out": false
+  }
+}

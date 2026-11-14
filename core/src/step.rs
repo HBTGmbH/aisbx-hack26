@@ -83,6 +83,30 @@ fn yes() -> bool {
     true
 }
 
+/// The agent's flags after aisbx's own: the turn limit, from protocol 2 on no local settings,
+/// then the caller's `args`, which may narrow the setting sources again (the last one wins).
+fn agent_flags(protocol: u32, agent_name: &str, agent: &AgentWork) -> Vec<String> {
+    let mut flags = kits::max_turns_args(agent_name, agent.max_turns);
+    if protocol >= 2 {
+        flags.extend(kits::no_local_settings_args(agent_name));
+    }
+    flags.extend(agent.args.iter().cloned());
+    flags
+}
+
+/// Whether agent args ask Claude Code for its `local` setting source. A later
+/// `--setting-sources` overrides an earlier one, so the caller's would win over the step's.
+fn loads_local_settings(args: &[String]) -> bool {
+    args.iter().enumerate().any(|(i, arg)| {
+        let value = match arg.strip_prefix("--setting-sources") {
+            Some("") => args.get(i + 1).map(String::as_str),
+            Some(rest) => rest.strip_prefix('='),
+            None => None,
+        };
+        value.is_some_and(|v| v.split(',').any(|s| s.trim() == "local"))
+    })
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Mount {
@@ -181,6 +205,11 @@ impl Spec {
             }
             if agent.max_turns == 0 {
                 return Err("work.agent.max_turns must be at least 1".into());
+            }
+            if self.protocol >= 2 && loads_local_settings(&agent.args) {
+                return Err(
+                    "work.agent.args: --setting-sources must not name local; the step keeps the workspace's local settings off".into(),
+                );
             }
         }
         let entries = [
@@ -1598,8 +1627,7 @@ impl Step {
         let prompt = self.prompt.clone().expect("the prompt was read");
         let name = self.spec.name.clone();
         let sandbox = |m: String| Stop::new("work", headless::EXIT_SANDBOX, m);
-        let mut extra = kits::max_turns_args(&self.agent, agent.max_turns);
-        extra.extend(agent.args.iter().cloned());
+        let extra = agent_flags(self.spec.protocol, &self.agent, &agent);
         let budget = deadline.saturating_duration_since(Instant::now());
         let timeout_text = format!(
             "{}s",
@@ -2112,6 +2140,46 @@ mod tests {
     }
 
     #[test]
+    fn a_protocol_2_agent_step_loads_no_local_settings() {
+        let spec = Spec::parse(SPEC).unwrap();
+        let agent = spec.work.agent.as_ref().unwrap();
+        let v1 = agent_flags(1, "claude-anthropic", agent);
+        assert_eq!(v1, strings(&["--max-turns", "3", "--tools", "Read"]));
+        let v2 = agent_flags(2, "claude-anthropic", agent);
+        let want = ["--max-turns", "3", "--setting-sources", "user,project"];
+        assert_eq!(v2, strings(&[&want[..], &["--tools", "Read"]].concat()));
+        assert_eq!(
+            agent_flags(2, "codex", agent),
+            strings(&["--tools", "Read"])
+        );
+
+        let v2 = SPEC.replacen("\"protocol\": 1", "\"protocol\": 2", 1);
+        let with = |args: &str| v2.replacen(r#"["--tools", "Read"]"#, args, 1);
+        for ok in [
+            r#"["--setting-sources", "user,project"]"#,
+            r#"["--setting-sources=project"]"#,
+            r#"["--tools", "local"]"#,
+        ] {
+            assert!(Spec::parse(&with(ok)).is_ok(), "{ok}");
+        }
+        for bad in [
+            r#"["--setting-sources", "user,project,local"]"#,
+            r#"["--setting-sources=local"]"#,
+            r#"["--setting-sources", "user,project", "--setting-sources", "user, local"]"#,
+        ] {
+            let err = Spec::parse(&with(bad)).unwrap_err();
+            assert!(err.contains("must not name local"), "{bad}: {err}");
+        }
+        // protocol 1 runs as it did: its args are not read
+        let v1 = SPEC.replacen(
+            r#"["--tools", "Read"]"#,
+            r#"["--setting-sources=local"]"#,
+            1,
+        );
+        assert!(Spec::parse(&v1).is_ok());
+    }
+
+    #[test]
     fn unknown_and_bad_fields_are_refused() {
         let bad = SPEC.replacen("\"kits\"", "\"kit\"", 1);
         assert!(Spec::parse(&bad).unwrap_err().contains("not a step spec"));
@@ -2511,6 +2579,7 @@ mod tests {
             "fixed.ndjson",
             "agent-fixed.ndjson",
             "before-failed.ndjson",
+            "agent-local.ndjson",
         ] {
             let mut phases = Vec::new();
             let mut inside = Vec::new();
@@ -2571,6 +2640,7 @@ mod tests {
                 "before-failed.ndjson" => {
                     vec!["work start", "before start", "before fail", "work fail"]
                 }
+                "agent-local.ndjson" => vec!["work start", "after start", "after ok", "work ok"],
                 _ => vec!["work start", "work ok"],
             };
             assert_eq!(inside, fixed, "{name}");
@@ -2581,6 +2651,7 @@ mod tests {
             ("fixed-report.json", "checks", 2),
             ("agent-fixed-report.json", "agent", 2),
             ("before-failed-report.json", "checks", 2),
+            ("agent-local-report.json", "agent", 2),
         ] {
             let d: serde_json::Value = serde_json::from_str(&fixture(name)).unwrap();
             assert_eq!(d["protocol"], protocol, "{name}");
@@ -2637,6 +2708,10 @@ mod tests {
         assert_eq!(failed["phase"], "work");
         assert_eq!(failed["work"]["started"], false);
         assert_eq!(failed["work"]["after"], serde_json::json!([]));
+        // The after entry found no local hook's marker and no CLAUDE.local.md loaded.
+        let local: serde_json::Value =
+            serde_json::from_str(&fixture("agent-local-report.json")).unwrap();
+        assert_eq!(local["work"]["after"][0]["exit"], 0);
         let fixed: serde_json::Value = serde_json::from_str(&fixture("fixed-report.json")).unwrap();
         assert_eq!(fixed["exit"], headless::EXIT_TIMEOUT);
         assert_eq!(fixed["ok"], true);
@@ -2647,6 +2722,7 @@ mod tests {
             "fixed-spec.json",
             "agent-fixed-spec.json",
             "before-failed-spec.json",
+            "agent-local-spec.json",
         ] {
             Spec::parse(&fixture(name)).unwrap_or_else(|e| panic!("{name}: {e}"));
         }
