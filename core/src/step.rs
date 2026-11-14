@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::headless::{self, Args, Fail, Outcome};
+use crate::kit_build::{self, KitSet};
 use crate::kits::{self, Catalog, HeadlessRun, OutputFormat};
 use crate::{sbx, skill_select, state};
 
@@ -77,6 +78,9 @@ pub struct Spec {
     pub memory: Option<String>,
     pub work: Work,
     pub timeout_seconds: u64,
+    /// Protocol 2: the kit images must exist (`aisbx kit build`); the step never builds one.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub kits_prebuilt: bool,
 }
 
 fn yes() -> bool {
@@ -179,6 +183,9 @@ impl Spec {
             return Err(
                 "work.before, work.after and work.after_reserve_seconds need protocol 2".into(),
             );
+        }
+        if self.protocol < 2 && self.kits_prebuilt {
+            return Err("kits_prebuilt needs protocol 2".into());
         }
         if !headless::valid_sandbox_name(&self.name) {
             return Err(format!(
@@ -658,6 +665,8 @@ struct Stop {
     phase: &'static str,
     code: u8,
     message: String,
+    /// Protocol 2: the report's `error_kind`, a cause the caller need not parse from `message`.
+    kind: Option<&'static str>,
 }
 
 impl Stop {
@@ -666,7 +675,13 @@ impl Stop {
             phase,
             code,
             message: message.into(),
+            kind: None,
         }
+    }
+
+    fn kind(mut self, kind: &'static str) -> Self {
+        self.kind = Some(kind);
+        self
     }
 }
 
@@ -751,6 +766,8 @@ struct Run {
     paths: SandboxPaths,
     network: NetworkOutcome,
     image: String,
+    /// Protocol 2, with `kits_prebuilt`: the image key the create looked up.
+    kit_key: Option<String>,
     created: bool,
     removed: bool,
     interrupted: bool,
@@ -872,6 +889,13 @@ pub(crate) fn main(raw: &[String]) -> Outcome {
         .flat_map(|d| kits::runtime_allows(d))
         .collect();
     let deny = denies(&kit_allows, &spec.allow_hosts, spec.network).map_err(Fail::usage)?;
+    let kit_set = match spec.kits_prebuilt {
+        true => Some(
+            kit_build::resolve(&catalog, &spec.backend, &spec.kits)
+                .map_err(|e| Fail::usage(format!("kits_prebuilt: {e}")))?,
+        ),
+        false => None,
+    };
 
     let spec_doc = serde_json::to_value(&spec).unwrap_or_default();
     write_json(&dir.join("spec.json"), &spec_doc);
@@ -900,6 +924,7 @@ pub(crate) fn main(raw: &[String]) -> Outcome {
         workspace,
         agent: backend.agent.clone(),
         deny,
+        kit_set,
         dir,
         prewarm: args.has("prewarm"),
         emit: Emitter::stdout(),
@@ -918,6 +943,8 @@ struct Step {
     /// The sbx agent name of the backend (`claude-anthropic`).
     agent: String,
     deny: Vec<String>,
+    /// With `kits_prebuilt`: the kit folders the create passes, to look their images up.
+    kit_set: Option<KitSet>,
     dir: PathBuf,
     prewarm: bool,
     emit: Emitter,
@@ -1139,6 +1166,12 @@ impl Step {
     fn create(&mut self) -> Result<(), Stop> {
         let at = Instant::now();
         self.emit.phase("create", "start", 0, "");
+        if let Some(set) = self.kit_set.clone() {
+            if let Err(stop) = self.kits_prebuilt(&set) {
+                self.emit.phase("create", "fail", ms(at), &stop.message);
+                return Err(stop);
+            }
+        }
         let mut argv: Vec<String> = vec![
             "--backend".into(),
             self.spec.backend.clone(),
@@ -1245,6 +1278,40 @@ impl Step {
         self.run.ms.create = ms(at);
         self.emit.phase("create", "ok", ms(at), "");
         Ok(())
+    }
+
+    /// `kits_prebuilt`: the kit images `aisbx kit build` recorded for this key must all be in
+    /// sbx's store, or the step ends here, before anything is created or built.
+    fn kits_prebuilt(&mut self, set: &KitSet) -> Result<(), Stop> {
+        let fail = |message: String| Stop::new("create", headless::EXIT_SANDBOX, message);
+        let t = Instant::now();
+        let version = sbx::version();
+        let argv = ["sbx", "version", "--json"].map(String::from);
+        self.emit
+            .sbx("create", &argv, Some(i32::from(version.is_err())), ms(t));
+        let version = version.map_err(|e| fail(format!("{e:#}")))?;
+        let key =
+            kit_build::key(set, &version).map_err(|e| fail(format!("the kit image key: {e:#}")))?;
+        self.run.kit_key = Some(key.clone());
+        let t = Instant::now();
+        let present = kit_build::present_images();
+        self.emit.sbx(
+            "create",
+            &kit_build::template_ls_argv(),
+            Some(i32::from(present.is_err())),
+            ms(t),
+        );
+        let present = present.map_err(|e| fail(format!("{e:#}")))?;
+        let records = kit_build::records_dir(&state::state_dir());
+        match kit_build::state_of(&records, set, &key, &present) {
+            kit_build::State::Ready => Ok(()),
+            _ => Err(fail(format!(
+                "kit image not built: {}; run {}",
+                set.label(),
+                set.build_command()
+            ))
+            .kind("kit_image")),
+        }
     }
 
     fn sandbox_rules(&mut self, phase: &'static str) -> Result<Vec<sbx::PolicyRule>, Stop> {
@@ -1876,10 +1943,19 @@ impl Step {
         if self.spec.protocol >= 2 {
             let entries =
                 |list: &[CheckOutcome]| list.iter().map(|c| c.report(true)).collect::<Vec<_>>();
+            // Also when the step ended before the work: 0, as for a work without them.
+            doc["ms"]["before"] = self.run.ms.before.unwrap_or(0).into();
+            doc["ms"]["after"] = self.run.ms.after.unwrap_or(0).into();
             doc["work"]["before"] = entries(&self.run.before).into();
             doc["work"]["after"] = entries(&self.run.after).into();
             if !self.spec.is_agent() {
                 doc["work"]["started"] = (!self.run.checks.is_empty()).into();
+            }
+            if let Some(kind) = failed.and_then(|s| s.kind) {
+                doc["error_kind"] = kind.into();
+            }
+            if self.spec.kits_prebuilt {
+                doc["kit_key"] = self.run.kit_key.clone().into();
             }
             let paths = &self.run.paths;
             doc["sandbox_paths"] = serde_json::json!({
@@ -2088,6 +2164,17 @@ pub fn doctor_text(doc: &serde_json::Value) -> String {
         })
         .collect();
     lines.push(format!("kits: {}", found.join(", ")));
+    for set in doc["kit_images"].as_array().into_iter().flatten() {
+        let kits: Vec<&str> = std::iter::once(&set["backend"])
+            .chain(set["kits"].as_array().into_iter().flatten())
+            .filter_map(|k| k.as_str())
+            .collect();
+        lines.push(format!(
+            "kit images {}: {}",
+            kits.join(", "),
+            set["state"].as_str().unwrap_or("unknown")
+        ));
+    }
     for problem in doc["problems"].as_array().into_iter().flatten() {
         lines.push(format!("problem: {}", problem.as_str().unwrap_or("")));
     }

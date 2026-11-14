@@ -1,0 +1,26 @@
+{"detail":"","kind":"phase","ms":0,"phase":"refuse","seq":1,"status":"start","t":"2026-11-14T13:09:09.495Z"}
+{"detail":"","kind":"phase","ms":216,"phase":"refuse","seq":2,"status":"ok","t":"2026-11-14T13:09:09.711Z"}
+{"detail":"","kind":"phase","ms":0,"phase":"create","seq":3,"status":"start","t":"2026-11-14T13:09:09.711Z"}
+{"argv":["sbx","version","--json"],"exit":0,"kind":"sbx","ms":106,"phase":"create","seq":4,"t":"2026-11-14T13:09:09.817Z"}
+{"argv":["sbx","template","ls","--json"],"exit":0,"kind":"sbx","ms":211,"phase":"create","seq":5,"t":"2026-11-14T13:09:10.031Z"}
+{"argv":["aisbx","up","--backend","claude-anthropic","--skills","off","--no-mcp","--no-host-folders","--tmpfs-volumes","--name","sf-step-prebuilt","--kit","sfprobe","--deny-network","**","/private/tmp/sf-step-ws"],"exit":0,"kind":"sbx","ms":53779,"phase":"create","seq":6,"t":"2026-11-14T13:10:03.491Z"}
+{"detail":"","kind":"phase","ms":53878,"phase":"create","seq":7,"status":"ok","t":"2026-11-14T13:10:03.590Z"}
+{"detail":"","kind":"phase","ms":0,"phase":"prove","seq":8,"status":"start","t":"2026-11-14T13:10:03.590Z"}
+{"argv":["sbx","policy","ls","sf-step-prebuilt","--json"],"exit":0,"kind":"sbx","ms":97,"phase":"prove","seq":9,"t":"2026-11-14T13:10:03.687Z"}
+{"argv":["sbx","policy","check","network","×0"],"exit":0,"kind":"sbx","ms":0,"phase":"prove","seq":10,"t":"2026-11-14T13:10:03.687Z"}
+{"cached":false,"detail":"","kind":"phase","ms":99,"phase":"prove","probes":0,"seq":11,"status":"ok","t":"2026-11-14T13:10:03.689Z"}
+{"detail":"network-before.json","kind":"phase","ms":0,"phase":"log","seq":12,"status":"start","t":"2026-11-14T13:10:03.689Z"}
+{"argv":["sbx","policy","log","sf-step-prebuilt","--json"],"exit":0,"kind":"sbx","ms":90,"phase":"log","seq":13,"t":"2026-11-14T13:10:03.779Z"}
+{"detail":"network-before.json","kind":"phase","ms":90,"phase":"log","seq":14,"status":"ok","t":"2026-11-14T13:10:03.780Z"}
+{"detail":"","kind":"phase","ms":0,"phase":"work","seq":15,"status":"start","t":"2026-11-14T13:10:03.780Z"}
+{"argv":["sbx","exec","-w","/private/tmp/sf-step-ws","sf-step-prebuilt","sh","-c","echo $SFPROBE_MARK"],"exit":0,"kind":"sbx","ms":257,"phase":"work","seq":16,"t":"2026-11-14T13:10:04.038Z"}
+{"argv":["sh","-c","echo $SFPROBE_MARK"],"exit":0,"index":0,"kind":"check","ms":257,"phase":"work","seq":17,"t":"2026-11-14T13:10:04.038Z","timed_out":false,"workdir":""}
+{"detail":"","kind":"phase","ms":258,"phase":"work","seq":18,"status":"ok","t":"2026-11-14T13:10:04.039Z"}
+{"detail":"network-after.json","kind":"phase","ms":0,"phase":"log","seq":19,"status":"start","t":"2026-11-14T13:10:04.039Z"}
+{"argv":["sbx","policy","log","sf-step-prebuilt","--json"],"exit":0,"kind":"sbx","ms":92,"phase":"log","seq":20,"t":"2026-11-14T13:10:04.131Z"}
+{"detail":"network-after.json","kind":"phase","ms":92,"phase":"log","seq":21,"status":"ok","t":"2026-11-14T13:10:04.131Z"}
+{"detail":"","kind":"phase","ms":0,"phase":"remove","seq":22,"status":"start","t":"2026-11-14T13:10:04.132Z"}
+{"argv":["sbx","rm","--force","sf-step-prebuilt"],"exit":0,"kind":"sbx","ms":374,"phase":"remove","seq":23,"t":"2026-11-14T13:10:04.507Z"}
+{"argv":["sbx","ls","--json"],"exit":0,"kind":"sbx","ms":101,"phase":"remove","seq":24,"t":"2026-11-14T13:10:04.608Z"}
+{"detail":"","kind":"phase","ms":476,"phase":"remove","seq":25,"status":"ok","t":"2026-11-14T13:10:04.608Z"}
+{"detail":"","kind":"phase","ms":55112,"phase":"report","seq":26,"status":"ok","t":"2026-11-14T13:10:04.720Z"}

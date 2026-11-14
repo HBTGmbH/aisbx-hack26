@@ -21,7 +21,7 @@ Protocol version: **1**. A caller pins the version and refuses another one.
 | 2 | all of protocol 1, and: | being built; a spec may say `"protocol": 2` already and gets the parts that are in |
 | | `work.before`, `work.after` and `work.after_reserve_seconds`: fixed commands around the agent ([#1](https://github.com/HBTGmbH/aisbx-hack26/issues/1)) | **in** |
 | | `work.agent.usage_stop`, `work.stopped` and `work.usage`: stop at a usage threshold ([#2](https://github.com/HBTGmbH/aisbx-hack26/issues/2)) | not yet |
-| | `kits_prebuilt` and `aisbx kit build`: a step never builds a kit image ([#3](https://github.com/HBTGmbH/aisbx-hack26/issues/3)) | not yet |
+| | `kits_prebuilt` and `aisbx kit build`: a step never builds a kit image ([#3](https://github.com/HBTGmbH/aisbx-hack26/issues/3)) | **in** |
 | | no local settings or memory files from the workspace for the agent, and `--setting-sources` in `work.agent.args` ([#4](https://github.com/HBTGmbH/aisbx-hack26/issues/4)) | **in** |
 | | `network: "open"` with `deny_hosts`, its proof, and the refusal of too many concurrent steps ([#5](https://github.com/HBTGmbH/aisbx-hack26/issues/5)) | not yet |
 
@@ -47,6 +47,7 @@ One JSON object. Unknown fields are an error (exit 2).
 | `cpus`, `memory` | int, string | optional limits |
 | `work` | object | exactly one of `agent` or `checks` (below); protocol 2 adds `before`, `after` and `after_reserve_seconds` |
 | `timeout_seconds` | int | timeout for the whole work: `work.before`, the agent or the checks, and `work.after` together; the lifecycle around it is not counted |
+| `kits_prebuilt` | bool | protocol 2, default `false`: the kit images must have been built with `aisbx kit build`; the step never builds one (see [Kit images](#kit-images-protocol-2)) |
 
 `work.agent`: `{"prompt_file": path, "model": string, "effort": string?, "max_turns": int, "args": [string]}`.
 The agent runs in print mode with `--output-format stream-json --verbose` (Claude Code) or the agent's own JSON
@@ -155,11 +156,104 @@ Whatever the host, the step reads where sbx put each folder from `sbx inspect` a
 (protocol 2): the measured confirmation of the path the caller computed. Where `sbx inspect` names a folder, its
 answer wins over the rule.
 
+### Kit images (protocol 2)
+
+sbx builds one image per kit folder, `sbx-kit-src:<kit>-<digest of the folder's content>`, the first time a create
+needs it. The create then stacks these images into the sandbox's image, `sandbox-kit-assembled:<hash>`. The build
+is the part that downloads (apt, installers) and can take minutes or fail with the network; stacking only reads
+images that exist. A step that must not build checks first, and the images are built before, by:
+
+```console
+$ aisbx kit build --kit rtk --kit jdk25 --json      # once per kit set, and again after a kit changes
+```
+
+`aisbx kit build --kit NAME… [--backend B] [--json]` runs `sbx kit validate` on every kit folder that a step with
+`"backend": B` and `"kits": [NAME…]` creates from: the backend's folder (the copy with its volumes in RAM, which
+the step's create uses), then each kit's. sbx builds the images that are missing and finds the others. `--backend`
+defaults to `claude-anthropic`; `--kit` repeats, or names several kits separated by commas, in any order. sbx's
+progress goes to stderr, the result to stdout. Exit `0` once every image is there, `2` for an unknown kit or
+backend, `125` when sbx could not build.
+
+`--json` prints one object (this is `tests/step/kit-build.json`, from a real run):
+
+```json
+{
+  "backend": "claude-anthropic",
+  "images": [
+    {
+      "dir": "/private/tmp/sf-step-state/aisbx/tmpfs/claude-anthropic",
+      "image": "sbx-kit-src:claude-anthropic-af90cd7af0ea",
+      "kit": "claude-anthropic",
+      "status": "cached"
+    },
+    {
+      "dir": "/private/tmp/sf-step-kits/sfprobe",
+      "image": "sbx-kit-src:sfprobe-b0ad549edac6",
+      "kit": "sfprobe",
+      "status": "built"
+    }
+  ],
+  "key": "9b566ffa0a815e81",
+  "kits": [
+    "sfprobe"
+  ],
+  "sbx_version": "v0.51.0",
+  "status": "built"
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `key` | the image key, what a step with this backend and these kits looks up (below) |
+| `backend`, `kits` | the kit set, the kits sorted |
+| `status` | `built` if sbx built any of the images now, else `cached` |
+| `images` | one per kit folder, in the order the create passes them: `kit`, `dir` (the folder sbx built from), `image` (the tag in sbx's image store) and `status` (`built` or `cached`) |
+| `sbx_version` | the sbx that built them |
+
+Without `--json` it prints one line per image (kit, image, status, separated by tabs), then `key <key>: built` or
+`cached`.
+
+**The image key** is 16 hex digits of a SHA-256 over the backend, the sorted kit names, every file of every kit
+folder (its path in the folder, whether it is executable, a SHA-256 of its content) and the sbx version. The order of
+`kits` does not change it; any change to a kit file does, and so does another sbx. `kit build` records the images it
+got under the key, in `<state>/kit-images/<key>.json` (`~/.local/state/aisbx/kit-images/` by default), written to a
+temporary file and renamed.
+
+**`"kits_prebuilt": true`** makes the create phase begin with a lookup: the step computes the key, reads the record
+and checks with `sbx template ls --json` that every image in it is still in sbx's store (an `sbx` event each for
+`sbx version --json` and `sbx template ls --json`). If the record or an image is missing, because `kit build` never
+ran for this set, a kit file changed since, sbx was updated or the image was removed, the step stops before
+anything is created or built: phase `create`, exit `125`, `error_kind: "kit_image"` and
+
+```text
+kit image not built: <backend>, <kits>; run aisbx kit build --backend <backend> --kit <kit> …
+```
+
+as the `error`. No sandbox exists then, so there is no `remove` phase. When every image is there the create runs
+as without the flag, and sbx reports each kit image `cached`.
+
+- **What stays in the create.** The sandbox's image, stacked from the kit images, also depends on where the kit
+  folders are (sbx's own key), so the first create of a set makes it, without a download: 3.1 s measured. The kits'
+  install commands, such as the Claude Code update of `claude-anthropic`, run at every create; they are no image.
+- **Combined kit sets.** Build exactly the `kits` of the spec that will run. A caller that adds a target's kits to an
+  agent's kits (a factory's `prepare_kits`, say) calls `kit build` with the combined set; each set has its own key,
+  and the kits the sets share are built once.
+- **Backends with generated kits** (on a LiteLLM or local connection, and `claude-token`) get kits made per sandbox,
+  which no build ahead covers: `kits_prebuilt` with them is a spec error (exit 2), and `kit build` refuses them.
+- **Pre-warming** looks the images up in the pre-warm's create; the continued step creates nothing and does not
+  look again.
+- **`aisbx doctor --json --kit K[,K…] [--kit …] [--backend B]`** lists each set (one per `--kit`) as
+  `kit_images: [{"backend", "kits", "key", "state", "error"}]`, with `state` `ready`, `missing` (never built, or an
+  image is gone) or `stale` (built under another key: a kit file or sbx changed since). Each set that is not ready
+  adds a problem naming the `aisbx kit build` to run.
+- Without `kits_prebuilt`, and in protocol 1, a step creates as it always did, and sbx builds what it lacks.
+
 ## Lifecycle, in this order, never reordered
 
 1. **Refuse** if the sandbox name exists, if a skill selection is active, if the policy has no deny-all fallback, or
    if the spec is invalid. Nothing is created.
-2. **Create** with `--skills off --no-mcp --no-host-folders --tmpfs-volumes`, the kits, the mounts, and one
+2. **Create** (with `kits_prebuilt`, protocol 2: after the [kit image lookup](#kit-images-protocol-2), which ends
+   the step here when an image is missing) with `--skills off --no-mcp --no-host-folders --tmpfs-volumes`, the kits, the mounts, and one
    `--deny-network` per host that the kits' descriptors open at runtime and `allow_hosts` does not name, plus
    `<host>:80` for every allowed host. Without `network`, the one deny is `**`. UDP needs no rule: the proxy never
    forwards it, and the proof checks that. After the create the step reads the effective rules once; a host that
@@ -233,6 +327,10 @@ A protocol 2 report adds:
 - `work.started` for checks too: whether a check ran. With a failed `before` it is `false`, as for an agent.
 - `sandbox_paths`: `{"workspace": path, "mounts": [{"path", "sandbox", "readonly"}]}`, where the sandbox sees the
   workspace and each of `mounts`, as `sbx inspect` names them.
+- `error_kind`: the cause of a failure as a fixed word, next to `error`, present only when the step failed for a
+  cause that has one. Today that is `"kit_image"`: `kits_prebuilt` found a kit image missing. A caller tests it
+  rather than parse `error`.
+- `kit_key`: with `kits_prebuilt`, the image key the create looked up (`null` if it could not compute one).
 
 A `before` that failed:
 
@@ -253,7 +351,7 @@ A `before` that failed:
 | 3 | refused before create (name exists, skills active, no fallback rule) |
 | 4 | the proof failed; the sandbox was removed |
 | 124 | the work timed out; the sandbox was removed |
-| 125 | the sandbox failed, or could not be removed (phase `remove` in the report) |
+| 125 | the sandbox failed, or could not be removed (phase `remove` in the report), or a kit image is not built (`kits_prebuilt`, phase `create`, `error_kind: "kit_image"`) |
 | 130 | interrupted; the sandbox was removed |
 
 A `0` never means the agent succeeded. The caller reads `stream.ndjson` and the report.
@@ -289,4 +387,9 @@ fixtures in `tests/step/` are these very runs.
 | `id -un` and `$HOME` in `before` | `agent` and `/home/agent` |
 | Protocol 2 agent step, `haiku`, a workspace with `.claude/settings.local.json` (a `SessionStart` hook), `CLAUDE.local.md` and `sub/CLAUDE.local.md`, the project's `.claude/settings.json` logging `InstructionsLoaded` (`agent-local.*`) | no local hook marker; the log names `CLAUDE.md` and `sub/CLAUDE.md`, no `CLAUDE.local.md`, and the answer has neither local codeword. Without the flag (a protocol 1 agent's argv) the same workspace runs the local hook and loads both `CLAUDE.local.md` |
 | `--setting-sources` twice in Claude Code's argv | the last one holds: `user,project` then `user,project,local` loads the local files, the reverse does not |
+| `aisbx kit build --kit sfprobe`, a probe kit whose image is `FROM scratch` and two `ENV` lines (`kit-build.json`) | `sfprobe` built in 2 s, `claude-anthropic` cached; run again: both `cached`, the same key |
+| `sbx kit validate` against `sbx create` | the same `sbx-kit-src:<kit>-<digest>` tag for the same folder: what `kit build` builds, the create finds `cached` |
+| A kit folder copied to another path | the same kit image (the digest is of the content); another assembled image (sbx's key for it includes the paths) |
+| Protocol 2 checks step with `kits_prebuilt` after `kit build` (`prebuilt.*`) | both kit images `cached`, nothing built; sbx stacked them in 3.1 s. Most of the create is the kits' install commands: the Claude Code update of `claude-anthropic` took 25 to 28 s with the network closed |
+| A kit file changed after `kit build`, then the same step (`kit-missing.*`) | exit 125 in phase `create`, 0.46 s after the start, `error_kind: "kit_image"`, no sandbox; `doctor --kit` said `stale`; `kit build` built the changed kit, and the step ran (`tests/step-test.sh`) |
 | `claude-anthropic` with only `api.anthropic.com` allowed | the proxy blocks `platform.claude.com:443` once at start (the OAuth token endpoint of the subscription sign-in); the run succeeded. A caller allows it, or expects it in `network.blocked` |

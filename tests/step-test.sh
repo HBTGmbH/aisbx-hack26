@@ -7,15 +7,18 @@
 #   2. protocol 2: work.before, a check that runs into the timeout, and work.after;
 #   3. protocol 2: Ctrl-C once (work.after runs), and again during work.after (the rest is skipped);
 #   4. protocol 2: pre-warm (work.before does not run), then the continued step, whose
-#      work.before fails (the checks and work.after do not run).
+#      work.before fails (the checks and work.after do not run);
 #   5. protocol 2: an agent step on a workspace with .claude/settings.local.json (a SessionStart
-#      hook) and CLAUDE.local.md files: the agent loads neither, but the project's own settings.
+#      hook) and CLAUDE.local.md files: the agent loads neither, but the project's own settings;
+#   6. protocol 2: kits_prebuilt. `aisbx kit build` builds a probe kit in a user kit folder, the
+#      step creates without building; a changed kit file makes the next step fail in create at
+#      once (exit 125, error_kind kit_image), and `kit build` fixes it.
 #
 #   sh tests/step-test.sh            static checks, then the live steps (skipped when sbx is not signed in)
 #   sh tests/step-test.sh --static   the static checks only
 #
-# Makes five sandboxes, sf-step-test-<pid>-<n>, and removes them. Needs python3 for the JSON
-# checks.
+# Makes seven sandboxes, sf-step-test-<pid>-<n>, and removes them, and builds two tiny kit images,
+# which it removes too. Needs python3 for the JSON checks.
 
 root=$(cd "$(dirname "$0")/.." && pwd) || exit 2
 fixtures=$root/tests/step
@@ -108,7 +111,7 @@ assert ($2), d
 
 # --- static: the golden fixtures ---------------------------------------------------------------
 
-for f in checks agent prewarmed fixed agent-fixed before-failed agent-local; do
+for f in checks agent prewarmed fixed agent-fixed before-failed agent-local prebuilt kit-missing; do
   check "fixture $f.ndjson follows the event rules" events_ok "$fixtures/$f.ndjson"
 done
 check "fixture checks-report.json is a checks report" report_ok "$fixtures/checks-report.json" checks
@@ -129,6 +132,19 @@ assert ('system', 'init') in types and ('result', 'success') in types and any(t 
 check "the agent-fixed fixture ran work.after once the turn limit ended the agent" \
   json_ok "$fixtures/agent-fixed-report.json" \
   "d['work']['started'] and d['work']['result_seen'] and [e['exit'] for e in d['work']['before']] == [0] and [e['exit'] for e in d['work']['after']] == [0]"
+check "fixture prebuilt-report.json is a protocol 2 checks report" report_ok "$fixtures/prebuilt-report.json" checks 2
+check "fixture kit-missing-report.json is a protocol 2 checks report" report_ok "$fixtures/kit-missing-report.json" checks 2
+check "the prebuilt fixture created from the images kit-build.json names" \
+  python3 -c "
+import json
+b = json.load(open('$fixtures/kit-build.json'))
+d = json.load(open('$fixtures/prebuilt-report.json'))
+assert d['ok'] and d['kit_key'] == b['key'] and 'error_kind' not in d, d
+assert b['status'] in ('built', 'cached') and all(i['image'].startswith('sbx-kit-src:') for i in b['images']), b
+"
+check "the kit-missing fixture stopped in create with error_kind kit_image" \
+  json_ok "$fixtures/kit-missing-report.json" \
+  "d['exit'] == 125 and d['phase'] == 'create' and d['error_kind'] == 'kit_image' and d['error'].startswith('kit image not built: claude-anthropic, sfprobe; run aisbx kit build')"
 check "the before-failed fixture: the checks never started" \
   json_ok "$fixtures/before-failed-report.json" \
   "d['exit'] == 1 and d['phase'] == 'work' and not d['ok'] and not d['work']['started'] and d['work']['after'] == []"
@@ -361,6 +377,114 @@ check "5: the codewords of the local files are not in the result" \
   sh -c "! grep -q 'LOCALTOP\|LOCALSUB' '$run/stream.ndjson'"
 check "5: the after entry found the same" json_ok "$run/report.json" "[e['exit'] for e in d['work']['after']] == [0]"
 check "5: the sandbox is gone" gone "$name"
+# 6. protocol 2: kits_prebuilt, with a probe kit in a user kit folder that builds in seconds; its
+#    mark is new for each run, so the first `kit build` builds
+mkdir -p "$work/6/kits/sfprobe" "$work/6/ws"
+probe() {   # probe <mark>: the probe kit with that mark
+  cat > "$work/6/kits/sfprobe/sfprobe.yaml" <<EOF
+# syntax=docker/sandbox-kit:3
+# The probe kit of tests/step-test.sh: one variable, no download.
+schemaVersion: "3"
+kind: mixin
+description: The probe kit of tests/step-test.sh.
+
+build: |
+  FROM scratch
+  ENV SBX_KIT_SFPROBE=1
+  ENV SFPROBE_MARK=$1
+EOF
+}
+probe "one-$$"
+export AISBX_KITS_PATH="$work/6/kits"
+"$bin" kit build --kit sfprobe --json > "$work/6/build1.json" 2> "$work/6/build.txt"
+check "6: kit build exits 0 and built the probe kit" \
+  json_ok "$work/6/build1.json" \
+  "d['status'] == 'built' and d['kits'] == ['sfprobe'] and [i['kit'] for i in d['images']] == ['claude-anthropic', 'sfprobe'] and d['images'][1]['status'] == 'built' and len(d['key']) == 16"
+"$bin" kit build --kit sfprobe --json > "$work/6/build2.json" 2>> "$work/6/build.txt"
+check "6: a second kit build finds the images cached, under the same key" \
+  python3 -c "
+import json
+a, b = (json.load(open('$work/6/build%d.json' % i)) for i in (1, 2))
+assert b['status'] == 'cached' and b['key'] == a['key'] and b['images'] == [dict(i, status='cached') for i in a['images']], (a, b)
+"
+key1=$(python3 -c "import json, sys; print(json.load(open(sys.argv[1]))['key'])" "$work/6/build1.json")
+"$bin" doctor --json --kit sfprobe > "$work/6/doctor1.json"
+check "6: doctor says the kit set is ready" \
+  json_ok "$work/6/doctor1.json" "d['kit_images'][0]['state'] == 'ready' and d['kit_images'][0]['key'] == '$key1'"
+prebuilt_spec() {   # prebuilt_spec <n>: a protocol 2 checks step with kits_prebuilt
+  name=sf-step-test-$$-$1
+  names="$names $name"
+  mkdir -p "$work/6/run$1"
+  cat > "$work/6/spec$1.json" <<EOF
+{"protocol": 2, "name": "$name", "backend": "claude-anthropic", "kits": ["sfprobe"], "kits_prebuilt": true,
+ "workspace": "$work/6/ws", "network": false,
+ "work": {"checks": [{"workdir": "", "argv": ["sh", "-c", "echo \$SFPROBE_MARK"]}]},
+ "timeout_seconds": 120}
+EOF
+}
+prebuilt_spec 6
+"$bin" step --spec "$work/6/spec6.json" --dir "$work/6/run6" > "$work/6/events6.ndjson" 2> "$work/6/stderr6.txt"
+code=$?
+check "6: the prebuilt step exits 0" [ "$code" -eq 0 ]
+check "6: stdout carries only events" events_ok "$work/6/events6.ndjson"
+check "6: the report is a protocol 2 checks report with the kit key" \
+  json_ok "$work/6/run6/report.json" "d['ok'] and d['kit_key'] == '$key1' and 'error_kind' not in d"
+check "6: the create built no kit image" \
+  sh -c "grep -q 'sfprobe — cached' '$work/6/stderr6.txt' && ! grep -qE 'building|— built' '$work/6/stderr6.txt'"
+check "6: the check saw the probe kit's image" \
+  json_ok "$work/6/run6/checks.json" "d[0]['stdout'].strip() == 'one-$$'"
+check "6: the sandbox is gone" gone "$name"
+probe "two-$$"
+"$bin" doctor --json --kit sfprobe > "$work/6/doctor2.json"
+check "6: doctor says the kit set is stale once a kit file changed" \
+  json_ok "$work/6/doctor2.json" "d['kit_images'][0]['state'] == 'stale' and not d['ok']"
+prebuilt_spec 7
+"$bin" step --spec "$work/6/spec7.json" --dir "$work/6/run7" > "$work/6/events7.ndjson" 2> "$work/6/stderr7.txt"
+code=$?
+check "6: the step after the change exits 125" [ "$code" -eq 125 ]
+check "6: stdout carries only events" events_ok "$work/6/events7.ndjson"
+check "6: the report says kit_image, in phase create, at once" \
+  json_ok "$work/6/run7/report.json" \
+  "not d['ok'] and d['phase'] == 'create' and d['error_kind'] == 'kit_image' and d['error'].startswith('kit image not built: claude-anthropic, sfprobe; run aisbx kit build') and d['ms']['total'] < 10000"
+check "6: nothing was created or built" \
+  sh -c "! grep -q '\"aisbx\",\"up\"' '$work/6/events7.ndjson' && ! grep -q 'KITS' '$work/6/stderr7.txt'"
+check "6: the sandbox does not exist" gone "$name"
+"$bin" kit build --kit sfprobe --json > "$work/6/build3.json" 2>> "$work/6/build.txt"
+check "6: kit build builds the changed kit" json_ok "$work/6/build3.json" "d['status'] == 'built' and d['key'] != '$key1'"
+rm -rf "$work/6/run7"
+"$bin" step --spec "$work/6/spec7.json" --dir "$work/6/run7" > "$work/6/events7.ndjson" 2> "$work/6/stderr7.txt"
+code=$?
+check "6: then the same step exits 0, on the changed kit" \
+  sh -c "[ $code -eq 0 ] && grep -q 'two-$$' '$work/6/run7/checks.json'"
+check "6: the sandbox is gone" gone "$name"
+unset AISBX_KITS_PATH
+# The probe's images (its kit images, and the sandbox images stacked from them) and records go; the
+# kit images of the kits shipped here stay, as removing a tag keeps an image that another tag names.
+{
+  for f in "$work"/6/build*.json; do
+    python3 -c "import json, sys; print(json.load(open(sys.argv[1]))['images'][1]['image'])" "$f"
+  done
+  for f in "$work"/6/run*/report.json; do
+    python3 -c "
+import json, sys
+image = json.load(open(sys.argv[1]))['image']
+if image.startswith('sandbox-kit-assembled:'):
+    print('\n'.join(image + s for s in ('', '-kit-0', '-kit-1', '-template')))
+" "$f"
+  done
+} 2>/dev/null | sort -u | while read -r image; do
+  sbx template rm --force "$image" >/dev/null 2>&1
+done
+python3 - <<'PY'
+import glob, json, os
+state = os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state")
+for f in glob.glob(os.path.join(state, "aisbx", "kit-images", "*.json")):
+    try:
+        if json.load(open(f)).get("kits") == ["sfprobe"]:
+            os.remove(f)
+    except (OSError, ValueError):
+        pass
+PY
 
 for name in $names; do
   sbx rm --force "$name" >/dev/null 2>&1
