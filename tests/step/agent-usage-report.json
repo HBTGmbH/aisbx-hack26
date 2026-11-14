@@ -1,0 +1,82 @@
+{
+  "aisbx_version": "0.51.0.7",
+  "created_at": "2026-11-14T17:48:26.446Z",
+  "error": null,
+  "exit": 75,
+  "finished_at": "2026-11-14T17:48:59.198Z",
+  "image": "sandbox-kit-assembled:ccfd4c0a01206904",
+  "ms": {
+    "after": 279,
+    "before": 0,
+    "create": 27664,
+    "prove": 151,
+    "remove": 554,
+    "total": 32751,
+    "work": 3889
+  },
+  "name": "sf-step-agent-usage",
+  "network": {
+    "blocked": [],
+    "foreign": [
+      "mcp-gateway.docker.internal:80"
+    ]
+  },
+  "ok": true,
+  "phase": "report",
+  "prewarm": false,
+  "proof_cached": true,
+  "protocol": 2,
+  "sandbox_paths": {
+    "mounts": [],
+    "workspace": "/private/tmp/sf-step-usage-ws"
+  },
+  "sbx_version": "v0.51.0",
+  "work": {
+    "after": [
+      {
+        "argv": [
+          "sh",
+          "-c",
+          "echo checkpoint > .factory-checkpoint"
+        ],
+        "exit": 0,
+        "index": 0,
+        "ms": 278,
+        "stderr_bytes": 0,
+        "stdout_bytes": 0,
+        "timed_out": false,
+        "workdir": ""
+      }
+    ],
+    "assistant_seen": true,
+    "before": [],
+    "exit": 143,
+    "init_seen": true,
+    "interrupted": false,
+    "kind": "agent",
+    "lines": 5,
+    "result_seen": false,
+    "started": true,
+    "stopped": "usage",
+    "timed_out": false,
+    "usage": {
+      "five_hour": {
+        "resets_at": "2026-11-14T22:30:00.000Z",
+        "status": "allowed",
+        "utilization": 0.58
+      },
+      "seven_day": {
+        "resets_at": "2026-11-17T08:00:00.000Z",
+        "status": "allowed_warning",
+        "utilization": 0.96
+      }
+    },
+    "usage_stop": {
+      "resets_at": "2026-11-14T22:30:00.000Z",
+      "status": "allowed",
+      "threshold": 0.01,
+      "utilization": 0.58,
+      "window": "five_hour"
+    }
+  }
+}

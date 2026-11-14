@@ -34,6 +34,9 @@ pub const SPEC_PROTOCOLS: [u32; 2] = [1, PROTOCOL_NEXT];
 
 /// A `work.before` entry failed: the agent did not start.
 pub const EXIT_BEFORE: u8 = 1;
+/// `work.agent.usage_stop` stopped the agent: a usage window reached its threshold. 75 is
+/// `EX_TEMPFAIL`: the same step can run again once the window resets.
+pub const EXIT_USAGE_STOP: u8 = 75;
 
 /// Refused before anything was created: the name exists, skills are selected, no fallback rule.
 pub const EXIT_REFUSED: u8 = 3;
@@ -148,6 +151,132 @@ pub struct AgentWork {
     pub max_turns: u32,
     #[serde(default)]
     pub args: Vec<String>,
+    /// Protocol 2: stop the agent once a usage window reaches its threshold.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage_stop: Option<UsageStop>,
+}
+
+/// `work.agent.usage_stop`: a threshold per usage window of the subscription, `0 < x <= 1`, as
+/// the agent's `rate_limit_event` lines name them. Another window name is an error.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct UsageStop {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub five_hour: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seven_day: Option<f64>,
+}
+
+impl UsageStop {
+    fn thresholds(&self) -> impl Iterator<Item = (&'static str, f64)> {
+        [("five_hour", self.five_hour), ("seven_day", self.seven_day)]
+            .into_iter()
+            .filter_map(|(window, x)| x.map(|x| (window, x)))
+    }
+
+    /// The first window whose last utilization reached its threshold, with that threshold.
+    fn crossed(&self, usage: &Usage) -> Option<(&'static str, f64)> {
+        self.thresholds().find(|(window, x)| {
+            usage
+                .windows
+                .get(*window)
+                .and_then(|w| w.utilization)
+                .is_some_and(|u| u >= *x)
+        })
+    }
+}
+
+/// One usage window as the last `rate_limit_event` gave it.
+#[derive(Debug, Clone, Default, PartialEq)]
+struct UsageWindow {
+    utilization: Option<f64>,
+    status: Option<String>,
+    /// Seconds since the epoch.
+    resets_at: Option<u64>,
+}
+
+impl UsageWindow {
+    fn report(&self) -> serde_json::Value {
+        serde_json::json!({
+            "utilization": self.utilization, "status": self.status,
+            "resets_at": self.resets_at.map(|s| rfc3339_ms(s, 0)),
+        })
+    }
+}
+
+/// What the agent's `rate_limit_event` lines said about the usage windows, the last word per
+/// window. Empty for an agent that prints no such lines.
+#[derive(Debug, Default)]
+struct Usage {
+    windows: BTreeMap<String, UsageWindow>,
+    /// The window the last event named as the one that limits (`rateLimitType`).
+    limiting: Option<String>,
+}
+
+impl Usage {
+    /// Take one agent line: a `rate_limit_event` updates the windows, a `result` with HTTP 429
+    /// marks the limiting window `rejected`. Returns the windows whose utilization is new or
+    /// changed, the ones a `usage` event goes out for.
+    fn take(&mut self, line: &serde_json::Value) -> Vec<String> {
+        match line["type"].as_str() {
+            Some("rate_limit_event") => {}
+            Some("result") => {
+                if line["api_error_status"] == 429 {
+                    let window = self.limiting.clone();
+                    if let Some(w) = window.and_then(|w| self.windows.get_mut(&w)) {
+                        w.status = Some("rejected".into());
+                    }
+                }
+                return Vec::new();
+            }
+            _ => return Vec::new(),
+        }
+        let info = &line["rate_limit_info"];
+        let window = |w: &serde_json::Value| UsageWindow {
+            utilization: w["utilization"].as_f64(),
+            status: w["status"].as_str().map(str::to_string),
+            resets_at: w["resetsAt"].as_u64(),
+        };
+        let mut seen: Vec<(String, UsageWindow)> = match info["unifiedWindows"].as_object() {
+            Some(windows) => windows
+                .iter()
+                .map(|(k, w)| (k.clone(), window(w)))
+                .collect(),
+            None => Vec::new(),
+        };
+        let limiting = info["rateLimitType"].as_str().map(str::to_string);
+        // An older stream names only the limiting window, at the top.
+        if seen.is_empty() {
+            if let Some(name) = &limiting {
+                seen.push((name.clone(), window(info)));
+            }
+        }
+        if limiting.is_some() {
+            self.limiting = limiting;
+        }
+        let mut changed = Vec::new();
+        for (name, w) in seen {
+            let before = self.windows.get(&name).map(|old| old.utilization);
+            if before != Some(w.utilization) {
+                changed.push(name.clone());
+            }
+            self.windows.insert(name, w);
+        }
+        changed
+    }
+
+    /// `work.usage`: `null` when the agent printed no `rate_limit_event`.
+    fn report(&self) -> serde_json::Value {
+        match self.windows.is_empty() {
+            true => serde_json::Value::Null,
+            false => self
+                .windows
+                .iter()
+                .map(|(k, w)| (k.clone(), w.report()))
+                .collect::<serde_json::Map<_, _>>()
+                .into(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -212,6 +341,18 @@ impl Spec {
             }
             if agent.max_turns == 0 {
                 return Err("work.agent.max_turns must be at least 1".into());
+            }
+            if let Some(stop) = &agent.usage_stop {
+                if self.protocol < 2 {
+                    return Err("work.agent.usage_stop needs protocol 2".into());
+                }
+                for (window, x) in stop.thresholds() {
+                    if !(x > 0.0 && x <= 1.0) {
+                        return Err(format!(
+                            "work.agent.usage_stop.{window} must be more than 0 and at most 1"
+                        ));
+                    }
+                }
             }
             if self.protocol >= 2 && loads_local_settings(&agent.args) {
                 return Err(
@@ -710,6 +851,13 @@ struct AgentOutcome {
     init_seen: bool,
     result_seen: bool,
     assistant_seen: bool,
+    /// Protocol 2: what stopped the agent (`usage`, `timeout`, `interrupt`), if aisbx did.
+    stopped: Option<&'static str>,
+    #[serde(skip)]
+    usage: Usage,
+    /// The window that reached its `usage_stop` threshold, and that threshold.
+    #[serde(skip)]
+    usage_crossed: Option<(&'static str, f64)>,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -1495,15 +1643,17 @@ impl Step {
         self.run.ms.work = ms(at);
         match outcome {
             Ok(code) => {
+                let detail = match code {
+                    headless::EXIT_TIMEOUT => "timed out".to_string(),
+                    headless::EXIT_INTERRUPTED => "interrupted".to_string(),
+                    EXIT_USAGE_STOP => self.usage_stop_detail(),
+                    _ => String::new(),
+                };
                 self.emit.phase(
                     "work",
                     if code == 0 { "ok" } else { "fail" },
                     ms(at),
-                    match code {
-                        headless::EXIT_TIMEOUT => "timed out",
-                        headless::EXIT_INTERRUPTED => "interrupted",
-                        _ => "",
-                    },
+                    &detail,
                 );
                 Ok(code)
             }
@@ -1511,6 +1661,18 @@ impl Step {
                 self.emit.phase("work", "fail", ms(at), &stop.message);
                 Err(stop)
             }
+        }
+    }
+
+    /// The `work` phase's detail after a usage stop: the window, its utilization and threshold.
+    fn usage_stop_detail(&self) -> String {
+        let agent = self.run.agent.as_ref();
+        match agent.and_then(|a| Some((a, a.usage_crossed?))) {
+            Some((a, (window, threshold))) => {
+                let used = a.usage.windows[window].utilization.unwrap_or_default();
+                format!("stopped at the usage threshold: {window} at {used}, threshold {threshold}")
+            }
+            None => "stopped at the usage threshold".into(),
         }
     }
 
@@ -1757,9 +1919,15 @@ impl Step {
             }
             let timed_out = Instant::now() >= deadline;
             let interrupted = self.interrupted();
-            if timed_out || interrupted {
+            let usage = outcome.usage_crossed.is_some();
+            if timed_out || interrupted || usage {
                 outcome.timed_out = timed_out && !interrupted;
                 outcome.interrupted = interrupted;
+                outcome.stopped = Some(match (interrupted, timed_out) {
+                    (true, _) => "interrupt",
+                    (false, true) => "timeout",
+                    (false, false) => "usage",
+                });
                 stopped = true;
                 break headless::stop_agent(&mut child, &name, &run_dir);
             }
@@ -1794,6 +1962,8 @@ impl Step {
         } else if !outcome.started {
             self.run.agent = Some(outcome);
             return Err(sandbox("the agent never started".into()));
+        } else if outcome.stopped == Some("usage") {
+            EXIT_USAGE_STOP
         } else {
             0
         };
@@ -1820,6 +1990,24 @@ impl Step {
         }
         self.emit
             .emit("agent", "work", serde_json::json!({"line": parsed}));
+        if self.spec.protocol < 2 {
+            return;
+        }
+        for window in outcome.usage.take(&parsed) {
+            let w = &outcome.usage.windows[&window];
+            let mut fields = w.report();
+            fields["window"] = window.into();
+            self.emit.emit("usage", "work", fields);
+        }
+        let stop = self
+            .spec
+            .work
+            .agent
+            .as_ref()
+            .and_then(|a| a.usage_stop.as_ref());
+        if outcome.usage_crossed.is_none() && outcome.stopped.is_none() {
+            outcome.usage_crossed = stop.and_then(|stop| stop.crossed(&outcome.usage));
+        }
     }
 
     fn work_checks(&mut self, deadline: Instant) -> Result<u8, Stop> {
@@ -1953,6 +2141,21 @@ impl Step {
             }
             if let Some(kind) = failed.and_then(|s| s.kind) {
                 doc["error_kind"] = kind.into();
+            }
+            if self.spec.is_agent() {
+                let agent = self.run.agent.as_ref();
+                doc["work"]["stopped"] = agent.and_then(|a| a.stopped).into();
+                doc["work"]["usage"] = agent.map_or(serde_json::Value::Null, |a| a.usage.report());
+                doc["work"]["usage_stop"] = match agent {
+                    Some(a) if a.stopped == Some("usage") => {
+                        let (window, threshold) = a.usage_crossed.expect("a usage stop");
+                        let mut stop = a.usage.windows[window].report();
+                        stop["window"] = window.into();
+                        stop["threshold"] = threshold.into();
+                        stop
+                    }
+                    _ => serde_json::Value::Null,
+                };
             }
             if self.spec.kits_prebuilt {
                 doc["kit_key"] = self.run.kit_key.clone().into();
@@ -2638,6 +2841,131 @@ mod tests {
         assert!(text.ends_with("not ok"));
     }
 
+    #[test]
+    fn usage_stop_is_protocol_2_with_known_windows_and_thresholds_up_to_1() {
+        let v2 = SPEC.replacen("\"protocol\": 1", "\"protocol\": 2", 1);
+        let with = |spec: &str, stop: &str| {
+            spec.replacen(
+                r#""args": ["--tools", "Read"]"#,
+                &format!(r#""args": ["--tools", "Read"], "usage_stop": {stop}"#),
+                1,
+            )
+        };
+        let spec = Spec::parse(&with(&v2, r#"{"five_hour": 0.95, "seven_day": 1}"#)).unwrap();
+        let stop = spec.work.agent.unwrap().usage_stop.unwrap();
+        assert_eq!((stop.five_hour, stop.seven_day), (Some(0.95), Some(1.0)));
+        assert!(Spec::parse(&with(&v2, "{}")).is_ok());
+        let err = |spec: &str| Spec::parse(spec).unwrap_err();
+        assert!(err(&with(SPEC, r#"{"five_hour": 0.9}"#)).contains("needs protocol 2"));
+        for bad in ["0", "-0.1", "1.01"] {
+            let e = err(&with(&v2, &format!(r#"{{"seven_day": {bad}}}"#)));
+            assert!(
+                e.contains("usage_stop.seven_day must be more than 0"),
+                "{bad}: {e}"
+            );
+        }
+        assert!(err(&with(&v2, r#"{"one_hour": 0.9}"#)).contains("unknown field `one_hour`"));
+    }
+
+    /// The `rate_limit_event` lines of a real agent step, as `take_agent_line` parses them.
+    fn rate_limit_events(name: &str) -> Vec<serde_json::Value> {
+        fixture(name)
+            .lines()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .map(|d| d["line"].clone())
+            .filter(|l| l["type"] == "rate_limit_event")
+            .collect()
+    }
+
+    /// A recorded event with other utilizations for the two windows.
+    fn at(event: &serde_json::Value, five_hour: f64, seven_day: f64) -> serde_json::Value {
+        let mut e = event.clone();
+        e["rate_limit_info"]["unifiedWindows"]["five_hour"]["utilization"] = five_hour.into();
+        e["rate_limit_info"]["unifiedWindows"]["seven_day"]["utilization"] = seven_day.into();
+        e
+    }
+
+    #[test]
+    fn usage_follows_the_rate_limit_events_and_names_new_values_only() {
+        let event = &rate_limit_events("agent-fixed.ndjson")[0];
+        let mut usage = Usage::default();
+        assert_eq!(usage.report(), serde_json::Value::Null);
+        // The first event gives a start value for every window.
+        assert_eq!(usage.take(event), ["five_hour", "seven_day"]);
+        assert_eq!(
+            usage.report(),
+            serde_json::json!({
+                "five_hour": {"utilization": 0.07, "status": "allowed", "resets_at": "2026-11-14T17:30:00.000Z"},
+                "seven_day": {"utilization": 0.8, "status": "allowed_warning", "resets_at": "2026-11-17T08:00:00.000Z"},
+            })
+        );
+        assert!(usage.take(event).is_empty());
+        assert_eq!(usage.take(&at(event, 0.08, 0.8)), ["five_hour"]);
+        // Other lines change nothing; a 429 result rejects the window the last event named.
+        let ok = serde_json::json!({"type": "result", "api_error_status": null});
+        assert!(usage.take(&ok).is_empty());
+        assert!(usage
+            .take(&serde_json::json!({"type": "assistant"}))
+            .is_empty());
+        assert_eq!(
+            usage.windows["seven_day"].status.as_deref(),
+            Some("allowed_warning")
+        );
+        usage.take(&serde_json::json!({"type": "result", "api_error_status": 429}));
+        assert_eq!(
+            usage.windows["seven_day"].status.as_deref(),
+            Some("rejected")
+        );
+        assert_eq!(
+            usage.windows["five_hour"].status.as_deref(),
+            Some("allowed")
+        );
+        // An older stream with only the limiting window at the top.
+        let mut old = Usage::default();
+        let top = serde_json::json!({"type": "rate_limit_event", "rate_limit_info": {
+            "rateLimitType": "five_hour", "utilization": 0.5, "status": "allowed", "resetsAt": 1794677400}});
+        assert_eq!(old.take(&top), ["five_hour"]);
+        assert_eq!(old.windows["five_hour"].utilization, Some(0.5));
+    }
+
+    #[test]
+    fn a_recorded_stream_that_crosses_a_threshold_names_the_window() {
+        let event = &rate_limit_events("agent-fixed.ndjson")[0];
+        let stop = |five_hour, seven_day| UsageStop {
+            five_hour,
+            seven_day,
+        };
+        let crossed = |stop: &UsageStop, stream: &[(f64, f64)]| {
+            let mut usage = Usage::default();
+            stream.iter().find_map(|(f, s)| {
+                usage.take(&at(event, *f, *s));
+                stop.crossed(&usage)
+            })
+        };
+        let factory = stop(Some(0.95), Some(0.98));
+        let five = [
+            (0.55, 0.5),
+            (0.8, 0.5),
+            (0.94, 0.51),
+            (0.95, 0.51),
+            (0.99, 0.6),
+        ];
+        assert_eq!(crossed(&factory, &five), Some(("five_hour", 0.95)));
+        let seven = [(0.1, 0.97), (0.12, 0.979), (0.13, 0.98)];
+        assert_eq!(crossed(&factory, &seven), Some(("seven_day", 0.98)));
+        assert_eq!(crossed(&stop(Some(0.95), None), &seven), None);
+        assert_eq!(crossed(&UsageStop::default(), &five), None);
+        // The real events, with a low threshold, as the live test runs it.
+        let mut usage = Usage::default();
+        for e in rate_limit_events("agent-local.ndjson") {
+            usage.take(&e);
+        }
+        assert_eq!(
+            stop(Some(0.01), None).crossed(&usage),
+            Some(("five_hour", 0.01))
+        );
+    }
+
     fn strings(items: &[&str]) -> Vec<String> {
         items.iter().map(|s| (*s).to_string()).collect()
     }
@@ -2667,6 +2995,7 @@ mod tests {
             "agent-fixed.ndjson",
             "before-failed.ndjson",
             "agent-local.ndjson",
+            "agent-usage.ndjson",
         ] {
             let mut phases = Vec::new();
             let mut inside = Vec::new();
@@ -2678,7 +3007,7 @@ mod tests {
                     "{name}"
                 );
                 assert!(
-                    ["phase", "sbx", "agent", "check", "warn"]
+                    ["phase", "sbx", "agent", "check", "warn", "usage"]
                         .contains(&d["kind"].as_str().unwrap()),
                     "{name}: {line}"
                 );
@@ -2728,6 +3057,8 @@ mod tests {
                     vec!["work start", "before start", "before fail", "work fail"]
                 }
                 "agent-local.ndjson" => vec!["work start", "after start", "after ok", "work ok"],
+                // The usage stop ends the work with exit 75; after runs all the same.
+                "agent-usage.ndjson" => vec!["work start", "after start", "after ok", "work fail"],
                 _ => vec!["work start", "work ok"],
             };
             assert_eq!(inside, fixed, "{name}");
@@ -2739,6 +3070,7 @@ mod tests {
             ("agent-fixed-report.json", "agent", 2),
             ("before-failed-report.json", "checks", 2),
             ("agent-local-report.json", "agent", 2),
+            ("agent-usage-report.json", "agent", 2),
         ] {
             let d: serde_json::Value = serde_json::from_str(&fixture(name)).unwrap();
             assert_eq!(d["protocol"], protocol, "{name}");
@@ -2799,6 +3131,37 @@ mod tests {
         let local: serde_json::Value =
             serde_json::from_str(&fixture("agent-local-report.json")).unwrap();
         assert_eq!(local["work"]["after"][0]["exit"], 0);
+        // The usage stop: the window that reached its threshold, its reset, and after ran.
+        let usage: serde_json::Value =
+            serde_json::from_str(&fixture("agent-usage-report.json")).unwrap();
+        assert_eq!(usage["exit"], EXIT_USAGE_STOP);
+        assert_eq!(
+            (&usage["ok"], &usage["phase"]),
+            (&true.into(), &"report".into())
+        );
+        let work = &usage["work"];
+        assert_eq!(work["stopped"], "usage");
+        let window = work["usage_stop"]["window"].as_str().unwrap();
+        assert_eq!(work["usage_stop"]["threshold"], 0.01);
+        assert_eq!(
+            work["usage_stop"]["resets_at"],
+            work["usage"][window]["resets_at"]
+        );
+        assert!(
+            state::parse_rfc3339(work["usage"]["seven_day"]["resets_at"].as_str().unwrap())
+                .is_some()
+        );
+        assert_eq!(work["after"][0]["exit"], 0);
+        let events: Vec<serde_json::Value> = fixture("agent-usage.ndjson")
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        let windows: Vec<&str> = events
+            .iter()
+            .filter(|e| e["kind"] == "usage")
+            .map(|e| e["window"].as_str().unwrap())
+            .collect();
+        assert_eq!(windows, ["five_hour", "seven_day"]);
         let fixed: serde_json::Value = serde_json::from_str(&fixture("fixed-report.json")).unwrap();
         assert_eq!(fixed["exit"], headless::EXIT_TIMEOUT);
         assert_eq!(fixed["ok"], true);
@@ -2810,6 +3173,7 @@ mod tests {
             "agent-fixed-spec.json",
             "before-failed-spec.json",
             "agent-local-spec.json",
+            "agent-usage-spec.json",
         ] {
             Spec::parse(&fixture(name)).unwrap_or_else(|e| panic!("{name}: {e}"));
         }

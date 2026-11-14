@@ -12,12 +12,15 @@
 #      hook) and CLAUDE.local.md files: the agent loads neither, but the project's own settings;
 #   6. protocol 2: kits_prebuilt. `aisbx kit build` builds a probe kit in a user kit folder, the
 #      step creates without building; a changed kit file makes the next step fail in create at
-#      once (exit 125, error_kind kit_image), and `kit build` fixes it.
+#      once (exit 125, error_kind kit_image), and `kit build` fixes it;
+#   7. protocol 2: work.agent.usage_stop with a threshold the account's real usage is already
+#      over (0.01): the first rate_limit_event stops the agent before its result, after runs,
+#      and the report says stopped "usage" with the window and its reset (exit 75).
 #
 #   sh tests/step-test.sh            static checks, then the live steps (skipped when sbx is not signed in)
 #   sh tests/step-test.sh --static   the static checks only
 #
-# Makes seven sandboxes, sf-step-test-<pid>-<n>, and removes them, and builds two tiny kit images,
+# Makes eight sandboxes, sf-step-test-<pid>-<n>, and removes them, and builds two tiny kit images,
 # which it removes too. Needs python3 for the JSON checks.
 
 root=$(cd "$(dirname "$0")/.." && pwd) || exit 2
@@ -53,7 +56,7 @@ for line in open(sys.argv[1]):
     seq += 1
     assert d["seq"] == seq, (d["seq"], seq)
     assert d["t"].endswith("Z") and "T" in d["t"], d["t"]
-    assert d["kind"] in ("phase", "sbx", "agent", "check", "warn"), d["kind"]
+    assert d["kind"] in ("phase", "sbx", "agent", "check", "warn", "usage"), d["kind"]
     assert isinstance(d["phase"], str) and d["phase"]
     if d["kind"] == "phase" and d["phase"] in ("work", "before", "after"):
         inside.append(d["phase"])
@@ -111,7 +114,7 @@ assert ($2), d
 
 # --- static: the golden fixtures ---------------------------------------------------------------
 
-for f in checks agent prewarmed fixed agent-fixed before-failed agent-local prebuilt kit-missing; do
+for f in checks agent prewarmed fixed agent-fixed before-failed agent-local prebuilt kit-missing agent-usage; do
   check "fixture $f.ndjson follows the event rules" events_ok "$fixtures/$f.ndjson"
 done
 check "fixture checks-report.json is a checks report" report_ok "$fixtures/checks-report.json" checks
@@ -132,6 +135,11 @@ assert ('system', 'init') in types and ('result', 'success') in types and any(t 
 check "the agent-fixed fixture ran work.after once the turn limit ended the agent" \
   json_ok "$fixtures/agent-fixed-report.json" \
   "d['work']['started'] and d['work']['result_seen'] and [e['exit'] for e in d['work']['before']] == [0] and [e['exit'] for e in d['work']['after']] == [0]"
+check "fixture agent-usage-report.json is a protocol 2 agent report" \
+  report_ok "$fixtures/agent-usage-report.json" agent 2
+check "the agent-usage fixture: stopped at the usage threshold, after ran, the window and its reset named" \
+  json_ok "$fixtures/agent-usage-report.json" \
+  "d['exit'] == 75 and d['ok'] and d['work']['stopped'] == 'usage' and d['work']['usage_stop']['window'] in d['work']['usage'] and d['work']['usage_stop']['resets_at'].endswith('Z') and [e['exit'] for e in d['work']['after']] == [0]"
 check "fixture prebuilt-report.json is a protocol 2 checks report" report_ok "$fixtures/prebuilt-report.json" checks 2
 check "fixture kit-missing-report.json is a protocol 2 checks report" report_ok "$fixtures/kit-missing-report.json" checks 2
 check "the prebuilt fixture created from the images kit-build.json names" \
@@ -485,6 +493,43 @@ for f in glob.glob(os.path.join(state, "aisbx", "kit-images", "*.json")):
     except (OSError, ValueError):
         pass
 PY
+
+# 7. protocol 2: a usage stop. The account's windows are over 0.01 already, so the first
+#    rate_limit_event (it comes after the first answer, before the result) stops the agent.
+mkdir -p "$work/7/ws" "$work/7/run"
+printf 'Run the shell command `sleep 120` with the Bash tool. Then answer done.\n' > "$work/7/prompt.md"
+name=sf-step-test-$$-8
+names="$names $name"
+cat > "$work/7/spec.json" <<EOF
+{"protocol": 2, "name": "$name", "backend": "claude-anthropic", "workspace": "$work/7/ws",
+ "allow_hosts": ["api.anthropic.com"], "probe_hosts": ["github.com"],
+ "work": {"agent": {"prompt_file": "$work/7/prompt.md", "model": "haiku", "max_turns": 3, "args": ["--tools", "Bash"],
+                    "usage_stop": {"five_hour": 0.01, "seven_day": 0.01}},
+          "after": [{"workdir": "", "argv": ["sh", "-c", "echo checkpoint > after.txt"]}],
+          "after_reserve_seconds": 60},
+ "timeout_seconds": 300}
+EOF
+run=$work/7/run
+"$bin" step --spec "$work/7/spec.json" --dir "$run" > "$work/7/events.ndjson" 2> "$work/7/stderr.txt"
+code=$?
+check "7: the step exits 75 (usage stop)" [ "$code" -eq 75 ]
+check "7: stdout carries only events" events_ok "$work/7/events.ndjson"
+check "7: the report is a protocol 2 agent report" report_ok "$run/report.json" agent 2
+check "7: the report says stopped usage, names the window and its reset, and after ran" \
+  json_ok "$run/report.json" \
+  "d['ok'] and d['phase'] == 'report' and d['work']['stopped'] == 'usage' and not d['work']['result_seen'] and d['work']['usage_stop']['threshold'] == 0.01 and d['work']['usage_stop']['utilization'] >= 0.01 and d['work']['usage_stop']['resets_at'] == d['work']['usage'][d['work']['usage_stop']['window']]['resets_at'] and [e['exit'] for e in d['work']['after']] == [0]"
+check "7: one usage event per window for the first rate_limit_event, before the stop" \
+  python3 -c "
+import json
+ev = [json.loads(l) for l in open('$work/7/events.ndjson')]
+usage = [e for e in ev if e['kind'] == 'usage']
+first = next(i for i, e in enumerate(ev) if e['kind'] == 'agent' and e['line'].get('type') == 'rate_limit_event')
+windows = [e['window'] for e in usage]
+assert 'five_hour' in windows and 'seven_day' in windows and ev[first + 1]['kind'] == 'usage', usage
+assert all(set(e) >= {'window', 'utilization', 'status', 'resets_at'} and e['phase'] == 'work' for e in usage), usage
+"
+check "7: after's file exists after the removal" [ -s "$work/7/ws/after.txt" ]
+check "7: the sandbox is gone" gone "$name"
 
 for name in $names; do
   sbx rm --force "$name" >/dev/null 2>&1
