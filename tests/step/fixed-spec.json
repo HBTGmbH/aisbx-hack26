@@ -1,0 +1,9 @@
+{"protocol": 2, "name": "sf-step-fixed", "backend": "claude-anthropic", "workspace": "/private/tmp/sf-step-ws",
+ "mounts": [{"path": "/private/tmp/sf-step-second"}],
+ "allow_hosts": ["api.anthropic.com"], "probe_hosts": ["github.com", "example.com"], "network": false,
+ "work": {"before": [{"workdir": "", "argv": ["sh", "-c", "id -un; echo $HOME; pwd"]}],
+          "checks": [{"workdir": "app", "argv": ["sleep", "300"]}],
+          "after": [{"workdir": "", "argv": ["sh", "-c", "exit 3"]},
+                    {"workdir": "/private/tmp/sf-step-second", "argv": ["sh", "-c", "pwd > after.txt"]}],
+          "after_reserve_seconds": 15},
+ "timeout_seconds": 30}

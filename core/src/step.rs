@@ -10,7 +10,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -21,9 +21,18 @@ use crate::headless::{self, Args, Fail, Outcome};
 use crate::kits::{self, Catalog, HeadlessRun, OutputFormat};
 use crate::{sbx, skill_select, state};
 
-/// The step protocol this binary speaks. It bumps on any incompatible change to the spec, the
-/// events or the report; a caller pins it.
+/// The step protocol `aisbx step --protocol` prints and a caller pins: every part of it is in
+/// this binary. It bumps on any incompatible change to the spec, the events or the report.
 pub const PROTOCOL: u32 = 1;
+/// The protocol being built. Specs may ask for it already and get the parts that are in (the
+/// table in docs/step-protocol.md says which); `--protocol` prints it only once all of them are,
+/// by setting [`PROTOCOL`] to it.
+pub const PROTOCOL_NEXT: u32 = 2;
+/// The spec versions this binary runs. A protocol 1 spec runs as it always did.
+pub const SPEC_PROTOCOLS: [u32; 2] = [1, PROTOCOL_NEXT];
+
+/// A `work.before` entry failed: the agent did not start.
+pub const EXIT_BEFORE: u8 = 1;
 
 /// Refused before anything was created: the name exists, skills are selected, no fallback rule.
 pub const EXIT_REFUSED: u8 = 3;
@@ -39,6 +48,8 @@ const CHECK_STDOUT_LIMIT: usize = 4 << 20;
 const CHECK_STDERR_LIMIT: usize = 1 << 20;
 /// `sbx policy log --limit`, per list.
 const LOG_LIMIT: u32 = 1000;
+/// What `work.after` keeps back from `timeout_seconds` when the spec does not say.
+const AFTER_RESERVE_SECONDS: u64 = 60;
 
 // --- the spec --------------------------------------------------------------------------------------
 
@@ -80,7 +91,7 @@ pub struct Mount {
     pub readonly: bool,
 }
 
-/// Exactly one of `agent` or `checks`.
+/// Exactly one of `agent` or `checks`, and (protocol 2) the fixed commands around it.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Work {
@@ -88,6 +99,15 @@ pub struct Work {
     pub agent: Option<AgentWork>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checks: Option<Vec<Check>>,
+    /// Run in order before the agent; the first that fails keeps the agent from starting.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub before: Vec<Check>,
+    /// Run in order once the agent has ended, whatever ended it; each runs whatever the others did.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub after: Vec<Check>,
+    /// Kept back from `timeout_seconds` for `after`; [`AFTER_RESERVE_SECONDS`] when not given.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_reserve_seconds: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -120,11 +140,21 @@ impl Spec {
     }
 
     fn validate(&self) -> Result<(), String> {
-        if self.protocol != PROTOCOL {
+        if !SPEC_PROTOCOLS.contains(&self.protocol) {
             return Err(format!(
-                "protocol {} is not {PROTOCOL}, the one this aisbx speaks",
+                "protocol {} is not one this aisbx speaks ({SPEC_PROTOCOLS:?})",
                 self.protocol
             ));
+        }
+        let work = &self.work;
+        if self.protocol < 2
+            && (!work.before.is_empty()
+                || !work.after.is_empty()
+                || work.after_reserve_seconds.is_some())
+        {
+            return Err(
+                "work.before, work.after and work.after_reserve_seconds need protocol 2".into(),
+            );
         }
         if !headless::valid_sandbox_name(&self.name) {
             return Err(format!(
@@ -153,23 +183,27 @@ impl Spec {
                 return Err("work.agent.max_turns must be at least 1".into());
             }
         }
-        for (i, check) in self.work.checks.iter().flatten().enumerate() {
-            if check.argv.is_empty() {
-                return Err(format!("work.checks[{i}].argv is empty"));
-            }
-            if check.workdir.starts_with('/') || check.workdir.split('/').any(|p| p == "..") {
-                return Err(format!(
-                    "work.checks[{i}].workdir must be relative to the workspace, without .."
-                ));
-            }
-            for key in check.env.keys() {
-                if key.is_empty() || key.contains('=') {
-                    return Err(format!("work.checks[{i}].env has a bad key {key:?}"));
-                }
+        let entries = [
+            ("checks", work.checks.as_deref().unwrap_or_default()),
+            ("before", &work.before),
+            ("after", &work.after),
+        ];
+        for (field, list) in entries {
+            for (i, check) in list.iter().enumerate() {
+                self.validate_check(&format!("work.{field}[{i}]"), check)?;
             }
         }
         if self.timeout_seconds == 0 {
             return Err("timeout_seconds must be at least 1".into());
+        }
+        if work.after.is_empty() && work.after_reserve_seconds.is_some() {
+            return Err("work.after_reserve_seconds needs work.after".into());
+        }
+        if !work.after.is_empty() && self.after_reserve().as_secs() >= self.timeout_seconds {
+            return Err(format!(
+                "work.after_reserve_seconds ({}) must be less than timeout_seconds",
+                self.after_reserve().as_secs()
+            ));
         }
         for host in self.allow_hosts.iter().chain(&self.probe_hosts) {
             if host.trim().is_empty() || host.contains(char::is_whitespace) {
@@ -179,8 +213,52 @@ impl Spec {
         Ok(())
     }
 
+    /// A `work.checks`, `work.before` or `work.after` entry. Its `workdir` is relative to the
+    /// workspace; from protocol 2 on it may also be an absolute host path in the workspace or in
+    /// one of `mounts` (the second repository of a session, say).
+    fn validate_check(&self, at: &str, check: &Check) -> Result<(), String> {
+        if check.argv.is_empty() {
+            return Err(format!("{at}.argv is empty"));
+        }
+        let workdir = Path::new(&check.workdir);
+        let up = workdir
+            .components()
+            .any(|c| c == std::path::Component::ParentDir)
+            || check.workdir.split('/').any(|p| p == "..");
+        let absolute = workdir.is_absolute() || check.workdir.starts_with('/');
+        let inside = std::iter::once(&self.workspace)
+            .chain(self.mounts.iter().map(|m| &m.path))
+            .any(|root| workdir.starts_with(root));
+        if up || (absolute && (self.protocol < 2 || !inside)) {
+            return Err(match self.protocol {
+                1 => format!("{at}.workdir must be relative to the workspace, without .."),
+                _ => format!(
+                    "{at}.workdir must be relative to the workspace, or a path in the workspace or a mount, without .."
+                ),
+            });
+        }
+        for key in check.env.keys() {
+            if key.is_empty() || key.contains('=') {
+                return Err(format!("{at}.env has a bad key {key:?}"));
+            }
+        }
+        Ok(())
+    }
+
     fn is_agent(&self) -> bool {
         self.work.agent.is_some()
+    }
+
+    /// The time `work.after` gets at the end of `timeout_seconds`; none without `after`.
+    fn after_reserve(&self) -> Duration {
+        match self.work.after.is_empty() {
+            true => Duration::ZERO,
+            false => Duration::from_secs(
+                self.work
+                    .after_reserve_seconds
+                    .unwrap_or(AFTER_RESERVE_SECONDS),
+            ),
+        }
     }
 }
 
@@ -451,7 +529,11 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 /// the workspace where sbx mounted it ([`sbx::sandbox_path`]: `/c/Users/me/w` for `C:\Users\me\w` on
 /// Windows) and the check's relative `workdir`, joined with `/`.
 fn check_workdir(workspace: &Path, workdir: &str) -> String {
-    let mut path = sbx::sandbox_path(workspace);
+    join_workdir(sbx::sandbox_path(workspace), workdir)
+}
+
+/// A sandbox folder and a relative `workdir` below it, joined with `/`.
+fn join_workdir(mut path: String, workdir: &str) -> String {
     for part in workdir.split('/').filter(|p| !p.is_empty() && *p != ".") {
         if !path.ends_with('/') {
             path.push('/');
@@ -563,7 +645,13 @@ impl Stop {
 struct Timings {
     create: u64,
     prove: u64,
+    /// Protocol 2: part of `work`, 0 when nothing ran.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    before: Option<u64>,
     work: u64,
+    /// Protocol 2: part of `work`, 0 when nothing ran.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    after: Option<u64>,
     remove: u64,
     total: u64,
 }
@@ -587,8 +675,31 @@ struct CheckOutcome {
     workdir: String,
     exit: Option<i32>,
     timed_out: bool,
+    ms: u64,
     stdout_bytes: usize,
     stderr_bytes: usize,
+}
+
+impl CheckOutcome {
+    fn report(&self, with_ms: bool) -> serde_json::Value {
+        let mut doc = serde_json::json!({
+            "index": self.index, "argv": self.argv, "workdir": self.workdir, "exit": self.exit,
+            "timed_out": self.timed_out, "stdout_bytes": self.stdout_bytes, "stderr_bytes": self.stderr_bytes,
+        });
+        if with_ms {
+            doc["ms"] = self.ms.into();
+        }
+        doc
+    }
+}
+
+/// Where the workspace and the mounts are inside the sandbox. sbx mounts each at its host path
+/// on macOS and Linux; the step reads what `sbx inspect` says rather than assume it.
+#[derive(Debug, Default)]
+struct SandboxPaths {
+    workspace: String,
+    /// `(host path, sandbox path, read-only)`, one per spec mount.
+    mounts: Vec<(PathBuf, String, bool)>,
 }
 
 #[derive(Debug, Default)]
@@ -606,6 +717,9 @@ struct Run {
     proof_cached: bool,
     agent: Option<AgentOutcome>,
     checks: Vec<CheckOutcome>,
+    before: Vec<CheckOutcome>,
+    after: Vec<CheckOutcome>,
+    paths: SandboxPaths,
     network: NetworkOutcome,
     image: String,
     created: bool,
@@ -732,11 +846,24 @@ pub(crate) fn main(raw: &[String]) -> Outcome {
 
     let spec_doc = serde_json::to_value(&spec).unwrap_or_default();
     write_json(&dir.join("spec.json"), &spec_doc);
-    let interrupted = Arc::new(AtomicBool::new(false));
+    let interrupts = Arc::new(AtomicU32::new(0));
     {
-        let flag = Arc::clone(&interrupted);
-        let _ = ctrlc::set_handler(move || flag.store(true, Ordering::SeqCst));
+        let count = Arc::clone(&interrupts);
+        let _ = ctrlc::set_handler(move || {
+            count.fetch_add(1, Ordering::SeqCst);
+        });
     }
+    let run = Run {
+        paths: SandboxPaths {
+            workspace: check_workdir(&workspace, ""),
+            mounts: spec
+                .mounts
+                .iter()
+                .map(|m| (m.path.clone(), sbx::sandbox_path(&m.path), m.readonly))
+                .collect(),
+        },
+        ..Run::default()
+    };
     let mut step = Step {
         spec,
         spec_digest: sha256_hex(spec_doc.to_string().as_bytes()),
@@ -747,8 +874,8 @@ pub(crate) fn main(raw: &[String]) -> Outcome {
         dir,
         prewarm: args.has("prewarm"),
         emit: Emitter::stdout(),
-        interrupted,
-        run: Run::default(),
+        interrupts,
+        run,
         started: Instant::now(),
     };
     Ok(step.run())
@@ -765,7 +892,8 @@ struct Step {
     dir: PathBuf,
     prewarm: bool,
     emit: Emitter,
-    interrupted: Arc<AtomicBool>,
+    /// How often Ctrl-C was pressed: the first stops the work, the second skips `work.after`.
+    interrupts: Arc<AtomicU32>,
     run: Run,
     started: Instant,
 }
@@ -783,8 +911,54 @@ impl Step {
         self.dir.join("prewarmed.json")
     }
 
+    fn interrupts(&self) -> u32 {
+        self.interrupts.load(Ordering::SeqCst)
+    }
+
     fn interrupted(&self) -> bool {
-        self.interrupted.load(Ordering::SeqCst)
+        self.interrupts() > 0
+    }
+
+    /// Where the sandbox sees the workspace and the mounts, from `sbx inspect`; a folder sbx does
+    /// not name gets the path [`sbx::sandbox_path`] gives it (`/c/data` for `C:\data`).
+    fn read_paths(&mut self, inspected: &sbx::InspectEntry) {
+        let binds = inspected.bind_mounts();
+        let target = |host: &Path| -> String {
+            let canonical = host.canonicalize().ok().map(sbx::plain_path);
+            binds
+                .iter()
+                .find(|b| {
+                    let bound = Path::new(&b.host_path);
+                    !b.container_target.is_empty()
+                        && (bound == host || canonical.as_deref() == Some(bound))
+                })
+                .map_or_else(|| sbx::sandbox_path(host), |b| b.container_target.clone())
+        };
+        self.run.paths = SandboxPaths {
+            workspace: target(&self.workspace),
+            mounts: self
+                .spec
+                .mounts
+                .iter()
+                .map(|m| (m.path.clone(), target(&m.path), m.readonly))
+                .collect(),
+        };
+    }
+
+    /// A check's `workdir` as the sandbox sees it.
+    fn sandbox_workdir(&self, workdir: &str) -> String {
+        let paths = &self.run.paths;
+        let mut roots: Vec<(PathBuf, String)> = vec![
+            (self.spec.workspace.clone(), paths.workspace.clone()),
+            (self.workspace.clone(), paths.workspace.clone()),
+        ];
+        for (host, target, _) in &paths.mounts {
+            roots.push((host.clone(), target.clone()));
+            if let Ok(canonical) = host.canonicalize().map(sbx::plain_path) {
+                roots.push((canonical, target.clone()));
+            }
+        }
+        workdir_in_sandbox(&roots, &paths.workspace, workdir)
     }
 
     /// The whole lifecycle; the exit code of the process.
@@ -840,6 +1014,11 @@ impl Step {
                 // Not removed: the next step continues with it.
                 self.run.removed = true;
                 return Ok(0);
+            }
+        }
+        if resumed {
+            if let Ok(inspected) = sbx::inspect(&self.spec.name) {
+                self.read_paths(&inspected);
             }
         }
         let _ = fs::remove_file(self.prewarmed_path());
@@ -1031,6 +1210,7 @@ impl Step {
             }
         }
         if let Ok(inspected) = sbx::inspect(&self.spec.name) {
+            self.read_paths(&inspected);
             self.run.image = inspected.image;
         }
         self.run.ms.create = ms(at);
@@ -1156,6 +1336,9 @@ impl Step {
 
     /// Phase 5. `Ok` carries the exit code the work decides: 124 on timeout, 130 on Ctrl-C,
     /// else 0 — the agent's or a check's own exit is in the report, not here.
+    ///
+    /// `timeout_seconds` bounds the whole phase: `work.before`, the agent (or the checks), and
+    /// `work.after`. The agent gets everything but the after-reserve, `after` the rest.
     fn work(&mut self) -> Result<u8, Stop> {
         let at = Instant::now();
         self.emit.phase("work", "start", 0, "");
@@ -1165,10 +1348,54 @@ impl Step {
                 .phase("work", "fail", 0, "interrupted before the work started");
             return Err(Stop::new("work", headless::EXIT_INTERRUPTED, "interrupted"));
         }
+        let deadline = at + Duration::from_secs(self.spec.timeout_seconds);
+        let main_deadline = deadline - self.spec.after_reserve();
+        if self.spec.protocol >= 2 {
+            self.run.ms.before = Some(0);
+            self.run.ms.after = Some(0);
+        }
+        if !self.spec.work.before.is_empty() {
+            let t = Instant::now();
+            let before = self.fixed("before", main_deadline);
+            self.run.ms.before = Some(ms(t));
+            let what = match self.spec.is_agent() {
+                true => "the agent",
+                false => "the checks",
+            };
+            let stop = match before {
+                Ok(None) => None,
+                Ok(Some((code, why))) => Some(Stop::new(
+                    "work",
+                    code,
+                    format!("{why}; {what} did not start"),
+                )),
+                Err(stop) => Some(Stop::new(
+                    "work",
+                    stop.code,
+                    format!("{}; {what} did not start", stop.message),
+                )),
+            };
+            if let Some(stop) = stop {
+                self.run.interrupted |= stop.code == headless::EXIT_INTERRUPTED;
+                self.run.ms.work = ms(at);
+                self.emit.phase("work", "fail", ms(at), &stop.message);
+                return Err(stop);
+            }
+        }
         let outcome = match self.spec.is_agent() {
-            true => self.work_agent(),
-            false => self.work_checks(),
+            true => self.work_agent(main_deadline),
+            false => self.work_checks(main_deadline),
         };
+        let started = match &self.run.agent {
+            Some(agent) => agent.started,
+            None => !self.run.checks.is_empty(),
+        };
+        if started && !self.spec.work.after.is_empty() {
+            // Whatever ended the work; what `after` does never changes the step's outcome.
+            let t = Instant::now();
+            let _ = self.fixed("after", deadline);
+            self.run.ms.after = Some(ms(t));
+        }
         self.run.ms.work = ms(at);
         match outcome {
             Ok(code) => {
@@ -1191,14 +1418,193 @@ impl Step {
         }
     }
 
-    fn work_agent(&mut self) -> Result<u8, Stop> {
+    /// `work.before` or `work.after`: each entry in order with `sbx exec`, its output in
+    /// `<phase>.json`, framed by the phase's own events. `before` stops at the first entry that
+    /// fails and ends with the first Ctrl-C; `after` runs every entry whatever the others did, and
+    /// only its deadline or a second Ctrl-C ends it early. `Ok(None)` when every entry ran and
+    /// exited 0, else the exit code that failure means and why.
+    fn fixed(
+        &mut self,
+        phase: &'static str,
+        deadline: Instant,
+    ) -> Result<Option<(u8, String)>, Stop> {
+        let at = Instant::now();
+        let (entries, stop_at) = match phase {
+            "before" => (self.spec.work.before.clone(), 1),
+            _ => (self.spec.work.after.clone(), 2),
+        };
+        self.emit.phase(phase, "start", 0, "");
+        let mut records: Vec<serde_json::Value> = Vec::new();
+        let mut outcomes: Vec<CheckOutcome> = Vec::new();
+        let mut failed: Option<(u8, String)> = None;
+        let mut result = Ok(());
+        for (index, check) in entries.iter().enumerate() {
+            if self.interrupts() >= stop_at {
+                failed = Some((headless::EXIT_INTERRUPTED, format!("{phase} interrupted")));
+                break;
+            }
+            if Instant::now() >= deadline {
+                failed = Some((headless::EXIT_TIMEOUT, format!("{phase} timed out")));
+                break;
+            }
+            let (outcome, record) = match self.run_check(phase, index, check, deadline, stop_at) {
+                Ok(ran) => ran,
+                Err(stop) => {
+                    result = Err(stop);
+                    break;
+                }
+            };
+            let (exit, timed_out) = (outcome.exit, outcome.timed_out);
+            outcomes.push(outcome);
+            records.push(record);
+            if self.interrupts() >= stop_at {
+                failed = Some((headless::EXIT_INTERRUPTED, format!("{phase} interrupted")));
+                break;
+            }
+            if timed_out {
+                failed = Some((
+                    headless::EXIT_TIMEOUT,
+                    format!("work.{phase}[{index}] timed out"),
+                ));
+                break;
+            }
+            if exit != Some(0) && failed.is_none() {
+                let exit = exit.map_or("no code".to_string(), |c| c.to_string());
+                failed = Some((EXIT_BEFORE, format!("work.{phase}[{index}] exited {exit}")));
+                if phase == "before" {
+                    break;
+                }
+            }
+        }
+        write_json(
+            &self.dir.join(format!("{phase}.json")),
+            &serde_json::Value::Array(records),
+        );
+        match phase {
+            "before" => self.run.before = outcomes,
+            _ => self.run.after = outcomes,
+        }
+        match (&result, &failed) {
+            (Err(stop), _) => self.emit.phase(phase, "fail", ms(at), &stop.message),
+            (Ok(()), Some((_, why))) => self.emit.phase(phase, "fail", ms(at), why),
+            (Ok(()), None) => self.emit.phase(phase, "ok", ms(at), ""),
+        }
+        result.map(|()| failed)
+    }
+
+    /// One check with `sbx exec` in the sandbox, stopped at `deadline` or once Ctrl-C was pressed
+    /// `stop_at` times: its `check` event, its report entry and its record with the output.
+    fn run_check(
+        &mut self,
+        phase: &'static str,
+        index: usize,
+        check: &Check,
+        deadline: Instant,
+        stop_at: u32,
+    ) -> Result<(CheckOutcome, serde_json::Value), Stop> {
+        let name = self.spec.name.clone();
+        let workdir = self.sandbox_workdir(&check.workdir);
+        let run_dir = format!(
+            "/tmp/aisbx-step-{}-{}-{phase}-{index}",
+            epoch_secs(),
+            std::process::id()
+        );
+        let mut argv = vec![
+            "sbx".to_string(),
+            "exec".into(),
+            "-w".into(),
+            workdir.clone(),
+        ];
+        for (k, v) in &check.env {
+            argv.extend(["-e".into(), format!("{k}={v}")]);
+        }
+        argv.extend([
+            name.clone(),
+            "sh".into(),
+            "-c".into(),
+            CHECK_WRAPPER.into(),
+            "sh".into(),
+            run_dir.clone(),
+        ]);
+        argv.extend(check.argv.iter().cloned());
+        let t = Instant::now();
+        let mut child = headless::sbx_command(&argv, false)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| {
+                Stop::new(
+                    phase,
+                    headless::EXIT_SANDBOX,
+                    format!("could not run sbx: {e}"),
+                )
+            })?;
+        let out = collect(child.stdout.take().expect("piped"), CHECK_STDOUT_LIMIT);
+        let err = collect(child.stderr.take().expect("piped"), CHECK_STDERR_LIMIT);
+        let mut timed_out = false;
+        let mut stopped = false;
+        let status = loop {
+            if let Ok(Some(s)) = child.try_wait() {
+                break Some(s);
+            }
+            let interrupted = self.interrupts() >= stop_at;
+            if Instant::now() >= deadline || interrupted {
+                timed_out = !interrupted;
+                stopped = true;
+                break headless::stop_agent(&mut child, &name, &run_dir);
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        let (stdout, stdout_bytes) = out.join().unwrap_or_default();
+        let (stderr, stderr_bytes) = err.join().unwrap_or_default();
+        if !stopped {
+            headless::quiet(&sbx::headless_cleanup_argv(&name, &run_dir));
+        }
+        let exit = status.and_then(|s| s.code());
+        let shown: Vec<String> = ["sbx", "exec", "-w", workdir.as_str(), name.as_str()]
+            .iter()
+            .map(|s| s.to_string())
+            .chain(check.argv.iter().cloned())
+            .collect();
+        self.emit.sbx(phase, &shown, exit, ms(t));
+        self.emit.emit(
+            "check",
+            phase,
+            serde_json::json!({"index": index, "argv": check.argv, "workdir": check.workdir, "exit": exit, "ms": ms(t), "timed_out": timed_out}),
+        );
+        let record = serde_json::json!({
+            "index": index, "argv": check.argv, "workdir": check.workdir, "env": check.env,
+            "exit": exit, "timed_out": timed_out,
+            "stdout": String::from_utf8_lossy(&stdout), "stderr": String::from_utf8_lossy(&stderr),
+            "stdout_bytes": stdout_bytes, "stderr_bytes": stderr_bytes,
+            "stdout_limit": CHECK_STDOUT_LIMIT, "stderr_limit": CHECK_STDERR_LIMIT,
+        });
+        let outcome = CheckOutcome {
+            index,
+            argv: check.argv.clone(),
+            workdir: check.workdir.clone(),
+            exit,
+            timed_out,
+            ms: ms(t),
+            stdout_bytes,
+            stderr_bytes,
+        };
+        Ok((outcome, record))
+    }
+
+    fn work_agent(&mut self, deadline: Instant) -> Result<u8, Stop> {
         let agent = self.spec.work.agent.clone().expect("an agent step");
         let prompt = self.prompt.clone().expect("the prompt was read");
         let name = self.spec.name.clone();
         let sandbox = |m: String| Stop::new("work", headless::EXIT_SANDBOX, m);
         let mut extra = kits::max_turns_args(&self.agent, agent.max_turns);
         extra.extend(agent.args.iter().cloned());
-        let timeout_text = format!("{}s", self.spec.timeout_seconds);
+        let budget = deadline.saturating_duration_since(Instant::now());
+        let timeout_text = format!(
+            "{}s",
+            budget.as_secs() + u64::from(budget.subsec_nanos() > 0)
+        );
         let argv = headless::agent_argv(
             &name,
             &self.agent,
@@ -1246,7 +1652,6 @@ impl Step {
             }
         });
         let mut outcome = AgentOutcome::default();
-        let deadline = started + Duration::from_secs(self.spec.timeout_seconds);
         let mut stopped = false;
         let status: Option<ExitStatus> = loop {
             while let Ok(line) = rx.try_recv() {
@@ -1322,10 +1727,8 @@ impl Step {
             .emit("agent", "work", serde_json::json!({"line": parsed}));
     }
 
-    fn work_checks(&mut self) -> Result<u8, Stop> {
+    fn work_checks(&mut self, deadline: Instant) -> Result<u8, Stop> {
         let checks = self.spec.work.checks.clone().expect("a checks step");
-        let name = self.spec.name.clone();
-        let deadline = Instant::now() + Duration::from_secs(self.spec.timeout_seconds);
         let mut records: Vec<serde_json::Value> = Vec::new();
         let mut code = 0u8;
         for (index, check) in checks.iter().enumerate() {
@@ -1334,89 +1737,12 @@ impl Step {
                 code = headless::EXIT_INTERRUPTED;
                 break;
             }
-            let workdir = check_workdir(&self.workspace, &check.workdir);
-            let run_dir = format!(
-                "/tmp/aisbx-step-{}-{}-{index}",
-                epoch_secs(),
-                std::process::id()
-            );
-            let mut argv = vec![
-                "sbx".to_string(),
-                "exec".into(),
-                "-w".into(),
-                workdir.clone(),
-            ];
-            for (k, v) in &check.env {
-                argv.extend(["-e".into(), format!("{k}={v}")]);
-            }
-            argv.extend([
-                name.clone(),
-                "sh".into(),
-                "-c".into(),
-                CHECK_WRAPPER.into(),
-                "sh".into(),
-                run_dir.clone(),
-            ]);
-            argv.extend(check.argv.iter().cloned());
-            let t = Instant::now();
-            let mut child = headless::sbx_command(&argv, false)
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()
-                .map_err(|e| {
-                    Stop::new(
-                        "work",
-                        headless::EXIT_SANDBOX,
-                        format!("could not run sbx: {e}"),
-                    )
-                })?;
-            let out = collect(child.stdout.take().expect("piped"), CHECK_STDOUT_LIMIT);
-            let err = collect(child.stderr.take().expect("piped"), CHECK_STDERR_LIMIT);
-            let mut timed_out = false;
-            let status = loop {
-                if let Ok(Some(s)) = child.try_wait() {
-                    break Some(s);
-                }
-                if Instant::now() >= deadline || self.interrupted() {
-                    timed_out = !self.interrupted();
-                    break headless::stop_agent(&mut child, &name, &run_dir);
-                }
-                std::thread::sleep(Duration::from_millis(50));
-            };
-            let (stdout, stdout_bytes) = out.join().unwrap_or_default();
-            let (stderr, stderr_bytes) = err.join().unwrap_or_default();
-            if !timed_out && !self.interrupted() {
-                headless::quiet(&sbx::headless_cleanup_argv(&name, &run_dir));
-            }
-            let exit = status.and_then(|s| s.code());
-            let shown: Vec<String> = ["sbx", "exec", "-w", workdir.as_str(), name.as_str()]
-                .iter()
-                .map(|s| s.to_string())
-                .chain(check.argv.iter().cloned())
-                .collect();
-            self.emit.sbx("work", &shown, exit, ms(t));
-            self.emit.emit(
-                "check",
-                "work",
-                serde_json::json!({"index": index, "argv": check.argv, "workdir": check.workdir, "exit": exit, "ms": ms(t), "timed_out": timed_out}),
-            );
-            records.push(serde_json::json!({
-                "index": index, "argv": check.argv, "workdir": check.workdir, "env": check.env,
-                "exit": exit, "timed_out": timed_out,
-                "stdout": String::from_utf8_lossy(&stdout), "stderr": String::from_utf8_lossy(&stderr),
-                "stdout_bytes": stdout_bytes, "stderr_bytes": stderr_bytes,
-                "stdout_limit": CHECK_STDOUT_LIMIT, "stderr_limit": CHECK_STDERR_LIMIT,
-            }));
-            self.run.checks.push(CheckOutcome {
-                index,
-                argv: check.argv.clone(),
-                workdir: check.workdir.clone(),
-                exit,
-                timed_out,
-                stdout_bytes,
-                stderr_bytes,
-            });
+            let (outcome, record) = self
+                .run_check("work", index, check, deadline, 1)
+                .map_err(|stop| Stop::new("work", stop.code, stop.message))?;
+            let timed_out = outcome.timed_out;
+            records.push(record);
+            self.run.checks.push(outcome);
             if self.interrupted() {
                 self.run.interrupted = true;
                 code = headless::EXIT_INTERRUPTED;
@@ -1498,14 +1824,11 @@ impl Step {
             (None, true) => serde_json::json!({"kind": "agent", "started": false}),
             (None, false) => serde_json::json!({
                 "kind": "checks",
-                "results": self.run.checks.iter().map(|c| serde_json::json!({
-                    "index": c.index, "argv": c.argv, "workdir": c.workdir, "exit": c.exit,
-                    "timed_out": c.timed_out, "stdout_bytes": c.stdout_bytes, "stderr_bytes": c.stderr_bytes,
-                })).collect::<Vec<_>>(),
+                "results": self.run.checks.iter().map(|c| c.report(false)).collect::<Vec<_>>(),
             }),
         };
-        let doc = serde_json::json!({
-            "protocol": PROTOCOL,
+        let mut doc = serde_json::json!({
+            "protocol": self.spec.protocol,
             "name": self.run.name,
             "phase": failed.map_or("report", |s| s.phase),
             "ok": failed.is_none(),
@@ -1522,6 +1845,22 @@ impl Step {
             "sbx_version": sbx::version().unwrap_or_default(),
             "aisbx_version": crate::version(),
         });
+        if self.spec.protocol >= 2 {
+            let entries =
+                |list: &[CheckOutcome]| list.iter().map(|c| c.report(true)).collect::<Vec<_>>();
+            doc["work"]["before"] = entries(&self.run.before).into();
+            doc["work"]["after"] = entries(&self.run.after).into();
+            if !self.spec.is_agent() {
+                doc["work"]["started"] = (!self.run.checks.is_empty()).into();
+            }
+            let paths = &self.run.paths;
+            doc["sandbox_paths"] = serde_json::json!({
+                "workspace": paths.workspace,
+                "mounts": paths.mounts.iter().map(|(host, target, ro)| serde_json::json!({
+                    "path": host, "sandbox": target, "readonly": ro,
+                })).collect::<Vec<_>>(),
+            });
+        }
         write_json(&self.dir.join("report.json"), &doc);
         self.emit.phase(
             "report",
@@ -1529,6 +1868,36 @@ impl Step {
             self.run.ms.total,
             &failed.map(|s| s.message.clone()).unwrap_or_default(),
         );
+    }
+}
+
+/// A check's `workdir` inside the sandbox: a relative one is below the workspace's sandbox
+/// folder, an absolute host path is moved from the longest of `roots` (host folder, its sandbox
+/// folder) that holds it to that folder's sandbox path. A path outside every root gets the path
+/// [`sbx::sandbox_path`] gives it.
+pub fn workdir_in_sandbox(roots: &[(PathBuf, String)], workspace: &str, workdir: &str) -> String {
+    let dir = Path::new(workdir);
+    if !dir.is_absolute() && !workdir.starts_with('/') {
+        return join_workdir(workspace.to_string(), workdir);
+    }
+    let best = roots
+        .iter()
+        .filter(|(host, _)| dir.starts_with(host))
+        .max_by_key(|(host, _)| host.components().count());
+    match best {
+        Some((host, target)) => {
+            let rest: Vec<String> = dir
+                .strip_prefix(host)
+                .unwrap_or(Path::new(""))
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                .collect();
+            match rest.is_empty() {
+                true => target.clone(),
+                false => join_workdir(target.trim_end_matches('/').to_string(), &rest.join("/")),
+            }
+        }
+        None => sbx::sandbox_path(dir),
     }
 }
 
@@ -1746,8 +2115,8 @@ mod tests {
     fn unknown_and_bad_fields_are_refused() {
         let bad = SPEC.replacen("\"kits\"", "\"kit\"", 1);
         assert!(Spec::parse(&bad).unwrap_err().contains("not a step spec"));
-        let wrong = SPEC.replacen("\"protocol\": 1", "\"protocol\": 2", 1);
-        assert!(Spec::parse(&wrong).unwrap_err().contains("protocol 2"));
+        let wrong = SPEC.replacen("\"protocol\": 1", "\"protocol\": 3", 1);
+        assert!(Spec::parse(&wrong).unwrap_err().contains("protocol 3"));
         let both = SPEC.replacen(
             "\"work\": {",
             "\"work\": {\"checks\": [{\"workdir\": \"\", \"argv\": [\"true\"]}], ",
@@ -1771,6 +2140,126 @@ mod tests {
         assert!(Spec::parse(&abs).unwrap_err().contains("relative"));
         let empty = checks.replacen("[\"npm\", \"test\"]", "[]", 1);
         assert!(Spec::parse(&empty).unwrap_err().contains("argv is empty"));
+    }
+
+    const FIXED: &str = r#"{"protocol": 2, "name": "sf-2", "backend": "claude-anthropic", "workspace": "/w",
+      "mounts": [{"path": "/second"}],
+      "work": {"agent": {"prompt_file": "p.md", "model": "haiku", "max_turns": 3},
+               "before": [{"workdir": "", "argv": ["git", "status"]}],
+               "after": [{"workdir": "/second/repo", "argv": ["git", "bundle"]}, {"workdir": "app", "argv": ["true"]}]},
+      "timeout_seconds": 600}"#;
+
+    #[test]
+    fn before_and_after_are_protocol_2() {
+        let spec = Spec::parse(FIXED).unwrap();
+        assert_eq!(spec.protocol, PROTOCOL_NEXT);
+        assert_eq!(spec.work.before.len(), 1);
+        assert_eq!(spec.work.after.len(), 2);
+        assert_eq!(
+            spec.after_reserve(),
+            Duration::from_secs(AFTER_RESERVE_SECONDS)
+        );
+        let old = FIXED.replacen("\"protocol\": 2", "\"protocol\": 1", 1);
+        assert!(Spec::parse(&old).unwrap_err().contains("need protocol 2"));
+        // A protocol 1 spec is a protocol 1 spec still, and runs as it did.
+        assert_eq!(Spec::parse(SPEC).unwrap().after_reserve(), Duration::ZERO);
+        let v2 = SPEC.replacen("\"protocol\": 1", "\"protocol\": 2", 1);
+        assert_eq!(Spec::parse(&v2).unwrap().protocol, 2);
+    }
+
+    #[test]
+    fn the_after_reserve_must_leave_the_agent_time() {
+        let reserve = |r: &str, t: &str| {
+            FIXED
+                .replacen(
+                    "\"timeout_seconds\": 600",
+                    &format!("\"timeout_seconds\": {t}"),
+                    1,
+                )
+                .replacen(
+                    "\"work\": {",
+                    &format!("\"work\": {{\"after_reserve_seconds\": {r}, "),
+                    1,
+                )
+        };
+        assert_eq!(
+            Spec::parse(&reserve("30", "60")).unwrap().after_reserve(),
+            Duration::from_secs(30)
+        );
+        assert!(Spec::parse(&reserve("0", "1")).is_ok());
+        assert!(Spec::parse(&reserve("60", "60"))
+            .unwrap_err()
+            .contains("less than timeout_seconds"));
+        // The default reserve of 60 s needs more than 60 s.
+        let short = FIXED.replacen("\"timeout_seconds\": 600", "\"timeout_seconds\": 60", 1);
+        assert!(Spec::parse(&short).is_err());
+        let lone = SPEC
+            .replacen("\"protocol\": 1", "\"protocol\": 2", 1)
+            .replacen(
+                "\"work\": {",
+                "\"work\": {\"after_reserve_seconds\": 5, ",
+                1,
+            );
+        assert!(Spec::parse(&lone).unwrap_err().contains("needs work.after"));
+    }
+
+    #[test]
+    fn a_protocol_2_workdir_may_name_a_mount_but_nothing_outside() {
+        let outside = FIXED.replacen("/second/repo", "/elsewhere", 1);
+        assert!(Spec::parse(&outside)
+            .unwrap_err()
+            .contains("work.after[0].workdir"));
+        let up = FIXED.replacen("/second/repo", "/second/../etc", 1);
+        assert!(Spec::parse(&up).is_err());
+        let in_ws = FIXED.replacen("/second/repo", "/w/app", 1);
+        assert!(Spec::parse(&in_ws).is_ok());
+        let prefix = FIXED.replacen("/second/repo", "/secondary", 1);
+        assert!(Spec::parse(&prefix).is_err());
+        let checks = r#"{"protocol": 1, "name": "c-1", "backend": "claude-anthropic", "workspace": "/w",
+          "network": false, "work": {"checks": [{"workdir": "/w/app", "argv": ["true"]}]}, "timeout_seconds": 5}"#;
+        assert!(Spec::parse(checks).unwrap_err().contains("relative"));
+        let v2 = checks.replacen("\"protocol\": 1", "\"protocol\": 2", 1);
+        assert!(Spec::parse(&v2).is_ok());
+    }
+
+    #[test]
+    fn workdirs_move_to_the_sandbox_paths() {
+        let roots = vec![
+            (PathBuf::from("/w"), "/w".to_string()),
+            (PathBuf::from("/w/sub"), "/mnt/sub".to_string()),
+            (PathBuf::from("/second"), "/sandbox/second/".to_string()),
+        ];
+        assert_eq!(workdir_in_sandbox(&roots, "/w", ""), "/w");
+        assert_eq!(workdir_in_sandbox(&roots, "/w", "app/x"), "/w/app/x");
+        assert_eq!(workdir_in_sandbox(&roots, "/w", "/w/app"), "/w/app");
+        assert_eq!(
+            workdir_in_sandbox(&roots, "/w", "/w/sub/a/b"),
+            "/mnt/sub/a/b"
+        );
+        assert_eq!(
+            workdir_in_sandbox(&roots, "/w", "/second"),
+            "/sandbox/second/"
+        );
+        assert_eq!(
+            workdir_in_sandbox(&roots, "/w", "/second/r"),
+            "/sandbox/second/r"
+        );
+        assert_eq!(workdir_in_sandbox(&roots, "/w", "/other"), "/other");
+        assert_eq!(workdir_in_sandbox(&roots, "/w", "web/src/./"), "/w/web/src");
+        #[cfg(windows)]
+        {
+            let roots = vec![
+                (PathBuf::from(r"C:\Users\me\w"), "/c/Users/me/w".to_string()),
+                (PathBuf::from(r"D:\second"), "/d/second".to_string()),
+            ];
+            let ws = "/c/Users/me/w";
+            assert_eq!(workdir_in_sandbox(&roots, ws, "app"), "/c/Users/me/w/app");
+            assert_eq!(
+                workdir_in_sandbox(&roots, ws, r"D:\second\repo\sub"),
+                "/d/second/repo/sub"
+            );
+            assert_eq!(workdir_in_sandbox(&roots, ws, r"E:\x"), "/e/x");
+        }
     }
 
     #[test]
@@ -2008,15 +2497,23 @@ mod tests {
     }
 
     /// The golden fixtures are the contract another repository tests against: every line has
-    /// the four fixed fields, the phases run in the documented order, and the reports have the
-    /// documented keys.
+    /// the four fixed fields, the phases run in the documented order (`before` and `after`
+    /// inside `work`), and the reports have the documented keys.
     #[test]
     fn the_golden_fixtures_follow_the_protocol() {
         let order = [
             "refuse", "create", "prove", "log", "work", "log", "remove", "report",
         ];
-        for name in ["checks.ndjson", "agent.ndjson", "prewarmed.ndjson"] {
+        for name in [
+            "checks.ndjson",
+            "agent.ndjson",
+            "prewarmed.ndjson",
+            "fixed.ndjson",
+            "agent-fixed.ndjson",
+            "before-failed.ndjson",
+        ] {
             let mut phases = Vec::new();
+            let mut inside = Vec::new();
             for (i, line) in fixture(name).lines().filter(|l| !l.is_empty()).enumerate() {
                 let d: serde_json::Value = serde_json::from_str(line).unwrap();
                 assert_eq!(d["seq"], i as u64 + 1, "{name}");
@@ -2029,9 +2526,16 @@ mod tests {
                         .contains(&d["kind"].as_str().unwrap()),
                     "{name}: {line}"
                 );
-                assert!(d["phase"].as_str().is_some_and(|p| !p.is_empty()), "{name}");
-                if d["kind"] == "phase" && d["status"] != "start" {
-                    phases.push(d["phase"].as_str().unwrap().to_string());
+                let phase = d["phase"].as_str().unwrap_or_default().to_string();
+                assert!(!phase.is_empty(), "{name}");
+                if d["kind"] != "phase" {
+                    continue;
+                }
+                if ["work", "before", "after"].contains(&phase.as_str()) {
+                    inside.push(format!("{phase} {}", d["status"].as_str().unwrap()));
+                }
+                if d["status"] != "start" && phase != "before" && phase != "after" {
+                    phases.push(phase);
                 }
             }
             assert_eq!(phases.last().map(String::as_str), Some("report"), "{name}");
@@ -2043,16 +2547,43 @@ mod tests {
             let expected: Vec<&str> = match name {
                 // A continued pre-warm skips create and prove.
                 "prewarmed.ndjson" => vec!["refuse", "log", "work", "log", "remove"],
+                // A failed work goes straight to remove.
+                "before-failed.ndjson" => vec!["refuse", "log", "work", "remove"],
                 _ => order[..order.len() - 1].to_vec(),
             };
             assert_eq!(done, expected, "{name}");
+            let fixed: Vec<&str> = match name {
+                "fixed.ndjson" | "agent-fixed.ndjson" => vec![
+                    "work start",
+                    "before start",
+                    "before ok",
+                    "after start",
+                    match name {
+                        // The first after entry exits 3; the second runs all the same.
+                        "fixed.ndjson" => "after fail",
+                        _ => "after ok",
+                    },
+                    match name {
+                        "fixed.ndjson" => "work fail",
+                        _ => "work ok",
+                    },
+                ],
+                "before-failed.ndjson" => {
+                    vec!["work start", "before start", "before fail", "work fail"]
+                }
+                _ => vec!["work start", "work ok"],
+            };
+            assert_eq!(inside, fixed, "{name}");
         }
-        for (name, kind) in [
-            ("checks-report.json", "checks"),
-            ("agent-report.json", "agent"),
+        for (name, kind, protocol) in [
+            ("checks-report.json", "checks", 1),
+            ("agent-report.json", "agent", 1),
+            ("fixed-report.json", "checks", 2),
+            ("agent-fixed-report.json", "agent", 2),
+            ("before-failed-report.json", "checks", 2),
         ] {
             let d: serde_json::Value = serde_json::from_str(&fixture(name)).unwrap();
-            assert_eq!(d["protocol"], PROTOCOL, "{name}");
+            assert_eq!(d["protocol"], protocol, "{name}");
             for key in [
                 "name",
                 "phase",
@@ -2076,13 +2607,47 @@ mod tests {
                 assert!(d["ms"][key].is_u64(), "{name} ms lacks {key}");
             }
             assert_eq!(d["work"]["kind"], kind, "{name}");
+            let fixed = ["before", "after"];
+            match protocol {
+                1 => {
+                    assert!(fixed.iter().all(|k| d["ms"].get(k).is_none()), "{name}");
+                    assert!(fixed.iter().all(|k| d["work"].get(k).is_none()), "{name}");
+                    assert!(d.get("sandbox_paths").is_none(), "{name}");
+                }
+                _ => {
+                    assert!(fixed.iter().all(|k| d["ms"][k].is_u64()), "{name}");
+                    assert!(d["work"]["started"].is_boolean(), "{name}");
+                    assert!(d["sandbox_paths"]["workspace"].is_string(), "{name}");
+                    for entry in fixed.iter().flat_map(|k| d["work"][k].as_array().unwrap()) {
+                        for key in ["index", "argv", "workdir", "exit", "ms", "timed_out"] {
+                            assert!(entry.get(key).is_some(), "{name}: an entry lacks {key}");
+                        }
+                    }
+                }
+            }
         }
         let agent: serde_json::Value = serde_json::from_str(&fixture("agent-report.json")).unwrap();
         assert!(
             agent["work"]["init_seen"].as_bool().unwrap()
                 && agent["work"]["result_seen"].as_bool().unwrap()
         );
-        for name in ["checks-spec.json", "agent-spec.json"] {
+        let failed: serde_json::Value =
+            serde_json::from_str(&fixture("before-failed-report.json")).unwrap();
+        assert_eq!(failed["exit"], EXIT_BEFORE);
+        assert_eq!(failed["phase"], "work");
+        assert_eq!(failed["work"]["started"], false);
+        assert_eq!(failed["work"]["after"], serde_json::json!([]));
+        let fixed: serde_json::Value = serde_json::from_str(&fixture("fixed-report.json")).unwrap();
+        assert_eq!(fixed["exit"], headless::EXIT_TIMEOUT);
+        assert_eq!(fixed["ok"], true);
+        assert_eq!(fixed["work"]["after"][1]["exit"], 0);
+        for name in [
+            "checks-spec.json",
+            "agent-spec.json",
+            "fixed-spec.json",
+            "agent-fixed-spec.json",
+            "before-failed-spec.json",
+        ] {
             Spec::parse(&fixture(name)).unwrap_or_else(|e| panic!("{name}: {e}"));
         }
     }

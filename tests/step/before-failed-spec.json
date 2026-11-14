@@ -1,0 +1,7 @@
+{"protocol": 2, "name": "sf-step-before-failed", "backend": "claude-anthropic", "workspace": "/private/tmp/sf-step-ws",
+ "allow_hosts": ["api.anthropic.com"], "probe_hosts": ["github.com", "example.com"], "network": false,
+ "work": {"before": [{"workdir": "", "argv": ["sh", "-c", "echo restoring; exit 5"]},
+                     {"workdir": "", "argv": ["true"]}],
+          "checks": [{"workdir": "", "argv": ["true"]}],
+          "after": [{"workdir": "", "argv": ["true"]}]},
+ "timeout_seconds": 120}
