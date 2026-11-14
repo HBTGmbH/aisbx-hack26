@@ -1,0 +1,54 @@
+{
+  "aisbx_version": "0.51.0.3",
+  "created_at": "2026-11-14T12:36:23.630Z",
+  "error": "work.before[0] exited 5; the checks did not start",
+  "exit": 1,
+  "finished_at": "2026-11-14T12:36:24.764Z",
+  "image": "claude-anthropic",
+  "ms": {
+    "after": 0,
+    "before": 278,
+    "create": 0,
+    "prove": 0,
+    "remove": 562,
+    "total": 1133,
+    "work": 278
+  },
+  "name": "sf-step-before-failed",
+  "network": {
+    "blocked": [],
+    "foreign": []
+  },
+  "ok": false,
+  "phase": "work",
+  "prewarm": false,
+  "proof_cached": false,
+  "protocol": 2,
+  "sandbox_paths": {
+    "mounts": [],
+    "workspace": "/private/tmp/sf-step-ws"
+  },
+  "sbx_version": "v0.51.0",
+  "work": {
+    "after": [],
+    "before": [
+      {
+        "argv": [
+          "sh",
+          "-c",
+          "echo restoring; exit 5"
+        ],
+        "exit": 5,
+        "index": 0,
+        "ms": 277,
+        "stderr_bytes": 0,
+        "stdout_bytes": 10,
+        "timed_out": false,
+        "workdir": ""
+      }
+    ],
+    "kind": "checks",
+    "results": [],
+    "started": false
+  }
+}

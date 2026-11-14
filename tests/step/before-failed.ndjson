@@ -1,0 +1,16 @@
+{"detail":"","kind":"phase","ms":0,"phase":"refuse","seq":1,"status":"start","t":"2026-11-14T12:36:23.630Z"}
+{"detail":"continuing a pre-warmed sandbox","kind":"phase","ms":97,"phase":"refuse","seq":2,"status":"ok","t":"2026-11-14T12:36:23.727Z"}
+{"detail":"network-before.json","kind":"phase","ms":0,"phase":"log","seq":3,"status":"start","t":"2026-11-14T12:36:23.821Z"}
+{"argv":["sbx","policy","log","sf-step-before-failed","--json"],"exit":0,"kind":"sbx","ms":100,"phase":"log","seq":4,"t":"2026-11-14T12:36:23.922Z"}
+{"detail":"network-before.json","kind":"phase","ms":101,"phase":"log","seq":5,"status":"ok","t":"2026-11-14T12:36:23.923Z"}
+{"detail":"","kind":"phase","ms":0,"phase":"work","seq":6,"status":"start","t":"2026-11-14T12:36:23.923Z"}
+{"detail":"","kind":"phase","ms":0,"phase":"before","seq":7,"status":"start","t":"2026-11-14T12:36:23.923Z"}
+{"argv":["sbx","exec","-w","/private/tmp/sf-step-ws","sf-step-before-failed","sh","-c","echo restoring; exit 5"],"exit":5,"kind":"sbx","ms":277,"phase":"before","seq":8,"t":"2026-11-14T12:36:24.200Z"}
+{"argv":["sh","-c","echo restoring; exit 5"],"exit":5,"index":0,"kind":"check","ms":277,"phase":"before","seq":9,"t":"2026-11-14T12:36:24.200Z","timed_out":false,"workdir":""}
+{"detail":"work.before[0] exited 5","kind":"phase","ms":278,"phase":"before","seq":10,"status":"fail","t":"2026-11-14T12:36:24.201Z"}
+{"detail":"work.before[0] exited 5; the checks did not start","kind":"phase","ms":278,"phase":"work","seq":11,"status":"fail","t":"2026-11-14T12:36:24.201Z"}
+{"detail":"","kind":"phase","ms":0,"phase":"remove","seq":12,"status":"start","t":"2026-11-14T12:36:24.201Z"}
+{"argv":["sbx","rm","--force","sf-step-before-failed"],"exit":0,"kind":"sbx","ms":465,"phase":"remove","seq":13,"t":"2026-11-14T12:36:24.667Z"}
+{"argv":["sbx","ls","--json"],"exit":0,"kind":"sbx","ms":96,"phase":"remove","seq":14,"t":"2026-11-14T12:36:24.763Z"}
+{"detail":"","kind":"phase","ms":562,"phase":"remove","seq":15,"status":"ok","t":"2026-11-14T12:36:24.764Z"}
+{"detail":"work.before[0] exited 5; the checks did not start","kind":"phase","ms":1133,"phase":"report","seq":16,"status":"fail","t":"2026-11-14T12:36:24.863Z"}

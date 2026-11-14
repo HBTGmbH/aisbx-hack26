@@ -1,0 +1,77 @@
+{
+  "aisbx_version": "0.51.0.3",
+  "created_at": "2026-11-14T12:34:27.023Z",
+  "error": null,
+  "exit": 0,
+  "finished_at": "2026-11-14T12:35:00.250Z",
+  "image": "sandbox-kit-assembled:ccfd4c0a01206904",
+  "ms": {
+    "after": 285,
+    "before": 285,
+    "create": 28251,
+    "prove": 348,
+    "remove": 613,
+    "total": 33226,
+    "work": 3596
+  },
+  "name": "sf-step-agent-fixed",
+  "network": {
+    "blocked": [
+      "platform.claude.com:443"
+    ],
+    "foreign": []
+  },
+  "ok": true,
+  "phase": "report",
+  "prewarm": false,
+  "proof_cached": false,
+  "protocol": 2,
+  "sandbox_paths": {
+    "mounts": [],
+    "workspace": "/private/tmp/sf-step-ws"
+  },
+  "sbx_version": "v0.51.0",
+  "work": {
+    "after": [
+      {
+        "argv": [
+          "sh",
+          "-c",
+          "ls -A > .factory-checkpoint"
+        ],
+        "exit": 0,
+        "index": 0,
+        "ms": 284,
+        "stderr_bytes": 0,
+        "stdout_bytes": 0,
+        "timed_out": false,
+        "workdir": ""
+      }
+    ],
+    "assistant_seen": true,
+    "before": [
+      {
+        "argv": [
+          "sh",
+          "-c",
+          "rm -f .factory-checkpoint; id -un; echo $HOME"
+        ],
+        "exit": 0,
+        "index": 0,
+        "ms": 280,
+        "stderr_bytes": 0,
+        "stdout_bytes": 18,
+        "timed_out": false,
+        "workdir": ""
+      }
+    ],
+    "exit": 1,
+    "init_seen": true,
+    "interrupted": false,
+    "kind": "agent",
+    "lines": 5,
+    "result_seen": true,
+    "started": true,
+    "timed_out": false
+  }
+}
