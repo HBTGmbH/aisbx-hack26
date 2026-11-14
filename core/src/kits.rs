@@ -967,6 +967,16 @@ pub fn max_turns_args(agent: &str, turns: u32) -> Vec<String> {
     }
 }
 
+/// The agent flags that keep a headless run from loading the workspace's local settings and
+/// memory files (`.claude/settings.local.json`, `CLAUDE.local.md`), for an sbx agent name:
+/// Claude Code's `--setting-sources user,project`. The other agents have no such flag.
+pub fn no_local_settings_args(agent: &str) -> Vec<String> {
+    match cli(agent) {
+        Some(Cli::Claude) => vec!["--setting-sources".into(), "user,project".into()],
+        _ => Vec::new(),
+    }
+}
+
 /// Why `sbx kit add` would not apply this kit to a live v3 sandbox, or `None` when it can be
 /// added.
 fn kit_add_blocker(caps: &[Capability]) -> Option<&'static str> {
