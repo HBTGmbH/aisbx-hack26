@@ -8,26 +8,28 @@ the artefacts from the run directory afterwards. The lifecycle inside is fixed; 
 
 ```console
 $ aisbx step --spec step.json --dir runs/003-implement
-$ aisbx step --protocol        # prints the protocol version, e.g. 1
+$ aisbx step --protocol        # prints the protocol version, e.g. 2
 ```
 
-Protocol version: **1**. A caller pins the version and refuses another one.
+Protocol version: **2**. A caller pins the version and refuses another one.
 
 ## Versions
 
 | Version | Contains | State |
 |---|---|---|
-| 1 | everything on this page that is not marked *protocol 2* | complete; `aisbx step --protocol` prints `1` |
-| 2 | all of protocol 1, and: | being built; a spec may say `"protocol": 2` already and gets the parts that are in |
-| | `work.before`, `work.after` and `work.after_reserve_seconds`: fixed commands around the agent ([#1](https://github.com/HBTGmbH/aisbx-hack26/issues/1)) | **in** |
-| | `work.agent.usage_stop`, `work.stopped` and `work.usage`: stop at a usage threshold ([#2](https://github.com/HBTGmbH/aisbx-hack26/issues/2)) | **in** |
-| | `kits_prebuilt` and `aisbx kit build`: a step never builds a kit image ([#3](https://github.com/HBTGmbH/aisbx-hack26/issues/3)) | **in** |
-| | no local settings or memory files from the workspace for the agent, and `--setting-sources` in `work.agent.args` ([#4](https://github.com/HBTGmbH/aisbx-hack26/issues/4)) | **in** |
-| | `network: "open"` with `deny_hosts`, its proof, and the refusal of too many concurrent steps ([#5](https://github.com/HBTGmbH/aisbx-hack26/issues/5)) | not yet |
+| 1 | everything on this page that is not marked *protocol 2* | complete; an aisbx before protocol 2 was complete prints `1` |
+| 2 | all of protocol 1, and the five parts below | complete; `aisbx step --protocol` prints `2` |
+| | `work.before`, `work.after` and `work.after_reserve_seconds`: fixed commands around the agent ([#1](https://github.com/HBTGmbH/aisbx-hack26/issues/1)) | in |
+| | `work.agent.usage_stop`, `work.stopped` and `work.usage`: stop at a usage threshold ([#2](https://github.com/HBTGmbH/aisbx-hack26/issues/2)) | in |
+| | `kits_prebuilt` and `aisbx kit build`: a step never builds a kit image ([#3](https://github.com/HBTGmbH/aisbx-hack26/issues/3)) | in |
+| | no local settings or memory files from the workspace for the agent, and `--setting-sources` in `work.agent.args` ([#4](https://github.com/HBTGmbH/aisbx-hack26/issues/4)) | in |
+| | `network: "open"` with `deny_hosts`, its proof, `network.mode`, and the refusal of too many steps at once (exit 5) ([#5](https://github.com/HBTGmbH/aisbx-hack26/issues/5)) | in |
 
-`aisbx step --protocol` prints `2` only once all five parts are in. Until then it prints `1`, and a caller that
-needs a part of protocol 2 checks this page's table for the aisbx version it runs. A protocol 1 spec stays valid and
-runs as it did: its events and its report are those of protocol 1, without any field this page marks as protocol 2.
+A caller that pins protocol 2 gets every part above. A protocol 1 spec stays valid and runs as it did: its events
+and its report are those of protocol 1, without any field this page marks as protocol 2. Two things reach it all the
+same, because they protect the machine and not the spec: the [limit of steps at once](#several-steps-at-once-protocol-2)
+(a protocol 1 step refused for it exits `3`, as for any refusal), and a proof key that no longer depends on the
+sandbox name, so that proofs cached by an older aisbx are not reused.
 
 ## The spec file
 
@@ -41,9 +43,12 @@ One JSON object. Unknown fields are an error (exit 2).
 | `kits` | [string] | addon kits |
 | `workspace` | string | host folder mounted read-write at its own path |
 | `mounts` | [{`path`, `readonly`}] | extra host folders at their own paths |
-| `allow_hosts` | [string] | hosts the sandbox may reach on 443; everything else a kit opened is denied at create |
+| `allow_hosts` | [string] | hosts the sandbox may reach on 443; everything else a kit opened is denied at create; must be empty with `"open"` |
 | `probe_hosts` | [string] | hosts that must be proven unreachable |
-| `network` | bool | `false`: no host at all, also the model API (for checks) |
+| `network` | bool or `"open"` | `true` (the default): the hosts of `allow_hosts`; `false`: no host at all, also the model API (for checks); `"open"` (protocol 2): every host on 443 but `deny_hosts` and the local network, see [Open network](#open-network-protocol-2) |
+| `deny_hosts` | [string] | protocol 2, only with `"open"`: hosts or patterns that stay closed ([syntax](#deny_hosts)) |
+| `open_probe` | string | protocol 2, only with `"open"`: the public `host[:port]` the proof must reach, default `example.com:443` |
+| `host_ports` | [int] | protocol 2, only with `"open"`: ports of the host the proof finds closed on `host.docker.internal` and `localhost`, besides 443 |
 | `cpus`, `memory` | int, string | optional limits |
 | `work` | object | exactly one of `agent` or `checks` (below); protocol 2 adds `before`, `after` and `after_reserve_seconds` |
 | `timeout_seconds` | int | timeout for the whole work: `work.before`, the agent or the checks, and `work.after` together; the lifecycle around it is not counted |
@@ -52,7 +57,10 @@ One JSON object. Unknown fields are an error (exit 2).
 `work.agent`: `{"prompt_file": path, "model": string, "effort": string?, "max_turns": int, "args": [string]}`.
 The agent runs in print mode with `--output-format stream-json --verbose` (Claude Code) or the agent's own JSON
 stream. `max_turns` becomes Claude Code's `--max-turns`; the other agents have no such flag, and the timeout bounds
-them. The kits switch non-essential agent traffic off. `args` go after aisbx's own flags, before the prompt.
+them. The kits switch non-essential agent traffic off. `args` go after aisbx's own flags, before the prompt. In a
+protocol 2 spec, `args` may give Claude Code's web tools (`WebFetch`, `WebSearch`, in `--tools`, `--allowedTools` or
+anywhere but a `--disallowedTools` value) only to an [open](#open-network-protocol-2) step; in a closed one they are a
+spec error (exit 2).
 From protocol 2 on aisbx's own flags include `--setting-sources user,project` for Claude Code; see
 [Configuration the agent reads](#configuration-the-agent-reads-from-the-workspace-protocol-2). Protocol 2 adds
 `"usage_stop": {"five_hour": number?, "seven_day": number?}`; see
@@ -284,10 +292,111 @@ as without the flag, and sbx reports each kit image `cached`.
   adds a problem naming the `aisbx kit build` to run.
 - Without `kits_prebuilt`, and in protocol 1, a step creates as it always did, and sbx builds what it lacks.
 
+### Open network (protocol 2)
+
+A research step may read the whole web while it sees no repository code and holds no secrets. `"network": "open"`
+opens every host on TCP 443 to its sandbox, keeps what the caller names closed, and proves both:
+
+```json
+{"protocol": 2, "name": "research-1", "backend": "claude-anthropic", "workspace": "/w/notes",
+ "network": "open", "deny_hosts": ["github.com", "api.github.com", "*.githubusercontent.com", "git.example.org"],
+ "work": {"agent": {"prompt_file": "/w/prompt.md", "model": "haiku", "max_turns": 10, "args": ["--tools", "WebFetch,WebSearch"]}},
+ "timeout_seconds": 900}
+```
+
+- **Rules.** The create denies, for this sandbox only: every `deny_hosts` entry, port 80 of every host (`**:80`),
+  the host (`localhost`, `host.docker.internal`), loopback, the RFC 1918 blocks, link-local with the cloud metadata
+  address (`169.254.0.0/16`), `0.0.0.0/8` and the IPv6 loopback, unique-local and link-local blocks. After the
+  create the step adds one allow, `**:443`, scoped to the sandbox (`sbx policy allow network --sandbox <name>
+  '**:443'`, an `sbx` event). A deny beats every allow, so the denies hold against it, against the `web` kit and
+  against a global rule. The kits' own hosts stay as they are, the backend's model hosts among them. UDP stays
+  closed: the allow is TCP only.
+- **No `web` kit.** The step adds no kit, so the image and its [key](#kit-images-protocol-2) are those of the same
+  kits closed, and `kits_prebuilt` works the same. A spec may name `web` itself; it changes nothing the proof
+  checks.
+- **The spec.** `allow_hosts` must be empty (exit 2 otherwise). `deny_hosts`, `open_probe` and `host_ports` need
+  `"open"`, and `"open"` needs protocol 2. A backend whose kit opens the host or the local network (a local
+  inference engine's `localhost:<port>`) cannot run open: exit 2.
+- **The proof** (phase `prove`, exit 4 if any part fails), every probe with `sbx policy check network`:
+  - the positive probe, `open_probe` (default `example.com:443`), reachable; its port 80 and UDP not;
+  - each `deny_hosts` entry not, on its port or 443 (a pattern is probed as `aisbx-probe.<domain>`), and each of
+    `probe_hosts` on 443;
+  - `host.docker.internal` and `localhost` on 443 and on each of `host_ports` not;
+  - `127.0.0.1`, `10.0.0.1`, `172.16.0.1` and `192.168.0.1` on 443, `169.254.169.254` on 80 and 443 not;
+  - UDP to `1.1.1.1:53` not;
+  - **credentials:** no credential of the kits goes to a wildcard. The step reads the domains each kit's
+    `credential@1` injects into, and the same services' domains in sbx's bindings file (`~/.config/sbx/
+    credentials.yaml`), which a person could have widened; a domain with `*`, `?` or `[` fails the proof. This part
+    is read at every step, never cached. `policy.json` lists what it found as `binding_wildcards` (`[]` when the
+    proof holds), next to `network: "open"` and the create's `deny` list.
+- **The report** says `network.mode: "open"`, and `network.foreign` lists every host the sandbox reached during the
+  work, with its port: where the agent went, for the caller to record, not a warning. It also lists the backend's
+  own hosts (`api.anthropic.com:443`, …) and `mcp-gateway.docker.internal:80`, an alias the sbx daemon manages that
+  a closed agent step lists as well. `network.blocked` lists what the denies refused.
+- **Web tools.** Only an open step may give the agent `WebFetch` and `WebSearch` (see `work.agent`).
+- **Pre-warming** an open step runs the open proof (from the cache when its key holds); the continued step runs
+  none. A pre-warm that fails the proof exits 4 and leaves nothing.
+
+#### `deny_hosts`
+
+Each entry is one of:
+
+| Entry | Closes |
+|---|---|
+| `github.com` | that host, every port; not its subdomains |
+| `api.github.com:443` | that host on that port only |
+| `*.githubusercontent.com` | every host one label below the domain (`raw.githubusercontent.com`), not the domain itself nor two labels below |
+| `**.example.com` | every host one or more labels below the domain |
+| `10.1.2.3` | that IPv4 address |
+
+The host is letters, digits, `-` and `.`, compared without regard to case; a wildcard is a whole first label, `*.` or
+`**.`, followed by a domain with at least one dot. Anything else is a spec error (exit 2): a scheme or path, a `*`
+elsewhere, `**` alone, `?` or `[…]`, an IPv6 address, a CIDR. To close a domain and its subdomains, name both
+(`github.com` and `**.github.com`). An `open_probe` that a `deny_hosts` entry covers is a spec error too.
+
+### Several steps at once (protocol 2)
+
+A caller may run several steps at the same time, each its own `aisbx step` process with its own `name`: research
+steps next to each other, next to a closed step or a pre-warmed one.
+
+- **Rules per sandbox.** Every rule a step makes is scoped to its own sandbox (`--deny-network` at create, the open
+  step's `**:443`), and `sbx rm` takes them along. An open step never opens anything for another sandbox, nor does a
+  closed step's deny close anything for another. A step never touches a global rule.
+- **Logs per sandbox.** The step reads `sbx policy log <name>`, and keeps only entries whose `sandbox_id` is its own
+  (measured: sbx already filters by name; the step checks, and says it with a `warn` event when it drops one). sbx
+  keeps a name's log after its sandbox is removed, so the step also drops entries last seen before it started: a
+  reused name does not bring an earlier sandbox's hosts along. So `network-before.json`, `network-after.json`,
+  `network.blocked` and `network.foreign` hold the sandbox's own traffic only. A `count` can still include an
+  earlier sandbox's requests to the same host; `blocked` and `foreign` judge the growth between the two logs, so
+  they are not affected.
+- **The proof cache.** The proof key leaves the sandbox name out (a rule scoped to `sandbox:<name>` counts as
+  `sandbox`), so steps with the same spec but another name share one proof. It takes in the network mode,
+  `deny_hosts` and every probe target, the open step's positive probe among them, so an open and a closed step, or
+  open steps with other deny lists, never share one. `<state>/proofs/<key>.json` is written to a temporary file of
+  the writing process and renamed, so steps with the same key that prove at the same moment each write a whole file,
+  and a reader never sees half of one.
+- **The limit.** aisbx runs at most **8** steps at once on a machine, or what `AISBX_STEP_MAX_CONCURRENT` says (a
+  whole number, at least 1). sbx itself has no such limit. Each step holds a slot, a locked file
+  `<state>/step-slots/<n>.lock`, from the start of phase `refuse` until its process ends; a crash frees it. A
+  pre-warmed sandbox holds none while it waits, and its continued step takes one again. A step that finds every slot
+  held is refused first thing, before anything is looked up or created: phase `refuse`, **exit 5**,
+  `error_kind: "concurrency"`, an `error` that names the variable. The caller waits and starts the same step again.
+  `--prewarm` is refused the same way; a protocol 1 step gets exit 3.
+- **`aisbx doctor --json`** carries the limit as `step_concurrency.max`, with `running` (the slots held now),
+  `variable` and `exit` (5):
+
+  ```json
+  "step_concurrency": {"exit": 5, "max": 8, "running": 2, "variable": "AISBX_STEP_MAX_CONCURRENT"}
+  ```
+
+  A value of `AISBX_STEP_MAX_CONCURRENT` that is not a whole number of at least 1 is a problem there, `max` is
+  `null`, and every step refuses with exit 3.
+
 ## Lifecycle, in this order, never reordered
 
-1. **Refuse** if the sandbox name exists, if a skill selection is active, if the policy has no deny-all fallback, or
-   if the spec is invalid. Nothing is created.
+1. **Refuse** if the spec is invalid, if [as many steps as may run at once](#several-steps-at-once-protocol-2) run
+   already (protocol 2: exit 5, checked first), if the sandbox name exists, if a skill selection is active, or if
+   the policy has no deny-all fallback. Nothing is created.
 2. **Create** (with `kits_prebuilt`, protocol 2: after the [kit image lookup](#kit-images-protocol-2), which ends
    the step here when an image is missing) with `--skills off --no-mcp --no-host-folders --tmpfs-volumes`, the kits, the mounts, and one
    `--deny-network` per host that the kits' descriptors open at runtime and `allow_hosts` does not name, plus
@@ -295,12 +404,14 @@ as without the flag, and sbx reports each kit image `cached`.
    forwards it, and the proof checks that. After the create the step reads the effective rules once; a host that
    is open beyond the descriptors (a global allow, for example) is denied then, with a `warn` event, so the
    caller sees it. A rule that opens a wildcard while hosts are allowed ends the step (phase `create`, exit 125).
+   An [open step](#open-network-protocol-2) denies its own list instead and then allows `**:443` for its sandbox.
 3. **Prove.** Read the effective rules of the sandbox. Their digest, together with the allow and probe lists, is the
    proof key. If `<state>/proofs/<key>.json` (`~/.local/state/aisbx/proofs/` by default) exists, is younger than
    24 h and was green, the proof is reused and the event says `cached: true`. Otherwise every probe runs
-   (`sbx policy check network`), in parallel, and the proof is written. The probes: every allowed host on 443
-   reachable (unreachable without `network`), its port 80 and UDP unreachable, every probe host unreachable. A probe
-   with the wrong answer ends the step (phase `prove`, exit 4), and the sandbox is removed.
+   (`sbx policy check network`), in parallel, and the proof is written (to a temporary file, then renamed). The
+   probes: every allowed host on 443 reachable (unreachable without `network`), its port 80 and UDP unreachable,
+   every probe host unreachable; an open step has [its own](#open-network-protocol-2). A probe with the wrong answer
+   ends the step (phase `prove`, exit 4), and the sandbox is removed.
 4. **Log before.** `sbx policy log --json` is saved as `network-before.json`.
 5. **Work.** `work.before` (protocol 2), then the agent or the checks, then `work.after` (protocol 2); see
    [Fixed commands](#fixed-commands-before-and-after-the-agent-protocol-2). Every line the agent prints is appended
@@ -350,7 +461,9 @@ them and they ran; entries like those of `checks.json`), `report.json`.
 ```
 
 `phase` is `report` when every phase held, else the phase that ended the step, with `error` saying why and `exit`
-the process exit code. For checks, `work` is `{"kind": "checks", "results": [{"index", "argv", "workdir", "exit",
+the process exit code. `network.foreign` of an agent step, closed ones too, holds `mcp-gateway.docker.internal:80`:
+the sbx daemon allows and manages that alias itself, no rule of the step does. A caller that treats `foreign` as a
+warning ignores that entry. For checks, `work` is `{"kind": "checks", "results": [{"index", "argv", "workdir", "exit",
 "timed_out", "stdout_bytes", "stderr_bytes"}]}`; the full output is in `checks.json`, each stream kept up to the
 limit it names (4 MiB stdout, 1 MiB stderr) with the true byte count beside it.
 
@@ -365,9 +478,11 @@ A protocol 2 report adds:
 - `sandbox_paths`: `{"workspace": path, "mounts": [{"path", "sandbox", "readonly"}]}`, where the sandbox sees the
   workspace and each of `mounts`, as `sbx inspect` names them.
 - `error_kind`: the cause of a failure as a fixed word, next to `error`, present only when the step failed for a
-  cause that has one. Today that is `"kit_image"`: `kits_prebuilt` found a kit image missing. A caller tests it
-  rather than parse `error`.
+  cause that has one: `"kit_image"` (`kits_prebuilt` found a kit image missing) or `"concurrency"` (exit 5, too
+  many steps at once). A caller tests it rather than parse `error`.
 - `kit_key`: with `kits_prebuilt`, the image key the create looked up (`null` if it could not compute one).
+- `network.mode`: `"hosts"` (`network: true`), `"off"` (`false`) or `"open"`. In an open step `network.foreign` is
+  every host the sandbox reached ([Open network](#open-network-protocol-2)).
 - For agent steps, always (see [Stop at a usage threshold](#stop-at-a-usage-threshold-protocol-2)):
   - `work.stopped`: what made aisbx stop the agent, `null` (nothing: the agent ended by itself, or never started),
     `"usage"`, `"timeout"` or `"interrupt"`.
@@ -405,8 +520,9 @@ A `before` that failed:
 | 0 | every phase ok; the work's own exit is in the report |
 | 1 | a `work.before` entry exited other than 0; the agent did not start (protocol 2) |
 | 2 | spec or usage error; nothing was created |
-| 3 | refused before create (name exists, skills active, no fallback rule) |
+| 3 | refused before create (name exists, skills active, no fallback rule, a bad `AISBX_STEP_MAX_CONCURRENT`; for a protocol 1 step also too many steps at once) |
 | 4 | the proof failed; the sandbox was removed |
+| 5 | refused before anything was created: as many steps as may run at once run already (`error_kind: "concurrency"`, `aisbx doctor --json` key `step_concurrency.max`); start the same step again later (protocol 2; a protocol 1 step gets 3) |
 | 75 | `work.agent.usage_stop` stopped the agent: a usage window reached its threshold; `work.after` ran and the sandbox was removed (protocol 2) |
 | 124 | the work timed out; the sandbox was removed |
 | 125 | the sandbox failed, or could not be removed (phase `remove` in the report), or a kit image is not built (`kits_prebuilt`, phase `create`, `error_kind: "kit_image"`) |
@@ -422,12 +538,15 @@ next-dir` finds that file, checks that the spec digest matches, and continues wi
 before the caller says so, so a caller that removes the previous sandbox before reading its workspace keeps every
 guarantee it had. A pre-warmed sandbox older than one hour, or one whose spec changed, is removed and the step
 starts over. `work.before` and `work.after` never run under `--prewarm`; `before` runs in the continued step, right
-after its *log before*.
+after its *log before*. Pre-warming an open step runs the open proof. Both the pre-warm and the continued step take
+a [slot](#several-steps-at-once-protocol-2) and are refused with exit 5 when none is free; a refused continued step
+leaves the pre-warmed sandbox as it was.
 
 ## Verified behaviours
 
-Measured with sbx 0.51.0 on an Apple silicon Mac with the `claude-anthropic` image cached, no addon kits; the
-fixtures in `tests/step/` are these very runs.
+Measured with sbx 0.51.0 on an Apple silicon Mac with the `claude-anthropic` image cached, no addon kits, the open
+network and several steps at once with sbx 0.53.0; the fixtures in `tests/step/` are these very runs
+(`agent-open-policy.json` is the `policy.json` of the open agent step).
 
 | What | Result |
 |---|---|
@@ -451,4 +570,9 @@ fixtures in `tests/step/` are these very runs.
 | Protocol 2 checks step with `kits_prebuilt` after `kit build` (`prebuilt.*`) | both kit images `cached`, nothing built; sbx stacked them in 3.1 s. Most of the create is the kits' install commands: the Claude Code update of `claude-anthropic` took 25 to 28 s with the network closed |
 | A kit file changed after `kit build`, then the same step (`kit-missing.*`) | exit 125 in phase `create`, 0.46 s after the start, `error_kind: "kit_image"`, no sandbox; `doctor --kit` said `stale`; `kit build` built the changed kit, and the step ran (`tests/step-test.sh`) |
 | Protocol 2 agent step, `haiku`, a prompt that asks for a `sleep 120` in Bash, `usage_stop` `0.01` for both windows (`agent-usage.*`) | the first `rate_limit_event` came after the first answer (Claude Code refused the bare `sleep`, so the agent went on to its next turn), 2.4 s into the work, with `five_hour` 0.58 and `seven_day` 0.96; one `usage` event per window, the agent stopped (its `sbx exec` exit 143) about 1 s later, `after` ran and wrote its file: exit 75, `stopped: "usage"`, `usage_stop.window: "five_hour"`. Threshold 0.01 because no real stream may run to a high one here; the detection at 0.95 and 0.98 is tested on that recorded event with other utilizations (`cargo test`) |
+| Open checks step, `deny_hosts` `github.com`, `api.github.com`, `*.githubusercontent.com`, `host_ports` `[8080]`, sbx 0.53.0 (`open.*`, `tests/step-test.sh` part 8) | every deny pattern and CIDR accepted at create; from inside, `curl https://example.com` got 200, `http://example.com`, the three GitHub hosts, `host.docker.internal:8080`, `10.0.0.1` and `169.254.169.254` were refused (403 from the proxy); `foreign` was exactly `example.com:443`; create 34 s, prove 0.13 s (the proof cached) |
+| Open agent step, `haiku`, `--tools WebFetch`, "fetch https://example.com and give its title" (`agent-open.*`) | the answer `Example Domain` in 2 turns; `foreign`: `api.anthropic.com:443`, `example.com:443`, `mcp-proxy.anthropic.com:443`, `platform.claude.com:443`, `mcp-gateway.docker.internal:80`; nothing blocked; the proof not cached, 16 probes in 0.6 s, no credential to a wildcard |
+| Three open steps (each curls another host) and one closed step started within 1 s, `kits_prebuilt` (`tests/step-test.sh` part 9) | all exit 0; each open report's `foreign` is exactly its own host; the closed step proved its list (`api.anthropic.com` reachable, `example.com` and `github.com` not), had no wildcard allow in its rules, and its curls to the three hosts were blocked; the creates ran side by side and took 101 to 109 s each (34 s alone), the work overlapped; sbx's log for a name held that sandbox's traffic only; no `**:443` was left after the removal |
+| The same proof key in three steps at once | all succeed; the proof file is valid JSON and green. The creates ended seconds apart, so the probes rarely run at the same instant; `cargo test` writes one key from four threads at once |
+| `AISBX_STEP_MAX_CONCURRENT=1`, one step running (`busy.*`, part 10) | the next step exit 5 in phase `refuse` within 0.2 s, nothing created; `--prewarm` exit 5; a protocol 1 step exit 3; `doctor --json` said `max` 1, `running` 1; after the first ended, the next pre-warm ran |
 | `claude-anthropic` with only `api.anthropic.com` allowed | the proxy blocks `platform.claude.com:443` once at start (the OAuth token endpoint of the subscription sign-in); the run succeeded. A caller allows it, or expects it in `network.blocked` |

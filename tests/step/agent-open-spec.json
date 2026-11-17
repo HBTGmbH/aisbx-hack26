@@ -1,0 +1,4 @@
+{"protocol": 2, "name": "sf-step-agent-open", "backend": "claude-anthropic", "workspace": "/private/tmp/sf-step-open/ws",
+ "network": "open", "deny_hosts": ["github.com", "api.github.com", "*.githubusercontent.com", "git.example.org"],
+ "work": {"agent": {"prompt_file": "/private/tmp/sf-step-open/prompt.md", "model": "haiku", "max_turns": 3, "args": ["--tools", "WebFetch"]}},
+ "timeout_seconds": 240}

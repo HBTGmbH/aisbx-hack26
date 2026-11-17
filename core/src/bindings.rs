@@ -93,6 +93,65 @@ pub fn for_kits<P: AsRef<Path>>(dirs: &[P]) -> Vec<Binding> {
         .collect()
 }
 
+/// The domains a credential of `wanted` goes to that hold a wildcard, one line each (`anthropic
+/// oauth: *.claude.com (kit)`): in the kits' descriptors, and in the bindings file's text `file`
+/// for the same services and mechanisms, where someone may have widened one by hand. Empty when
+/// every credential goes only to named hosts. A file that does not parse counts as one line.
+pub fn wildcard_domains(wanted: &[Binding], file: Option<&str>) -> Vec<String> {
+    let wild = |d: &str| d.contains(['*', '?', '[']);
+    let mut out: Vec<String> = Vec::new();
+    let mut push = |line: String| {
+        if !out.contains(&line) {
+            out.push(line);
+        }
+    };
+    for want in wanted {
+        for d in want.domains.iter().filter(|d| wild(d)) {
+            push(format!(
+                "{} {}: {d} (kit)",
+                want.service,
+                want.mechanism.key()
+            ));
+        }
+    }
+    let Some(text) = file else {
+        return out;
+    };
+    let root = match YamlLoader::load_from_str(text) {
+        Ok(docs) => docs.into_iter().next().unwrap_or(Yaml::Null),
+        Err(e) => {
+            push(format!("the bindings file does not parse: {e}"));
+            return out;
+        }
+    };
+    for want in wanted {
+        let domains = &root["bindings"][want.service.as_str()][want.mechanism.key()]["domains"];
+        for d in domains
+            .as_vec()
+            .into_iter()
+            .flatten()
+            .filter_map(Yaml::as_str)
+        {
+            if wild(d) {
+                push(format!(
+                    "{} {}: {d} (bindings file)",
+                    want.service,
+                    want.mechanism.key()
+                ));
+            }
+        }
+    }
+    out
+}
+
+/// The text of sbx's bindings file, `None` when there is none, and always under `cargo test`.
+pub fn read_file() -> Option<String> {
+    if cfg!(any(test, feature = "test-support")) {
+        return None;
+    }
+    fs::read_to_string(credentials_path()?).ok()
+}
+
 /// Where sbx keeps the bindings.
 pub fn credentials_path() -> Option<PathBuf> {
     #[cfg(windows)]
@@ -471,5 +530,34 @@ mod tests {
             err && text.contains("boom") && text.contains("withholds"),
             "{text}"
         );
+    }
+
+    #[test]
+    fn a_wildcard_in_a_kit_or_the_bindings_file_is_named() {
+        let wanted = vec![
+            Binding {
+                service: "anthropic".into(),
+                mechanism: Mechanism::ApiKey,
+                domains: vec!["api.anthropic.com".into()],
+            },
+            Binding {
+                service: "anthropic".into(),
+                mechanism: Mechanism::OAuth,
+                domains: vec!["platform.claude.com".into()],
+            },
+        ];
+        assert!(wildcard_domains(&wanted, None).is_empty());
+        let file = "bindings:\n  anthropic:\n    apiKey:\n      domains: [api.anthropic.com]\n    oauth:\n      domains: [platform.claude.com, '**.claude.com']\n  other:\n    apiKey:\n      domains: ['**']\n";
+        assert_eq!(
+            wildcard_domains(&wanted, Some(file)),
+            ["anthropic oauth: **.claude.com (bindings file)"]
+        );
+        let mut wide = wanted.clone();
+        wide[0].domains.push("*.anthropic.com".into());
+        assert_eq!(
+            wildcard_domains(&wide, Some("")),
+            ["anthropic apiKey: *.anthropic.com (kit)"]
+        );
+        assert_eq!(wildcard_domains(&wanted, Some(": : [")).len(), 1);
     }
 }

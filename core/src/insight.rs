@@ -707,6 +707,7 @@ impl Insight {
         use crate::sbx::{LogHost, PolicyLog};
 
         let host = |host: &str, proxy: &str, count: u64| LogHost {
+            sandbox_id: name.into(),
             host: host.into(),
             proxy_type: proxy.into(),
             rule: String::new(),

@@ -1,0 +1,2 @@
+{"protocol": 2, "name": "sf-step-test-26081-10busy", "backend": "claude-anthropic", "workspace": "/var/folders/y_/m0dl5tss7738gq6vrppj2lxw0000gp/T//aisbx-step-test.DpTItC/10/ws", "network": false,
+ "work": {"checks": [{"workdir": "", "argv": ["true"]}]}, "timeout_seconds": 600}

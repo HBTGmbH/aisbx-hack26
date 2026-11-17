@@ -488,6 +488,10 @@ struct PolicyLsOutput {
 /// One host in `sbx policy log --json`, with how often the proxy saw it.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct LogHost {
+    /// The sandbox whose traffic this is. `sbx policy log <sandbox>` lists only that one's; the
+    /// field lets a reader check.
+    #[serde(default)]
+    pub sandbox_id: String,
     #[serde(default)]
     pub host: String,
     /// `forward`, `forward-bypass`, `mitm`, …

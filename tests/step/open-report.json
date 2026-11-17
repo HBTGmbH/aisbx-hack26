@@ -1,0 +1,64 @@
+{
+  "aisbx_version": "0.51.0.8",
+  "created_at": "2026-11-17T08:20:41.783Z",
+  "error": null,
+  "exit": 0,
+  "finished_at": "2026-11-17T08:21:17.247Z",
+  "image": "sandbox-kit-assembled:ccfd4c0a01206904",
+  "ms": {
+    "after": 0,
+    "before": 0,
+    "create": 33687,
+    "prove": 129,
+    "remove": 542,
+    "total": 35464,
+    "work": 681
+  },
+  "name": "sf-step-test-90490-8open",
+  "network": {
+    "blocked": [
+      "10.0.0.1:443",
+      "169.254.169.254:80",
+      "api.github.com:443",
+      "example.com:80",
+      "github.com:443",
+      "localhost:8080",
+      "raw.githubusercontent.com:443"
+    ],
+    "foreign": [
+      "example.com:443"
+    ],
+    "mode": "open"
+  },
+  "ok": true,
+  "phase": "report",
+  "prewarm": false,
+  "proof_cached": true,
+  "protocol": 2,
+  "sandbox_paths": {
+    "mounts": [],
+    "workspace": "/private/var/folders/y_/m0dl5tss7738gq6vrppj2lxw0000gp/T/aisbx-step-test.ZpXPeC/8/ws"
+  },
+  "sbx_version": "v0.53.0",
+  "work": {
+    "after": [],
+    "before": [],
+    "kind": "checks",
+    "results": [
+      {
+        "argv": [
+          "sh",
+          "-c",
+          "for u in https://example.com http://example.com https://github.com https://api.github.com https://raw.githubusercontent.com https://host.docker.internal:8080 https://10.0.0.1 http://169.254.169.254; do c=$(curl -s -m 10 -o /dev/null -w '%{http_code}' $u); echo \"$u ${c:-none}\"; done"
+        ],
+        "exit": 0,
+        "index": 0,
+        "stderr_bytes": 0,
+        "stdout_bytes": 221,
+        "timed_out": false,
+        "workdir": ""
+      }
+    ],
+    "started": true
+  }
+}

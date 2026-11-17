@@ -15,13 +15,21 @@
 #      once (exit 125, error_kind kit_image), and `kit build` fixes it;
 #   7. protocol 2: work.agent.usage_stop with a threshold the account's real usage is already
 #      over (0.01): the first rate_limit_event stops the agent before its result, after runs,
-#      and the report says stopped "usage" with the window and its reset (exit 75).
+#      and the report says stopped "usage" with the window and its reset (exit 75);
+#   8. protocol 2: network "open" with deny_hosts: the open proof, what the sandbox reaches and
+#      the report's list of it; the spec errors; a pre-warm that runs the open proof;
+#   9. protocol 2: three open steps and one closed step at once (kits_prebuilt, so nothing builds
+#      while they run): own rules, own logs, one shared proof written at the same moment;
+#  10. protocol 2: the concurrency limit: exit 5 before create, also under --prewarm.
 #
-#   sh tests/step-test.sh            static checks, then the live steps (skipped when sbx is not signed in)
-#   sh tests/step-test.sh --static   the static checks only
+#   sh tests/step-test.sh                 static checks, then the live steps (skipped when sbx is not signed in)
+#   sh tests/step-test.sh --static        the static checks only
+#   sh tests/step-test.sh --only "8 9"    static checks, then only these live steps
+#   STEP_TEST_KEEP=1 sh tests/step-test.sh   keep the run directories (events, reports) afterwards
 #
-# Makes eight sandboxes, sf-step-test-<pid>-<n>, and removes them, and builds two tiny kit images,
-# which it removes too. Needs python3 for the JSON checks.
+# Makes sixteen sandboxes, sf-step-test-<pid>-<n>…, and removes them, and builds two tiny kit
+# images, which it removes too. Part 9 runs four sandboxes at once. Needs python3 for the JSON
+# checks. On a machine where kit builds must not overlap, run it under that machine's build lock.
 
 root=$(cd "$(dirname "$0")/.." && pwd) || exit 2
 fixtures=$root/tests/step
@@ -114,7 +122,7 @@ assert ($2), d
 
 # --- static: the golden fixtures ---------------------------------------------------------------
 
-for f in checks agent prewarmed fixed agent-fixed before-failed agent-local prebuilt kit-missing agent-usage; do
+for f in checks agent prewarmed fixed agent-fixed before-failed agent-local prebuilt kit-missing agent-usage open agent-open busy; do
   check "fixture $f.ndjson follows the event rules" events_ok "$fixtures/$f.ndjson"
 done
 check "fixture checks-report.json is a checks report" report_ok "$fixtures/checks-report.json" checks
@@ -159,9 +167,29 @@ check "the before-failed fixture: the checks never started" \
 check "the agent-local fixture: no local hook ran and no CLAUDE.local.md was loaded" \
   json_ok "$fixtures/agent-local-report.json" \
   "d['ok'] and d['work']['started'] and d['work']['result_seen'] and [e['exit'] for e in d['work']['after']] == [0]"
-check "the protocol page names version 1" grep -q 'Protocol version: \*\*1\*\*' "$root/docs/step-protocol.md"
+check "fixture open-report.json is a protocol 2 checks report" report_ok "$fixtures/open-report.json" checks 2
+check "fixture agent-open-report.json is a protocol 2 agent report" report_ok "$fixtures/agent-open-report.json" agent 2
+check "fixture busy-report.json is a protocol 2 checks report" report_ok "$fixtures/busy-report.json" checks 2
+check "the open fixture: mode open, the one host it reached listed, the denied ones blocked" \
+  json_ok "$fixtures/open-report.json" \
+  "d['ok'] and d['network']['mode'] == 'open' and d['network']['foreign'] == ['example.com:443'] and 'github.com:443' in d['network']['blocked']"
+check "the agent-open fixture: the agent fetched example.com, and the report says where it went" \
+  json_ok "$fixtures/agent-open-report.json" \
+  "d['ok'] and d['exit'] == 0 and d['work']['result_seen'] and d['network']['mode'] == 'open' and 'example.com:443' in d['network']['foreign'] and not d['proof_cached']"
+check "the agent-open proof: example.com reachable, every other probe closed, no credential to a wildcard" \
+  json_ok "$fixtures/agent-open-policy.json" \
+  "d['ok'] and d['network'] == 'open' and d['binding_wildcards'] == [] and [x['target'] for x in d['probes'] if x['allowed']] == ['example.com:443'] and all(x['allowed'] == x['must_allow'] for x in d['probes'])"
+check "the busy fixture: refused before create with exit 5 and error_kind concurrency" \
+  json_ok "$fixtures/busy-report.json" \
+  "d['exit'] == 5 and d['phase'] == 'refuse' and d['error_kind'] == 'concurrency' and not d['work']['started']"
+check "the protocol page names version 2" grep -q 'Protocol version: \*\*2\*\*' "$root/docs/step-protocol.md"
 
 [ "${1:-}" = "--static" ] && { [ "$failures" -eq 0 ]; exit; }
+only=""
+[ "${1:-}" = "--only" ] && only=" ${2:-} "
+part() {   # part <n>: whether to run live step n
+  [ -z "$only" ] || case "$only" in *" $1 "*) return 0 ;; *) return 1 ;; esac
+}
 
 # --- live ----------------------------------------------------------------------------------------
 
@@ -175,8 +203,7 @@ if [ -z "${AISBX_BIN:-}" ] && ! cargo build -q -p aisbx --manifest-path "$root/C
   printf 'FAIL build the binary\n'
   exit 1
 fi
-check "aisbx step --protocol prints 1 (2 only once all of protocol 2 is in)" \
-  [ "$("$bin" step --protocol)" = 1 ]
+check "aisbx step --protocol prints 2" [ "$("$bin" step --protocol)" = 2 ]
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/aisbx-step-test.XXXXXX") || exit 2
 names=""
@@ -192,7 +219,7 @@ wait_for() {
     sleep 0.1
   done
 }
-
+if part 1; then
 # 1. protocol 1, two checks
 mkdir -p "$work/1/ws/app" "$work/1/run"
 printf 'hello\n' > "$work/1/ws/README.md"
@@ -232,6 +259,8 @@ assert not any(x['allowed'] for x in p['probes']), 'nothing may be reachable wit
 check "1: no before or after events" sh -c "! grep -q '\"phase\":\"before\"\\|\"phase\":\"after\"' '$work/1/events.ndjson'"
 check "1: the sandbox is gone" gone "$name"
 
+fi
+if part 2; then
 # 2. protocol 2: before, a check into the timeout, after (one entry fails, the next still runs),
 #    with one after entry in a read-write extra mount
 mkdir -p "$work/2/ws" "$work/2/second" "$work/2/run"
@@ -266,6 +295,8 @@ check "2: before.json and after.json hold the output" \
   sh -c "[ -f '$run/before.json' ] && [ -f '$run/after.json' ]"
 check "2: the sandbox is gone" gone "$name"
 
+fi
+if part 3; then
 # 3. protocol 2: Ctrl-C once during the check (after runs), again during after (the rest skipped)
 mkdir -p "$work/3/ws" "$work/3/run"
 name=sf-step-test-$$-3
@@ -303,6 +334,8 @@ check "3: after's file exists after the removal, the skipped entry's does not" \
   sh -c "[ -s '$work/3/ws/after.txt' ] && [ ! -e '$work/3/ws/never.txt' ]"
 check "3: the sandbox is gone" gone "$name"
 
+fi
+if part 4; then
 # 4. protocol 2: pre-warm, then a before that fails
 mkdir -p "$work/4/ws" "$work/4/run"
 name=sf-step-test-$$-4
@@ -333,6 +366,8 @@ check "4: only the failing before entry ran" \
   sh -c "[ -s '$work/4/ws/before.txt' ] && [ ! -e '$work/4/ws/never.txt' ] && [ ! -e '$work/4/ws/checks.txt' ] && [ ! -e '$work/4/ws/after.txt' ]"
 check "4: the sandbox is gone" gone "$name"
 
+fi
+if part 5; then
 # 5. protocol 2: no local settings or memory files from the workspace. The project's settings
 #    log every instruction file the agent loads (InstructionsLoaded) and touch a marker
 #    (SessionStart); the local ones would touch another marker and carry a codeword.
@@ -385,6 +420,8 @@ check "5: the codewords of the local files are not in the result" \
   sh -c "! grep -q 'LOCALTOP\|LOCALSUB' '$run/stream.ndjson'"
 check "5: the after entry found the same" json_ok "$run/report.json" "[e['exit'] for e in d['work']['after']] == [0]"
 check "5: the sandbox is gone" gone "$name"
+fi
+if part 6; then
 # 6. protocol 2: kits_prebuilt, with a probe kit in a user kit folder that builds in seconds; its
 #    mark is new for each run, so the first `kit build` builds
 mkdir -p "$work/6/kits/sfprobe" "$work/6/ws"
@@ -494,6 +531,8 @@ for f in glob.glob(os.path.join(state, "aisbx", "kit-images", "*.json")):
         pass
 PY
 
+fi
+if part 7; then
 # 7. protocol 2: a usage stop. The account's windows are over 0.01 already, so the first
 #    rate_limit_event (it comes after the first answer, before the result) stops the agent.
 mkdir -p "$work/7/ws" "$work/7/run"
@@ -531,8 +570,230 @@ assert all(set(e) >= {'window', 'utilization', 'status', 'resets_at'} and e['pha
 check "7: after's file exists after the removal" [ -s "$work/7/ws/after.txt" ]
 check "7: the sandbox is gone" gone "$name"
 
+fi
+
+if part 8; then
+# 8. protocol 2: network "open". Every host on 443 but deny_hosts and the local network; the
+#    proof reaches example.com and finds the rest closed; the report lists where the step went.
+#    Then the spec errors, and a pre-warm of an open step, which runs the open proof.
+mkdir -p "$work/8/ws" "$work/8/run"
+name=sf-step-test-$$-8open
+names="$names $name"
+cat > "$work/8/spec.json" <<EOF
+{"protocol": 2, "name": "$name", "backend": "claude-anthropic", "workspace": "$work/8/ws",
+ "network": "open", "deny_hosts": ["github.com", "api.github.com", "*.githubusercontent.com"], "host_ports": [8080],
+ "work": {"checks": [{"workdir": "", "argv": ["sh", "-c", "for u in https://example.com http://example.com https://github.com https://api.github.com https://raw.githubusercontent.com https://host.docker.internal:8080 https://10.0.0.1 http://169.254.169.254; do c=\$(curl -s -m 10 -o /dev/null -w '%{http_code}' \$u); echo \"\$u \${c:-none}\"; done"]}]},
+ "timeout_seconds": 120}
+EOF
+run=$work/8/run
+"$bin" step --spec "$work/8/spec.json" --dir "$run" > "$work/8/events.ndjson" 2> "$work/8/stderr.txt"
+code=$?
+check "8: the open step exits 0" [ "$code" -eq 0 ]
+check "8: stdout carries only events" events_ok "$work/8/events.ndjson"
+check "8: the report is a protocol 2 checks report" report_ok "$run/report.json" checks 2
+check "8: network.mode is open" json_ok "$run/report.json" "d['network']['mode'] == 'open' and d['ok']"
+check "8: the proof reached example.com and found every deny host, the host and the local network closed" \
+  python3 -c "
+import json
+p = json.load(open('$run/policy.json'))
+assert p['ok'] and p['network'] == 'open' and p['binding_wildcards'] == [], p
+probes = {(x['protocol'], x['target']): x for x in p['probes']}
+assert probes[('tcp', 'example.com:443')]['allowed'], probes
+for t in ['example.com:80', 'github.com:443', 'api.github.com:443', 'aisbx-probe.githubusercontent.com:443',
+          'host.docker.internal:443', 'host.docker.internal:8080', 'localhost:8080', '10.0.0.1:443',
+          '172.16.0.1:443', '192.168.0.1:443', '169.254.169.254:80', '169.254.169.254:443']:
+    assert not probes[('tcp', t)]['allowed'], t
+assert not probes[('udp', 'example.com:443')]['allowed']
+"
+check "8: from inside, example.com answered and every closed host was refused" \
+  python3 -c "
+import json
+out = json.load(open('$run/checks.json'))[0]['stdout'].split('\n')
+codes = dict(l.split(' ', 1) for l in out if l.strip())
+assert codes['https://example.com'] == '200', codes
+assert all(c != '200' for u, c in codes.items() if u != 'https://example.com'), codes
+"
+check "8: the report lists the host the step reached, and what was blocked" \
+  json_ok "$run/report.json" \
+  "d['network']['foreign'] == ['example.com:443'] and {'github.com:443', 'example.com:80', 'raw.githubusercontent.com:443'} <= set(d['network']['blocked'])"
+check "8: the sandbox is gone" gone "$name"
+sed 's/"network": "open"/"allow_hosts": ["api.anthropic.com"], "network": "open"/' "$work/8/spec.json" > "$work/8/listed.json"
+"$bin" step --spec "$work/8/listed.json" --dir "$work/8/refused" > /dev/null 2>&1
+check "8: open with allow_hosts is a spec error (exit 2)" [ $? -eq 2 ]
+cat > "$work/8/webfetch.json" <<EOF
+{"protocol": 2, "name": "$name-w", "backend": "claude-anthropic", "workspace": "$work/8/ws",
+ "allow_hosts": ["api.anthropic.com"],
+ "work": {"agent": {"prompt_file": "$work/8/spec.json", "model": "haiku", "max_turns": 1, "args": ["--tools", "Read,WebFetch"]}},
+ "timeout_seconds": 60}
+EOF
+"$bin" step --spec "$work/8/webfetch.json" --dir "$work/8/refused" > /dev/null 2>&1
+check "8: WebFetch in a closed step is a spec error (exit 2)" [ $? -eq 2 ]
+check "8: neither created a sandbox" gone "$name-w"
+# A pre-warm runs the open proof (another deny list, so not the cached one), the continued step
+# the work.
+name=sf-step-test-$$-8warm
+names="$names $name"
+sed -e "s/sf-step-test-$$-8open/$name/" -e "s/\"api.github.com\", /\"api.github.com\", \"deny-$$.example.invalid\", /" "$work/8/spec.json" > "$work/8/warm.json"
+"$bin" step --prewarm --spec "$work/8/warm.json" --dir "$work/8/warm" > "$work/8/prewarm.ndjson" 2> "$work/8/stderr-warm.txt"
+code=$?
+check "8: the pre-warm of an open step exits 0 after the open proof" \
+  sh -c "[ $code -eq 0 ] && grep -q '\"phase\":\"prove\",\"probes\":[0-9]*,\"seq\":[0-9]*,\"status\":\"ok\"' '$work/8/prewarm.ndjson'"
+check "8: the pre-warm's proof was open, not cached, and held" \
+  json_ok "$work/8/warm/policy.json" "d['ok'] and d['network'] == 'open' and not d['cached'] and any(x['must_allow'] and x['allowed'] for x in d['probes'])"
+"$bin" step --spec "$work/8/warm.json" --dir "$work/8/warm" > "$work/8/warm.ndjson" 2>> "$work/8/stderr-warm.txt"
+code=$?
+check "8: the continued open step exits 0" [ "$code" -eq 0 ]
+check "8: the continued open step reached example.com" \
+  json_ok "$work/8/warm/report.json" "d['ok'] and d['network']['mode'] == 'open' and d['network']['foreign'] == ['example.com:443']"
+check "8: the sandbox is gone" gone "$name"
+fi
+
+if part 9; then
+# 9. protocol 2: several steps at once. The images are built first (kit build); then three open
+#    steps and one closed step start within one second, all kits_prebuilt, so that none builds.
+#    Each open step reaches its own host; each report lists only its own; the closed step proves
+#    and keeps its closed list. The three open steps have the same proof key, new to this run, and
+#    write it at the same moment: all succeed, and the proof file is valid JSON.
+mkdir -p "$work/9"
+"$bin" kit build --json > "$work/9/build.json" 2> "$work/9/build.txt"
+check "9: kit build has the backend's image" json_ok "$work/9/build.json" "d['status'] in ('built', 'cached') and d['kits'] == []"
+deny="deny-$$.example.invalid"
+targets="example.com example.org example.net"
+i=0
+for host in $targets; do
+  i=$((i + 1))
+  mkdir -p "$work/9/ws$i" "$work/9/run$i"
+  name=sf-step-test-$$-9open$i
+  names="$names $name"
+  cat > "$work/9/spec$i.json" <<EOF
+{"protocol": 2, "name": "$name", "backend": "claude-anthropic", "workspace": "$work/9/ws$i", "kits_prebuilt": true,
+ "network": "open", "deny_hosts": ["github.com", "$deny"],
+ "work": {"checks": [{"workdir": "", "argv": ["sh", "-c", "sleep 20; curl -sS -m 10 -o /dev/null -w '%{http_code}' https://$host"]}]},
+ "timeout_seconds": 180}
+EOF
+done
+mkdir -p "$work/9/ws0" "$work/9/run0"
+name=sf-step-test-$$-9closed
+names="$names $name"
+cat > "$work/9/spec0.json" <<EOF
+{"protocol": 2, "name": "$name", "backend": "claude-anthropic", "workspace": "$work/9/ws0", "kits_prebuilt": true,
+ "allow_hosts": ["api.anthropic.com"], "probe_hosts": ["github.com", "example.com"],
+ "work": {"checks": [{"workdir": "", "argv": ["sh", "-c", "sleep 20; for h in example.com example.org example.net; do curl -sS -m 10 -o /dev/null -w '%{http_code} ' https://\$h; done; true"]}]},
+ "timeout_seconds": 180}
+EOF
+pids=""
+for i in 1 2 3 0; do
+  "$bin" step --spec "$work/9/spec$i.json" --dir "$work/9/run$i" > "$work/9/events$i.ndjson" 2> "$work/9/stderr$i.txt" &
+  pids="$pids $!"
+done
+codes=""
+for pid in $pids; do
+  wait "$pid"
+  codes="$codes $?"
+done
+check "9: all four steps exit 0 ($codes)" [ "$codes" = " 0 0 0 0" ]
+check "9: the four started within one second" \
+  python3 -c "
+import json, datetime
+ts = [datetime.datetime.fromisoformat(json.loads(open('$work/9/events%d.ndjson' % i).readline())['t'].replace('Z', '+00:00')) for i in range(4)]
+assert (max(ts) - min(ts)).total_seconds() < 1, ts
+"
+check "9: the work of the four overlapped" \
+  python3 -c "
+import json, datetime
+def span(i):
+    ev = [json.loads(l) for l in open('$work/9/events%d.ndjson' % i)]
+    w = [datetime.datetime.fromisoformat(e['t'].replace('Z', '+00:00')) for e in ev if e['kind'] == 'phase' and e['phase'] == 'work']
+    return w[0], w[-1]
+spans = [span(i) for i in range(4)]
+assert max(s for s, _ in spans) < min(e for _, e in spans), spans
+"
+i=0
+for host in $targets; do
+  i=$((i + 1))
+  check "9: open step $i reached $host, and its report lists only that host" \
+    json_ok "$work/9/run$i/report.json" "d['ok'] and d['network']['mode'] == 'open' and d['network']['foreign'] == ['$host:443'] and d['work']['results'][0]['exit'] == 0"
+  check "9: open step $i built nothing" sh -c "! grep -qE '— built' '$work/9/stderr$i.txt'"
+done
+check "9: the closed step proved its closed list and reached none of the open steps' hosts" \
+  python3 -c "
+import json
+p = json.load(open('$work/9/run0/policy.json'))
+r = json.load(open('$work/9/run0/report.json'))
+probes = {x['target']: x['allowed'] for x in p['probes'] if x['protocol'] == 'tcp'}
+assert p['ok'] and probes['api.anthropic.com:443'] and not probes['example.com:443'] and not probes['github.com:443'], p
+assert not any(x['type'] == 'network' and x['decision'] == 'allow' and any('*' in res for res in x['resources']) for x in p['rules']), p['rules']
+assert r['ok'] and r['network']['mode'] == 'hosts' and r['network']['foreign'] == [], r['network']
+c = json.load(open('$work/9/run0/checks.json'))[0]['stdout'].split()
+assert '200' not in c, c
+assert {'example.com:443', 'example.org:443', 'example.net:443'} <= set(r['network']['blocked']), r['network']
+"
+check "9: the three open steps had one proof key; the proof file is valid JSON and green" \
+  python3 -c "
+import json, os
+keys = {json.load(open('$work/9/run%d/policy.json' % i))['key'] for i in (1, 2, 3)}
+assert len(keys) == 1, keys
+state = os.environ.get('XDG_STATE_HOME') or os.path.expanduser('~/.local/state')
+d = json.load(open(os.path.join(state, 'aisbx', 'proofs', keys.pop() + '.json')))
+assert all(x['allowed'] == x['must_allow'] for x in d['results']), d
+"
+for i in 1 2 3 0; do
+  check "9: stdout of step $i carries only events" events_ok "$work/9/events$i.ndjson"
+done
+for i in 1 2 3; do check "9: open step $i is gone" gone "sf-step-test-$$-9open$i"; done
+check "9: the closed step is gone" gone "sf-step-test-$$-9closed"
+check "9: no open rule is left in the policy" sh -c "! sbx policy ls --json | grep -q '\\*\\*:443'"
+fi
+
+if part 10; then
+# 10. protocol 2: the concurrency limit. With AISBX_STEP_MAX_CONCURRENT=1 and one step running, the
+#     next is refused before anything is created: exit 5 (exit 3 for protocol 1), also under
+#     --prewarm; doctor names the limit.
+mkdir -p "$work/10/ws" "$work/10/hold"
+name=sf-step-test-$$-10hold
+names="$names $name"
+cat > "$work/10/hold.json" <<EOF
+{"protocol": 2, "name": "$name", "backend": "claude-anthropic", "workspace": "$work/10/ws", "network": false,
+ "work": {"checks": [{"workdir": "", "argv": ["sleep", "300"]}]}, "timeout_seconds": 600}
+EOF
+AISBX_STEP_MAX_CONCURRENT=1 "$bin" step --spec "$work/10/hold.json" --dir "$work/10/hold" > "$work/10/hold.ndjson" 2> "$work/10/hold.txt" &
+pid=$!
+wait_for "$work/10/hold.ndjson" '"phase":"refuse","seq":[0-9]*,"status":"ok"' 60
+busy=sf-step-test-$$-10busy
+names="$names $busy"
+sed -e "s/$name/$busy/" -e 's/"sleep", "300"/"true"/' "$work/10/hold.json" > "$work/10/spec.json"
+AISBX_STEP_MAX_CONCURRENT=1 "$bin" step --spec "$work/10/spec.json" --dir "$work/10/run" > "$work/10/events.ndjson" 2> "$work/10/stderr.txt"
+code=$?
+check "10: a step beyond the limit exits 5" [ "$code" -eq 5 ]
+check "10: stdout carries only events" events_ok "$work/10/events.ndjson"
+check "10: the report says refuse, error_kind concurrency, and nothing was created" \
+  json_ok "$work/10/run/report.json" \
+  "d['exit'] == 5 and d['phase'] == 'refuse' and d['error_kind'] == 'concurrency' and 'AISBX_STEP_MAX_CONCURRENT' in d['error'] and d['ms']['total'] < 10000"
+check "10: no create" sh -c "! grep -q '\"phase\":\"create\"' '$work/10/events.ndjson'"
+AISBX_STEP_MAX_CONCURRENT=1 "$bin" step --prewarm --spec "$work/10/spec.json" --dir "$work/10/warm" > /dev/null 2>&1
+check "10: --prewarm is refused the same way" [ $? -eq 5 ]
+sed 's/"protocol": 2/"protocol": 1/' "$work/10/spec.json" > "$work/10/v1.json"
+AISBX_STEP_MAX_CONCURRENT=1 "$bin" step --spec "$work/10/v1.json" --dir "$work/10/v1" > /dev/null 2>&1
+check "10: a protocol 1 step is refused with exit 3" [ $? -eq 3 ]
+AISBX_STEP_MAX_CONCURRENT=1 "$bin" doctor --json > "$work/10/doctor.json"
+check "10: doctor names the limit and the running step" \
+  json_ok "$work/10/doctor.json" "d['step_concurrency']['max'] == 1 and d['step_concurrency']['running'] >= 1 and d['step_concurrency']['exit'] == 5"
+check "10: the refused step does not exist" gone "$busy"
+kill -INT "$pid"
+wait "$pid"
+check "10: the holding step ends (Ctrl-C, exit 130)" [ $? -eq 130 ]
+AISBX_STEP_MAX_CONCURRENT=1 "$bin" step --prewarm --spec "$work/10/spec.json" --dir "$work/10/warm" > /dev/null 2>&1
+check "10: once it has ended, the next step may run (pre-warm exits 0)" [ $? -eq 0 ]
+"$bin" rm "$busy" > /dev/null 2>&1
+check "10: the sandboxes are gone" sh -c "! sbx ls --json | grep -q 'sf-step-test-$$-10'"
+fi
+
 for name in $names; do
   sbx rm --force "$name" >/dev/null 2>&1
 done
-rm -rf "$work"
+if [ -n "${STEP_TEST_KEEP:-}" ]; then
+  printf 'kept the run directories in %s\n' "$work"   # to take golden fixtures from
+else
+  rm -rf "$work"
+fi
 [ "$failures" -eq 0 ]

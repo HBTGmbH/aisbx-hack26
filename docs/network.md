@@ -79,6 +79,18 @@ A kit's allow-list can only open hosts, never close one. Under `deny-all`, these
 - **No kit allows a telemetry host.**
 - A host that is not allowed cannot be resolved by DNS. ICMP is blocked.
 
+### Open steps
+
+An [`aisbx step`](step-protocol.md) with `"network": "open"` allows every host on TCP 443 to its own sandbox, with
+a sandbox-scoped `**:443` rule instead of the `web` kit. It denies, for that sandbox only, the hosts the caller lists
+in `deny_hosts`, port 80 of every host, `localhost`, `host.docker.internal`, the private, loopback and link-local
+networks and the cloud metadata address, and proves that before the work starts. Its proof also fails when a
+credential of its kits would go to a wildcard domain, in a kit or in sbx's bindings file. See
+[Open network](step-protocol.md#open-network-protocol-2).
+
+sbx sets `GH_TOKEN` in a sandbox to a proxy-managed placeholder. A step that must not reach GitHub with whatever
+the proxy holds for it lists GitHub's hosts in `deny_hosts`.
+
 ## Telemetry and non-essential traffic
 
 The kits configure each agent not to send telemetry at all. This matters because under `balanced` the telemetry

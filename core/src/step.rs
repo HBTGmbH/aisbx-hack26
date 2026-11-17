@@ -20,17 +20,13 @@ use sha2::{Digest, Sha256};
 use crate::headless::{self, Args, Fail, Outcome};
 use crate::kit_build::{self, KitSet};
 use crate::kits::{self, Catalog, HeadlessRun, OutputFormat};
-use crate::{sbx, skill_select, state};
+use crate::{bindings, sbx, skill_select, state};
 
 /// The step protocol `aisbx step --protocol` prints and a caller pins: every part of it is in
 /// this binary. It bumps on any incompatible change to the spec, the events or the report.
-pub const PROTOCOL: u32 = 1;
-/// The protocol being built. Specs may ask for it already and get the parts that are in (the
-/// table in docs/step-protocol.md says which); `--protocol` prints it only once all of them are,
-/// by setting [`PROTOCOL`] to it.
-pub const PROTOCOL_NEXT: u32 = 2;
+pub const PROTOCOL: u32 = 2;
 /// The spec versions this binary runs. A protocol 1 spec runs as it always did.
-pub const SPEC_PROTOCOLS: [u32; 2] = [1, PROTOCOL_NEXT];
+pub const SPEC_PROTOCOLS: [u32; 2] = [1, PROTOCOL];
 
 /// A `work.before` entry failed: the agent did not start.
 pub const EXIT_BEFORE: u8 = 1;
@@ -42,6 +38,14 @@ pub const EXIT_USAGE_STOP: u8 = 75;
 pub const EXIT_REFUSED: u8 = 3;
 /// The network proof failed; the sandbox was removed.
 pub const EXIT_PROOF: u8 = 4;
+/// Protocol 2: refused before anything was created because [`max_concurrent`] steps run already.
+/// The caller waits and starts the step again. A protocol 1 step gets [`EXIT_REFUSED`] instead.
+pub const EXIT_BUSY: u8 = 5;
+
+/// How many steps may run at once on this machine, unless `AISBX_STEP_MAX_CONCURRENT` says.
+pub const MAX_CONCURRENT: usize = 8;
+/// The variable that sets [`max_concurrent`].
+pub const MAX_CONCURRENT_VAR: &str = "AISBX_STEP_MAX_CONCURRENT";
 
 /// How long a cached proof holds.
 const PROOF_TTL: Duration = Duration::from_secs(24 * 3600);
@@ -73,8 +77,19 @@ pub struct Spec {
     pub allow_hosts: Vec<String>,
     #[serde(default)]
     pub probe_hosts: Vec<String>,
-    #[serde(default = "yes")]
-    pub network: bool,
+    #[serde(default)]
+    pub network: Network,
+    /// Protocol 2, with `network: "open"`: hosts or patterns that stay closed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deny_hosts: Vec<String>,
+    /// Protocol 2, with `network: "open"`: the public `host[:port]` the proof must reach,
+    /// [`OPEN_PROBE`] when not given.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open_probe: Option<String>,
+    /// Protocol 2, with `network: "open"`: ports of the host the proof checks as closed, on
+    /// `host.docker.internal` and `localhost`, besides 443.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub host_ports: Vec<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cpus: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -86,9 +101,81 @@ pub struct Spec {
     pub kits_prebuilt: bool,
 }
 
-fn yes() -> bool {
-    true
+/// `network` of the spec: `false`, `true` or (protocol 2) `"open"`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Network {
+    /// `false`: no host at all, also the model API.
+    Off,
+    /// `true`: the kits' hosts that `allow_hosts` names, on 443.
+    #[default]
+    Hosts,
+    /// `"open"`: every host on 443 but `deny_hosts` and the local network.
+    Open,
 }
+
+impl Network {
+    /// Whether any host is reachable.
+    pub fn reaches(self) -> bool {
+        self != Network::Off
+    }
+
+    /// The report's `network.mode`.
+    pub fn mode(self) -> &'static str {
+        match self {
+            Network::Off => "off",
+            Network::Hosts => "hosts",
+            Network::Open => "open",
+        }
+    }
+
+    fn value(self) -> serde_json::Value {
+        match self {
+            Network::Off => false.into(),
+            Network::Hosts => true.into(),
+            Network::Open => "open".into(),
+        }
+    }
+}
+
+impl Serialize for Network {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        self.value().serialize(s)
+    }
+}
+
+impl<'de> Deserialize<'de> for Network {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        match serde_json::Value::deserialize(d)? {
+            serde_json::Value::Bool(false) => Ok(Network::Off),
+            serde_json::Value::Bool(true) => Ok(Network::Hosts),
+            serde_json::Value::String(s) if s == "open" => Ok(Network::Open),
+            other => Err(serde::de::Error::custom(format!(
+                "network must be true, false or \"open\", not {other}"
+            ))),
+        }
+    }
+}
+
+/// The positive probe of an open step when the spec names none.
+pub const OPEN_PROBE: &str = "example.com:443";
+/// The rule that opens an open step: every host, TCP 443, for this sandbox only.
+pub const OPEN_ALLOW: &str = "**:443";
+/// What an open step denies at create besides `deny_hosts`: the host, the local network, the
+/// cloud metadata address, and port 80 of every host. A deny beats every allow.
+pub const OPEN_DENIES: [&str; 12] = [
+    "**:80",
+    "localhost",
+    "host.docker.internal",
+    "127.0.0.0/8",
+    "10.0.0.0/8",
+    "172.16.0.0/12",
+    "192.168.0.0/16",
+    "169.254.0.0/16",
+    "0.0.0.0/8",
+    "::1/128",
+    "fc00::/7",
+    "fe80::/10",
+];
 
 /// The agent's flags after aisbx's own: the turn limit, from protocol 2 on no local settings,
 /// then the caller's `args`, which may narrow the setting sources again (the last one wins).
@@ -99,6 +186,122 @@ fn agent_flags(protocol: u32, agent_name: &str, agent: &AgentWork) -> Vec<String
     }
     flags.extend(agent.args.iter().cloned());
     flags
+}
+
+/// The first of Claude Code's web tools (`WebFetch`, `WebSearch`) that agent args give the agent,
+/// in `--tools`, `--allowedTools` or anywhere else; a value of `--disallowedTools` takes one away
+/// and does not count.
+fn web_tool(args: &[String]) -> Option<String> {
+    let mut denying = false;
+    for arg in args {
+        let value = match arg.strip_prefix("--") {
+            Some(flag) => {
+                let (name, value) = flag.split_once('=').unwrap_or((flag, ""));
+                denying = matches!(name, "disallowedTools" | "disallowed-tools");
+                value
+            }
+            None => arg.as_str(),
+        };
+        if denying {
+            continue;
+        }
+        let tool = value
+            .split(|c: char| c == ',' || c.is_whitespace())
+            .map(str::trim)
+            .find(|t| t.starts_with("WebFetch") || t.starts_with("WebSearch"));
+        if let Some(tool) = tool {
+            return Some(tool.to_string());
+        }
+    }
+    None
+}
+
+/// One entry of `deny_hosts` (or the `open_probe`), parsed: an optional leading wildcard label,
+/// a host name or IPv4 address, an optional port.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DenyPattern {
+    /// `*` (exactly one label more) or `**` (one or more labels more) before `.host`.
+    pub wildcard: Option<&'static str>,
+    pub host: String,
+    pub port: Option<u16>,
+}
+
+impl DenyPattern {
+    /// A host the pattern covers, for the proof: the wildcard becomes the label `aisbx-probe`.
+    pub fn instance(&self) -> String {
+        let host = match self.wildcard {
+            Some(_) => format!("aisbx-probe.{}", self.host),
+            None => self.host.clone(),
+        };
+        format!("{host}:{}", self.port.unwrap_or(443))
+    }
+
+    /// Whether the pattern covers `host` on `port`.
+    pub fn matches(&self, host: &str, port: u16) -> bool {
+        if self.port.is_some_and(|p| p != port) {
+            return false;
+        }
+        let host = host.to_ascii_lowercase();
+        match self.wildcard {
+            None => host == self.host,
+            Some(w) => match host.strip_suffix(&format!(".{}", self.host)) {
+                Some(rest) => !rest.is_empty() && (w == "**" || !rest.contains('.')),
+                None => false,
+            },
+        }
+    }
+}
+
+/// Parse a `deny_hosts` entry: `github.com`, `api.github.com:443`, `*.githubusercontent.com`
+/// (one label more), `**.example.com` (any number of labels more), or an IPv4 address. Letters,
+/// digits, `-` and `.` in the host; nothing else, no other wildcard, no scheme or path.
+pub fn deny_pattern(text: &str) -> Result<DenyPattern, String> {
+    let lower = text.trim().to_ascii_lowercase();
+    if lower.is_empty() || lower != text.to_ascii_lowercase() {
+        return Err("empty, or with spaces".into());
+    }
+    let (rest, port) = match lower.rsplit_once(':') {
+        Some((h, p)) => match p.parse::<u16>() {
+            Ok(port) if port > 0 => (h.to_string(), Some(port)),
+            _ => return Err(format!("{p:?} is not a port")),
+        },
+        None => (lower.clone(), None),
+    };
+    let (wildcard, host) = if let Some(h) = rest.strip_prefix("**.") {
+        (Some("**"), h.to_string())
+    } else if let Some(h) = rest.strip_prefix("*.") {
+        (Some("*"), h.to_string())
+    } else {
+        (None, rest)
+    };
+    let label_ok =
+        |l: &str| !l.is_empty() && l.chars().all(|c| c.is_ascii_alphanumeric() || c == '-');
+    if !host.split('.').all(label_ok) {
+        return Err(
+            "a host is letters, digits, '-' and '.', with at most one leading *. or **.".into(),
+        );
+    }
+    if wildcard.is_some() && !host.contains('.') {
+        return Err("a wildcard needs a domain with a dot after it".into());
+    }
+    Ok(DenyPattern {
+        wildcard,
+        host,
+        port,
+    })
+}
+
+/// The host or the local network: `localhost`, `host.docker.internal`, and loopback, private,
+/// link-local and unspecified IPv4 addresses.
+pub fn is_local(host: &str) -> bool {
+    let host = host.to_ascii_lowercase();
+    if host == "localhost" || host == "host.docker.internal" || host.ends_with(".localhost") {
+        return true;
+    }
+    match host.parse::<std::net::Ipv4Addr>() {
+        Ok(ip) => ip.is_loopback() || ip.is_private() || ip.is_link_local() || ip.is_unspecified(),
+        Err(_) => false,
+    }
 }
 
 /// Whether agent args ask Claude Code for its `local` setting source. A later
@@ -354,6 +557,13 @@ impl Spec {
                     }
                 }
             }
+            if self.protocol >= 2 && self.network != Network::Open {
+                if let Some(tool) = web_tool(&agent.args) {
+                    return Err(format!(
+                        "work.agent.args: {tool} needs network \"open\"; this step's network is closed"
+                    ));
+                }
+            }
             if self.protocol >= 2 && loads_local_settings(&agent.args) {
                 return Err(
                     "work.agent.args: --setting-sources must not name local; the step keeps the workspace's local settings off".into(),
@@ -387,7 +597,64 @@ impl Spec {
                 return Err(format!("{host:?} is not a host"));
             }
         }
+        self.validate_open()
+    }
+
+    /// `network: "open"` and the fields that go with it, all protocol 2.
+    fn validate_open(&self) -> Result<(), String> {
+        let open = self.network == Network::Open;
+        if open && self.protocol < 2 {
+            return Err("network \"open\" needs protocol 2".into());
+        }
+        let with_open = [
+            ("deny_hosts", !self.deny_hosts.is_empty()),
+            ("open_probe", self.open_probe.is_some()),
+            ("host_ports", !self.host_ports.is_empty()),
+        ];
+        if let Some((field, _)) = with_open.iter().find(|(_, set)| *set && !open) {
+            return Err(format!("{field} needs network \"open\""));
+        }
+        if !open {
+            return Ok(());
+        }
+        if !self.allow_hosts.is_empty() {
+            return Err(
+                "allow_hosts must be empty with network \"open\"; name what stays closed in deny_hosts"
+                    .into(),
+            );
+        }
+        for pattern in &self.deny_hosts {
+            deny_pattern(pattern).map_err(|e| format!("deny_hosts: {pattern:?}: {e}"))?;
+        }
+        if self.host_ports.contains(&0) {
+            return Err("host_ports: 0 is not a port".into());
+        }
+        let (host, port) = self.open_probe_target()?;
+        if is_local(&host) {
+            return Err(format!(
+                "open_probe: {host} is the host or the local network, which stays closed"
+            ));
+        }
+        if let Some(pattern) = self
+            .deny_hosts
+            .iter()
+            .find(|p| deny_pattern(p).is_ok_and(|d| d.matches(&host, port)))
+        {
+            return Err(format!(
+                "open_probe: {host}:{port} is in deny_hosts ({pattern}); it could never be reached"
+            ));
+        }
         Ok(())
+    }
+
+    /// The positive probe of an open step, `(host, port)`.
+    fn open_probe_target(&self) -> Result<(String, u16), String> {
+        let text = self.open_probe.as_deref().unwrap_or(OPEN_PROBE);
+        let pattern = deny_pattern(text).map_err(|e| format!("open_probe: {text:?}: {e}"))?;
+        if pattern.wildcard.is_some() {
+            return Err(format!("open_probe: {text:?} is a pattern, not a host"));
+        }
+        Ok((pattern.host, pattern.port.unwrap_or(443)))
     }
 
     /// A `work.checks`, `work.before` or `work.after` entry. Its `workdir` is relative to the
@@ -426,6 +693,24 @@ impl Spec {
         self.work.agent.is_some()
     }
 
+    /// The proof's probes for this spec's network.
+    pub fn probes(&self) -> Vec<Probe> {
+        match self.network {
+            Network::Open => {
+                let (host, port) = self
+                    .open_probe_target()
+                    .unwrap_or_else(|_| ("example.com".into(), 443));
+                open_probes(
+                    (&host, port),
+                    &self.deny_hosts,
+                    &self.probe_hosts,
+                    &self.host_ports,
+                )
+            }
+            network => probes(&self.allow_hosts, &self.probe_hosts, network.reaches()),
+        }
+    }
+
     /// The time `work.after` gets at the end of `timeout_seconds`; none without `after`.
     fn after_reserve(&self) -> Duration {
         match self.work.after.is_empty() {
@@ -461,6 +746,8 @@ pub fn host_of(resource: &str) -> String {
 /// What `--deny-network` gets at create: every host the kits open that the caller did not allow,
 /// port 80 of every allowed host, and `**` when the step has no network at all. A kit that opens
 /// a wildcard while hosts are allowed is an error: denying it would close the allowed hosts too.
+///
+/// An open step denies [`OPEN_DENIES`] and `deny_hosts` instead ([`open_denies`]).
 pub fn denies(
     kit_allows: &[String],
     allow_hosts: &[String],
@@ -488,6 +775,25 @@ pub fn denies(
             out.push(deny);
         }
     }
+    Ok(out)
+}
+
+/// What `--deny-network` gets at create for an open step: `deny_hosts`, then [`OPEN_DENIES`].
+/// The kits' hosts stay open, the backend's model host among them. A kit that opens the host or
+/// the local network (a local inference engine's) cannot run open: the denies would close it.
+pub fn open_denies(kit_allows: &[String], deny_hosts: &[String]) -> Result<Vec<String>, String> {
+    if let Some(local) = kit_allows.iter().find(|r| is_local(&host_of(r))) {
+        return Err(format!(
+            "a kit opens {local:?}, on the host or the local network, which an open step closes"
+        ));
+    }
+    let mut out: Vec<String> = Vec::new();
+    for deny in deny_hosts.iter().map(|d| d.to_ascii_lowercase()) {
+        if !out.contains(&deny) {
+            out.push(deny);
+        }
+    }
+    out.extend(OPEN_DENIES.iter().map(|d| d.to_string()));
     Ok(out)
 }
 
@@ -537,6 +843,63 @@ pub fn probes(allow_hosts: &[String], probe_hosts: &[String], network: bool) -> 
     out
 }
 
+/// Addresses of the local network an open step's proof finds closed, on TCP 443: a private
+/// address of each RFC 1918 block and loopback.
+const LOCAL_PROBES: [&str; 4] = ["127.0.0.1", "10.0.0.1", "172.16.0.1", "192.168.0.1"];
+/// The cloud metadata address, on 80 and 443.
+const METADATA: &str = "169.254.169.254";
+
+/// The probes of an open step: the positive probe reachable, its port 80 and UDP not; every
+/// `deny_hosts` entry and probe host not; `host.docker.internal` and `localhost` on 443 and each
+/// of `host_ports` not; the local network and the metadata address not; and UDP to a public
+/// resolver not.
+pub fn open_probes(
+    positive: (&str, u16),
+    deny_hosts: &[String],
+    probe_hosts: &[String],
+    host_ports: &[u16],
+) -> Vec<Probe> {
+    let (host, port) = positive;
+    let mut out: Vec<Probe> = Vec::new();
+    let mut add = |protocol: &'static str, target: String, must_allow: bool| {
+        if !out
+            .iter()
+            .any(|p| p.protocol == protocol && p.target == target)
+        {
+            out.push(Probe {
+                protocol,
+                target,
+                must_allow,
+            });
+        }
+    };
+    add("tcp", format!("{host}:{port}"), true);
+    add("tcp", format!("{host}:80"), false);
+    add("udp", format!("{host}:{port}"), false);
+    for pattern in deny_hosts.iter().filter_map(|d| deny_pattern(d).ok()) {
+        add("tcp", pattern.instance(), false);
+    }
+    for probe in probe_hosts.iter().map(|h| host_of(h)) {
+        add("tcp", format!("{probe}:443"), false);
+    }
+    let mut ports: Vec<u16> = std::iter::once(443)
+        .chain(host_ports.iter().copied())
+        .collect();
+    ports.sort_unstable();
+    ports.dedup();
+    for port in ports {
+        add("tcp", format!("host.docker.internal:{port}"), false);
+        add("tcp", format!("localhost:{port}"), false);
+    }
+    for ip in LOCAL_PROBES {
+        add("tcp", format!("{ip}:443"), false);
+    }
+    add("tcp", format!("{METADATA}:80"), false);
+    add("tcp", format!("{METADATA}:443"), false);
+    add("udp", "1.1.1.1:53".into(), false);
+    out
+}
+
 /// The facts of a rule that decide traffic, for the proof key.
 fn rule_facts(rule: &sbx::PolicyRule) -> serde_json::Value {
     let mut resources = rule.resources.clone();
@@ -549,8 +912,13 @@ fn rule_facts(rule: &sbx::PolicyRule) -> serde_json::Value {
         .map(|t| format!("{} {}", t.host, t.path))
         .collect();
     targets.sort();
+    // `sandbox:<name>`: the name is not part of what the rule decides.
+    let scope = match rule.scope.starts_with("sandbox:") {
+        true => "sandbox",
+        false => rule.scope.as_str(),
+    };
     serde_json::json!({
-        "scope": rule.scope,
+        "scope": scope,
         "decision": rule.decision,
         "type": rule.resource_type,
         "status": rule.status,
@@ -561,10 +929,16 @@ fn rule_facts(rule: &sbx::PolicyRule) -> serde_json::Value {
     })
 }
 
-/// The proof key: the effective rules, the allowed and probed hosts and the network flag, hashed.
-/// A sandbox name is not part of it, so the proof of one step holds for the next with the same
-/// policy.
-pub fn proof_key(rules: &[sbx::PolicyRule], probes: &[Probe], network: bool) -> String {
+/// The proof key: the effective rules, the probes (the allowed, probed and denied hosts and an
+/// open step's positive probe), the network mode and `deny_hosts`, hashed. A sandbox name is not
+/// part of it, so the proof of one step holds for the next with the same policy; an open and a
+/// closed step never share one.
+pub fn proof_key(
+    rules: &[sbx::PolicyRule],
+    probes: &[Probe],
+    network: Network,
+    deny_hosts: &[String],
+) -> String {
     let mut facts: Vec<String> = rules
         .iter()
         .filter(|r| r.is_network())
@@ -574,6 +948,7 @@ pub fn proof_key(rules: &[sbx::PolicyRule], probes: &[Probe], network: bool) -> 
     let doc = serde_json::json!({
         "protocol": PROTOCOL,
         "network": network,
+        "deny_hosts": deny_hosts,
         "rules": facts,
         "probes": probes,
     });
@@ -624,6 +999,8 @@ fn read_cached_proof(dir: &Path, key: &str, now: u64) -> Option<Vec<ProbeResult>
     (fresh && cached.results.iter().all(ProbeResult::ok)).then_some(cached.results)
 }
 
+/// Written to a temporary file of this process and renamed: steps with the same key that prove
+/// at the same time each put a whole file there, and a reader never sees half of one.
 fn write_cached_proof(dir: &Path, key: &str, results: &[ProbeResult], now: u64) {
     let _ = fs::create_dir_all(dir);
     let doc = CachedProof {
@@ -631,10 +1008,17 @@ fn write_cached_proof(dir: &Path, key: &str, results: &[ProbeResult], now: u64) 
         key: key.into(),
         results: results.to_vec(),
     };
-    let _ = fs::write(
-        dir.join(format!("{key}.json")),
-        serde_json::to_string_pretty(&doc).unwrap_or_default(),
-    );
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let tmp = dir.join(format!(
+        ".{key}.{}.{}.tmp",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
+    let written = fs::write(&tmp, serde_json::to_string_pretty(&doc).unwrap_or_default())
+        .and_then(|()| fs::rename(&tmp, dir.join(format!("{key}.json"))));
+    if written.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
 }
 
 /// Run every probe against the daemon, in parallel: each is one read-only `sbx policy check`.
@@ -948,6 +1332,40 @@ fn counts(hosts: &[sbx::LogHost]) -> BTreeMap<String, u64> {
         .collect()
 }
 
+/// Keep only the sandbox's own entries of a proxy log: those `sbx` marks with another sandbox go,
+/// so that a step running beside others reports its own traffic only. So do entries last seen
+/// before `since` (Unix seconds, the step's start): sbx keeps a name's log after its sandbox is
+/// removed, and an earlier sandbox of the same name left them. Returns how many went.
+pub fn keep_own_traffic(log: &mut sbx::PolicyLog, name: &str, since: Option<u64>) -> usize {
+    let before = log.allowed.len() + log.blocked.len();
+    let recent = |h: &sbx::LogHost| match (since, log_epoch(&h.last_seen)) {
+        (Some(since), Some(seen)) => seen >= since,
+        _ => true,
+    };
+    let own = |h: &sbx::LogHost| (h.sandbox_id.is_empty() || h.sandbox_id == name) && recent(h);
+    log.allowed.retain(own);
+    log.blocked.retain(own);
+    before - log.allowed.len() - log.blocked.len()
+}
+
+/// A proxy log time (`2026-10-17T23:00:46.33636+02:00`, sbx writes the local offset) -> Unix
+/// seconds; `None` for anything else.
+fn log_epoch(s: &str) -> Option<u64> {
+    let s = s.trim();
+    if let Some(utc) = s.strip_suffix('Z') {
+        return state::parse_rfc3339(&format!("{utc}Z"));
+    }
+    let (at, sign, offset) = match s.len().checked_sub(6).map(|i| s.split_at(i)) {
+        Some((at, off)) if off.starts_with('+') => (at, 1i64, &off[1..]),
+        Some((at, off)) if off.starts_with('-') => (at, -1i64, &off[1..]),
+        _ => return None,
+    };
+    let (h, m) = offset.split_once(':')?;
+    let offset = sign * (h.parse::<i64>().ok()? * 3600 + m.parse::<i64>().ok()? * 60);
+    let local = state::parse_rfc3339(&format!("{at}Z"))? as i64;
+    u64::try_from(local - offset).ok()
+}
+
 /// What the proxy saw during the work that the caller must judge: hosts blocked (new blocks
 /// only; the kits' install may have been blocked before), and allowed hosts outside the allow
 /// list with new traffic.
@@ -973,6 +1391,75 @@ pub fn judge_network(
         .map(|(host, _)| host.clone())
         .collect();
     (blocked, foreign)
+}
+
+/// How many steps may run at once: `AISBX_STEP_MAX_CONCURRENT`, else [`MAX_CONCURRENT`].
+pub fn max_concurrent() -> Result<usize, String> {
+    match std::env::var(MAX_CONCURRENT_VAR) {
+        Ok(v) if !v.trim().is_empty() => match v.trim().parse::<usize>() {
+            Ok(n) if n > 0 => Ok(n),
+            _ => Err(format!(
+                "{MAX_CONCURRENT_VAR}={v:?} is not a number of steps, at least 1"
+            )),
+        },
+        _ => Ok(MAX_CONCURRENT),
+    }
+}
+
+/// Where the concurrency slots live: `<state>/step-slots/<n>.lock`, one per running step, each
+/// locked by its step's process until it ends (a crash frees it too).
+pub fn slots_dir(state: &Path) -> PathBuf {
+    state.join("step-slots")
+}
+
+/// The slot files some process holds now.
+fn held_slots(dir: &Path) -> std::io::Result<Vec<usize>> {
+    let mut held = Vec::new();
+    for entry in fs::read_dir(dir)? {
+        let path = entry?.path();
+        let index = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .and_then(|n| n.strip_suffix(".lock"))
+            .and_then(|n| n.parse::<usize>().ok());
+        let Some(index) = index else { continue };
+        let file = OpenOptions::new().write(true).open(&path)?;
+        if let Err(fs::TryLockError::WouldBlock) = file.try_lock() {
+            held.push(index);
+        }
+    }
+    held.sort_unstable();
+    Ok(held)
+}
+
+/// Take a free slot if fewer than `max` are held: the file, locked, which the step keeps open
+/// until it ends. `None` when `max` are held. The count and the take happen under one lock of
+/// the folder, so steps that start in the same instant never both take the last slot.
+pub fn take_slot(dir: &Path, max: usize) -> std::io::Result<Option<File>> {
+    fs::create_dir_all(dir)?;
+    let guard = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(dir.join(".guard"))?;
+    guard.lock()?;
+    let held = held_slots(dir)?;
+    if held.len() >= max {
+        return Ok(None);
+    }
+    let free = (0..).find(|i| !held.contains(i)).unwrap_or_default();
+    let slot = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(dir.join(format!("{free}.lock")))?;
+    slot.try_lock().map_err(std::io::Error::from)?;
+    Ok(Some(slot))
+}
+
+/// How many steps run now, for `aisbx doctor`.
+pub fn running_steps(dir: &Path) -> usize {
+    held_slots(dir).map_or(0, |held| held.len())
 }
 
 /// `aisbx step` — the subcommand. Parses the flags, then runs [`Step::run`].
@@ -1036,7 +1523,11 @@ pub(crate) fn main(raw: &[String]) -> Outcome {
         .iter()
         .flat_map(|d| kits::runtime_allows(d))
         .collect();
-    let deny = denies(&kit_allows, &spec.allow_hosts, spec.network).map_err(Fail::usage)?;
+    let deny = match spec.network {
+        Network::Open => open_denies(&kit_allows, &spec.deny_hosts),
+        network => denies(&kit_allows, &spec.allow_hosts, network.reaches()),
+    }
+    .map_err(Fail::usage)?;
     let kit_set = match spec.kits_prebuilt {
         true => Some(
             kit_build::resolve(&catalog, &spec.backend, &spec.kits)
@@ -1072,12 +1563,14 @@ pub(crate) fn main(raw: &[String]) -> Outcome {
         workspace,
         agent: backend.agent.clone(),
         deny,
+        kit_dirs,
         kit_set,
         dir,
         prewarm: args.has("prewarm"),
         emit: Emitter::stdout(),
         interrupts,
         run,
+        slot: None,
         started: Instant::now(),
     };
     Ok(step.run())
@@ -1091,6 +1584,8 @@ struct Step {
     /// The sbx agent name of the backend (`claude-anthropic`).
     agent: String,
     deny: Vec<String>,
+    /// The backend's and the addons' kit folders, for an open step's credential check.
+    kit_dirs: Vec<PathBuf>,
     /// With `kits_prebuilt`: the kit folders the create passes, to look their images up.
     kit_set: Option<KitSet>,
     dir: PathBuf,
@@ -1099,6 +1594,8 @@ struct Step {
     /// How often Ctrl-C was pressed: the first stops the work, the second skips `work.after`.
     interrupts: Arc<AtomicU32>,
     run: Run,
+    /// The concurrency slot this step holds until the process ends ([`take_slot`]).
+    slot: Option<File>,
     started: Instant,
 }
 
@@ -1240,6 +1737,28 @@ impl Step {
         let at = Instant::now();
         self.emit.phase("refuse", "start", 0, "");
         let stop = |message: String| Stop::new("refuse", EXIT_REFUSED, message);
+        // First, so that a step refused for it has done nothing, also under `--prewarm` and
+        // before continuing a pre-warmed sandbox.
+        let max = max_concurrent().map_err(stop)?;
+        match take_slot(&slots_dir(&state::state_dir()), max) {
+            Ok(Some(slot)) => self.slot = Some(slot),
+            Ok(None) => {
+                let message = format!(
+                    "the most steps that may run at once run already ({max}, {MAX_CONCURRENT_VAR}); start this one again once one has ended"
+                );
+                self.emit.phase("refuse", "fail", ms(at), &message);
+                let code = match self.spec.protocol {
+                    1 => EXIT_REFUSED,
+                    _ => EXIT_BUSY,
+                };
+                return Err(Stop::new("refuse", code, message).kind("concurrency"));
+            }
+            Err(e) => {
+                let message = format!("the step slots cannot be used: {e}");
+                self.emit.phase("refuse", "fail", ms(at), &message);
+                return Err(stop(message));
+            }
+        }
         let existing =
             headless::find(&self.spec.name).map_err(|f| Stop::new("refuse", f.code, f.message))?;
         let prewarmed: Option<Prewarmed> = fs::read_to_string(self.prewarmed_path())
@@ -1372,11 +1891,18 @@ impl Step {
             self.emit.phase("create", "fail", ms(at), &message);
             return Err(Stop::new("create", headless::EXIT_SANDBOX, message));
         }
+        if self.spec.network == Network::Open {
+            // Every host on 443, for this sandbox only; the create's denies beat it. What else
+            // is open (a global rule) the proof finds.
+            self.open(at)?;
+            self.finish_create(at);
+            return Ok(());
+        }
         // What the kits opened beyond the create-time denies: closed now, and said. Under `**`
         // nothing is open, whatever the kits say; the proof checks that.
         let rules = match self.spec.network {
-            true => self.sandbox_rules("create")?,
-            false => Vec::new(),
+            Network::Hosts => self.sandbox_rules("create")?,
+            _ => Vec::new(),
         };
         let allowed: BTreeSet<String> = self.spec.allow_hosts.iter().map(|h| host_of(h)).collect();
         let denied: BTreeSet<String> = rules
@@ -1386,11 +1912,12 @@ impl Step {
             .collect();
         for rule in rules.iter().filter(|r| r.is_network() && r.allows()) {
             for resource in &rule.resources {
-                let open = self.spec.network && allowed.contains(&host_of(resource));
+                let reaches = self.spec.network.reaches();
+                let open = reaches && allowed.contains(&host_of(resource));
                 if open || denied.contains(resource) || self.deny.contains(resource) {
                     continue;
                 }
-                if resource.contains('*') && self.spec.network && !allowed.is_empty() {
+                if resource.contains('*') && reaches && !allowed.is_empty() {
                     let message = format!("a rule opens {resource:?} to this sandbox; closing it would close the allowed hosts too");
                     self.emit.phase("create", "fail", ms(at), &message);
                     return Err(Stop::new("create", headless::EXIT_SANDBOX, message));
@@ -1419,12 +1946,42 @@ impl Step {
                 }
             }
         }
+        self.finish_create(at);
+        Ok(())
+    }
+
+    /// The end of a create that held: where the folders are, the image, the `create` event.
+    fn finish_create(&mut self, at: Instant) {
         if let Ok(inspected) = sbx::inspect(&self.spec.name) {
             self.read_paths(&inspected);
             self.run.image = inspected.image;
         }
         self.run.ms.create = ms(at);
         self.emit.phase("create", "ok", ms(at), "");
+    }
+
+    /// An open step's allow rule, [`OPEN_ALLOW`], scoped to its sandbox.
+    fn open(&mut self, at: Instant) -> Result<(), Stop> {
+        let argv: Vec<String> = [
+            "sbx",
+            "policy",
+            "allow",
+            "network",
+            "--sandbox",
+            &self.spec.name,
+            OPEN_ALLOW,
+        ]
+        .map(String::from)
+        .to_vec();
+        let t = Instant::now();
+        let ok = headless::quiet(&argv);
+        self.emit
+            .sbx("create", &argv, Some(if ok { 0 } else { 1 }), ms(t));
+        if !ok {
+            let message = format!("could not allow {OPEN_ALLOW} for {}", self.spec.name);
+            self.emit.phase("create", "fail", ms(at), &message);
+            return Err(Stop::new("create", headless::EXIT_SANDBOX, message));
+        }
         Ok(())
     }
 
@@ -1488,12 +2045,8 @@ impl Step {
         let at = Instant::now();
         self.emit.phase("prove", "start", 0, "");
         let rules = self.sandbox_rules("prove")?;
-        let probes = probes(
-            &self.spec.allow_hosts,
-            &self.spec.probe_hosts,
-            self.spec.network,
-        );
-        let key = proof_key(&rules, &probes, self.spec.network);
+        let probes = self.spec.probes();
+        let key = proof_key(&rules, &probes, self.spec.network, &self.spec.deny_hosts);
         let now = epoch_secs();
         let dir = proofs_dir(&state::state_dir());
         let (results, cached) = match read_cached_proof(&dir, &key, now) {
@@ -1513,15 +2066,29 @@ impl Step {
             }
         };
         let failed: Vec<&ProbeResult> = results.iter().filter(|r| !r.ok()).collect();
-        let doc = serde_json::json!({
+        // An open step: no credential may go to a wildcard. Read every time, never cached: the
+        // bindings file can change without any rule changing.
+        let wild = match self.spec.network {
+            Network::Open => bindings::wildcard_domains(
+                &bindings::for_kits(&self.kit_dirs),
+                bindings::read_file().as_deref(),
+            ),
+            _ => Vec::new(),
+        };
+        let mut doc = serde_json::json!({
             "key": key,
             "cached": cached,
-            "ok": failed.is_empty(),
+            "ok": failed.is_empty() && wild.is_empty(),
             "probes": results,
             "rules": rules.iter().map(rule_facts).collect::<Vec<_>>(),
         });
+        if self.spec.network == Network::Open {
+            doc["network"] = "open".into();
+            doc["deny"] = self.deny.clone().into();
+            doc["binding_wildcards"] = wild.clone().into();
+        }
         write_json(&self.dir.join("policy.json"), &doc);
-        if !failed.is_empty() {
+        if !failed.is_empty() || !wild.is_empty() {
             let message = failed
                 .iter()
                 .map(|r| {
@@ -1536,6 +2103,10 @@ impl Step {
                         }
                     )
                 })
+                .chain(
+                    wild.iter()
+                        .map(|w| format!("a credential goes to a wildcard: {w}")),
+                )
                 .collect::<Vec<_>>()
                 .join("; ");
             self.emit.phase("prove", "fail", ms(at), &message);
@@ -1568,11 +2139,19 @@ impl Step {
         let log = sbx::policy_log(&self.spec.name, LOG_LIMIT);
         self.emit
             .sbx("log", &argv, Some(if log.is_ok() { 0 } else { 1 }), ms(at));
-        let log = log.map_err(|e| {
+        let mut log = log.map_err(|e| {
             let message = format!("the proxy log cannot be read: {e:#}");
             self.emit.phase("log", "fail", ms(at), &message);
             Stop::new("log", headless::EXIT_SANDBOX, message)
         })?;
+        let since = state::parse_rfc3339(&self.run.created_at);
+        let foreign = keep_own_traffic(&mut log, &self.spec.name, since);
+        if foreign > 0 {
+            self.emit.warn(
+                "log",
+                &format!("the proxy log named {foreign} hosts of other sandboxes; left out"),
+            );
+        }
         write_json(&self.dir.join(file), &log_json(&log));
         self.emit.phase("log", "ok", ms(at), file);
         Ok(log)
@@ -2129,6 +2708,7 @@ impl Step {
             "aisbx_version": crate::version(),
         });
         if self.spec.protocol >= 2 {
+            doc["network"]["mode"] = self.spec.network.mode().into();
             let entries =
                 |list: &[CheckOutcome]| list.iter().map(|c| c.report(true)).collect::<Vec<_>>();
             // Also when the step ended before the work: 0, as for a work without them.
@@ -2304,6 +2884,7 @@ pub fn doctor_json() -> serde_json::Value {
     for skip in &skipped {
         problems.push(format!("kit skipped: {skip}"));
     }
+    let max = max_concurrent().map_err(|e| problems.push(e)).ok();
     serde_json::json!({
         "aisbx_version": crate::version(),
         "step_protocol": PROTOCOL,
@@ -2311,6 +2892,12 @@ pub fn doctor_json() -> serde_json::Value {
         "policy": {"fallback_rule": fallback},
         "kits": {"user_dirs": user_dirs, "found": kits, "skipped": skipped},
         "proofs_dir": proofs_dir(&state::state_dir()),
+        "step_concurrency": {
+            "max": max,
+            "running": running_steps(&slots_dir(&state::state_dir())),
+            "variable": MAX_CONCURRENT_VAR,
+            "exit": EXIT_BUSY,
+        },
         "ok": problems.is_empty(),
         "problems": problems,
     })
@@ -2351,6 +2938,13 @@ pub fn doctor_text(doc: &serde_json::Value) -> String {
             }
         ),
     ];
+    let steps = &doc["step_concurrency"];
+    if !steps.is_null() {
+        lines.push(format!(
+            "steps at once: at most {}, running {}",
+            steps["max"], steps["running"]
+        ));
+    }
     for dir in doc["kits"]["user_dirs"].as_array().into_iter().flatten() {
         lines.push(format!("user kits: {}", dir.as_str().unwrap_or("")));
     }
@@ -2421,8 +3015,8 @@ mod tests {
     #[test]
     fn a_spec_parses_with_its_defaults() {
         let spec = Spec::parse(SPEC).unwrap();
-        assert_eq!(spec.protocol, PROTOCOL);
-        assert!(spec.network);
+        assert_eq!(spec.protocol, 1);
+        assert_eq!(spec.network, Network::Hosts);
         assert_eq!(spec.kits, ["jdk25"]);
         assert!(spec.mounts[0].readonly);
         assert_eq!(spec.work.agent.as_ref().unwrap().max_turns, 3);
@@ -2493,7 +3087,7 @@ mod tests {
           "network": false, "work": {"checks": [{"workdir": "app", "argv": ["npm", "test"], "env": {"CI": "1"}}]},
           "timeout_seconds": 5}"#;
         let spec = Spec::parse(checks).unwrap();
-        assert!(!spec.network && !spec.is_agent());
+        assert!(spec.network == Network::Off && !spec.is_agent());
         let abs = checks.replacen("\"app\"", "\"/app\"", 1);
         assert!(Spec::parse(&abs).unwrap_err().contains("relative"));
         let empty = checks.replacen("[\"npm\", \"test\"]", "[]", 1);
@@ -2510,7 +3104,7 @@ mod tests {
     #[test]
     fn before_and_after_are_protocol_2() {
         let spec = Spec::parse(FIXED).unwrap();
-        assert_eq!(spec.protocol, PROTOCOL_NEXT);
+        assert_eq!(spec.protocol, PROTOCOL);
         assert_eq!(spec.work.before.len(), 1);
         assert_eq!(spec.work.after.len(), 2);
         assert_eq!(
@@ -2642,6 +3236,252 @@ mod tests {
         );
     }
 
+    const OPEN: &str = r#"{"protocol": 2, "name": "sf-open", "backend": "claude-anthropic", "workspace": "/w",
+      "network": "open", "deny_hosts": ["github.com", "api.github.com", "*.githubusercontent.com", "git.example.org:8443"],
+      "host_ports": [8080],
+      "work": {"agent": {"prompt_file": "p.md", "model": "haiku", "max_turns": 3, "args": ["--tools", "Read,WebFetch,WebSearch"]}},
+      "timeout_seconds": 60}"#;
+
+    #[test]
+    fn an_open_spec_parses_and_writes_back_the_same() {
+        let spec = Spec::parse(OPEN).unwrap();
+        assert_eq!(spec.network, Network::Open);
+        assert_eq!(spec.network.mode(), "open");
+        let doc = serde_json::to_value(&spec).unwrap();
+        assert_eq!(doc["network"], "open");
+        assert_eq!(doc["deny_hosts"].as_array().unwrap().len(), 4);
+        assert!(doc.get("open_probe").is_none());
+        // `true` and `false` write back as they were, so a protocol 1 spec's digest stays.
+        let closed = serde_json::to_value(Spec::parse(SPEC).unwrap()).unwrap();
+        assert_eq!(closed["network"], true);
+        assert!(closed.get("deny_hosts").is_none() && closed.get("host_ports").is_none());
+        let off = SPEC.replacen(
+            "\"timeout_seconds\"",
+            "\"network\": false, \"timeout_seconds\"",
+            1,
+        );
+        assert_eq!(
+            serde_json::to_value(Spec::parse(&off).unwrap()).unwrap()["network"],
+            false
+        );
+        let bad = OPEN.replacen("\"open\"", "\"wide\"", 1);
+        assert!(Spec::parse(&bad)
+            .unwrap_err()
+            .contains("true, false or \"open\""));
+    }
+
+    #[test]
+    fn an_open_spec_is_refused_with_allow_hosts_in_protocol_1_or_with_bad_fields() {
+        let err = |text: &str| Spec::parse(text).unwrap_err();
+        let listed = OPEN.replacen(
+            "\"network\"",
+            "\"allow_hosts\": [\"api.anthropic.com\"], \"network\"",
+            1,
+        );
+        assert!(err(&listed).contains("allow_hosts must be empty"));
+        let v1 = OPEN.replacen("\"protocol\": 2", "\"protocol\": 1", 1);
+        assert!(err(&v1).contains("needs protocol 2"));
+        for field in [
+            r#""deny_hosts": ["github.com"]"#,
+            r#""open_probe": "example.org""#,
+            r#""host_ports": [22]"#,
+        ] {
+            let closed = SPEC.replacen("\"work\"", &format!("{field}, \"work\""), 1);
+            assert!(err(&closed).contains("needs network \"open\""), "{field}");
+        }
+        for bad in [
+            "https://github.com",
+            "git hub.com",
+            "*",
+            "**",
+            "*.com",
+            "a.*.b",
+            "x:99999",
+            "",
+        ] {
+            let text = OPEN.replacen("\"github.com\"", &format!("{bad:?}"), 1);
+            assert!(err(&text).contains("deny_hosts"), "{bad}");
+        }
+        let probe = |p: &str| {
+            OPEN.replacen(
+                "\"network\"",
+                &format!("\"open_probe\": {p:?}, \"network\""),
+                1,
+            )
+        };
+        assert!(Spec::parse(&probe("example.org:443")).is_ok());
+        assert!(err(&probe("*.example.org")).contains("pattern"));
+        assert!(err(&probe("169.254.169.254:80")).contains("local network"));
+        assert!(err(&probe("raw.githubusercontent.com")).contains("in deny_hosts"));
+        let zero = OPEN.replacen("[8080]", "[0]", 1);
+        assert!(err(&zero).contains("host_ports"));
+    }
+
+    #[test]
+    fn web_tools_need_an_open_step() {
+        assert_eq!(
+            web_tool(&strings(&["--tools", "Read,WebFetch"])).as_deref(),
+            Some("WebFetch")
+        );
+        assert_eq!(
+            web_tool(&strings(&["--allowedTools=WebSearch"])).as_deref(),
+            Some("WebSearch")
+        );
+        assert_eq!(
+            web_tool(&strings(&[
+                "--allowedTools",
+                "Read",
+                "WebFetch(domain:x.org)"
+            ]))
+            .as_deref(),
+            Some("WebFetch(domain:x.org)")
+        );
+        assert_eq!(
+            web_tool(&strings(&[
+                "--disallowedTools",
+                "WebFetch,WebSearch",
+                "--tools",
+                "Read"
+            ])),
+            None
+        );
+        assert_eq!(web_tool(&strings(&["--tools", "Read"])), None);
+        let closed = SPEC
+            .replacen("\"protocol\": 1", "\"protocol\": 2", 1)
+            .replacen(
+                r#"["--tools", "Read"]"#,
+                r#"["--tools", "Read,WebFetch"]"#,
+                1,
+            );
+        assert!(Spec::parse(&closed)
+            .unwrap_err()
+            .contains("WebFetch needs network \"open\""));
+        // protocol 1 runs as it did
+        let v1 = SPEC.replacen(r#"["--tools", "Read"]"#, r#"["--tools", "WebFetch"]"#, 1);
+        assert!(Spec::parse(&v1).is_ok());
+    }
+
+    #[test]
+    fn deny_patterns_match_one_or_more_labels_and_name_a_host_to_probe() {
+        let p = |t: &str| deny_pattern(t).unwrap();
+        assert!(p("GitHub.com").matches("github.com", 443));
+        assert!(!p("github.com").matches("api.github.com", 443));
+        let one = p("*.githubusercontent.com");
+        assert!(one.matches("raw.githubusercontent.com", 443));
+        assert!(!one.matches("a.b.githubusercontent.com", 443));
+        assert!(!one.matches("githubusercontent.com", 443));
+        assert!(p("**.example.com").matches("a.b.example.com", 80));
+        assert!(!p("git.example.org:8443").matches("git.example.org", 443));
+        assert_eq!(one.instance(), "aisbx-probe.githubusercontent.com:443");
+        assert_eq!(p("git.example.org:8443").instance(), "git.example.org:8443");
+        assert_eq!(p("10.1.2.3").instance(), "10.1.2.3:443");
+    }
+
+    #[test]
+    fn an_open_step_denies_its_list_and_the_local_network_and_keeps_the_kits_hosts() {
+        let kit = strings(&["api.anthropic.com", "claude.ai"]);
+        let out = open_denies(&kit, &strings(&["GitHub.com", "github.com"])).unwrap();
+        assert_eq!(out[0], "github.com");
+        assert_eq!(out.len(), 1 + OPEN_DENIES.len());
+        assert!(!out.iter().any(|d| d.contains("anthropic") || d == "**"));
+        for local in [
+            "localhost",
+            "host.docker.internal",
+            "10.0.0.0/8",
+            "169.254.0.0/16",
+            "**:80",
+        ] {
+            assert!(out.iter().any(|d| d == local), "{local}");
+        }
+        assert!(open_denies(&strings(&["localhost:1234"]), &[]).is_err());
+    }
+
+    #[test]
+    fn an_open_proof_reaches_one_host_and_nothing_local_or_denied() {
+        let spec = Spec::parse(OPEN).unwrap();
+        let out: Vec<String> = spec
+            .probes()
+            .iter()
+            .map(|p| format!("{} {} {}", p.protocol, p.target, p.must_allow))
+            .collect();
+        assert_eq!(
+            out.iter()
+                .filter(|p| p.ends_with("true"))
+                .collect::<Vec<_>>(),
+            ["tcp example.com:443 true"]
+        );
+        for want in [
+            "tcp example.com:80 false",
+            "udp example.com:443 false",
+            "tcp github.com:443 false",
+            "tcp aisbx-probe.githubusercontent.com:443 false",
+            "tcp git.example.org:8443 false",
+            "tcp host.docker.internal:443 false",
+            "tcp host.docker.internal:8080 false",
+            "tcp localhost:8080 false",
+            "tcp 10.0.0.1:443 false",
+            "tcp 169.254.169.254:80 false",
+            "tcp 169.254.169.254:443 false",
+        ] {
+            assert!(out.iter().any(|p| p == want), "{want}: {out:?}");
+        }
+    }
+
+    #[test]
+    fn slots_limit_the_steps_at_once_and_free_when_a_step_ends() {
+        let dir = std::env::temp_dir().join(format!("aisbx-slots-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let a = take_slot(&dir, 2).unwrap().expect("a free slot");
+        let b = take_slot(&dir, 2).unwrap().expect("a second slot");
+        assert!(take_slot(&dir, 2).unwrap().is_none());
+        assert_eq!(running_steps(&dir), 2);
+        // A lower limit counts every held slot, whatever its number.
+        drop(a);
+        assert!(take_slot(&dir, 1).unwrap().is_none());
+        let c = take_slot(&dir, 2).unwrap().expect("the freed slot");
+        assert!(dir.join("0.lock").exists());
+        drop((b, c));
+        assert_eq!(running_steps(&dir), 0);
+        // Many at the same instant: exactly the limit get one.
+        let taken: Vec<Option<File>> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..8)
+                .map(|_| scope.spawn(|| take_slot(&dir, 3).unwrap()))
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        assert_eq!(taken.iter().filter(|t| t.is_some()).count(), 3);
+        drop(taken);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn concurrent_writers_of_one_proof_leave_valid_json() {
+        let dir = std::env::temp_dir().join(format!("aisbx-proof-race-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let green = vec![ProbeResult {
+            protocol: "tcp".into(),
+            target: "a:443".into(),
+            must_allow: true,
+            allowed: true,
+            detail: "x".repeat(4096),
+        }];
+        std::thread::scope(|scope| {
+            for i in 0..4 {
+                let (dir, green) = (&dir, &green);
+                scope.spawn(move || {
+                    for n in 0..20 {
+                        write_cached_proof(dir, "k", green, 1_000 + i * 100 + n);
+                        if let Ok(text) = fs::read_to_string(dir.join("k.json")) {
+                            serde_json::from_str::<CachedProof>(&text).expect("a whole file");
+                        }
+                    }
+                });
+            }
+        });
+        assert!(read_cached_proof(&dir, "k", 1_400).is_some());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn host_of_strips_scheme_port_and_path() {
         assert_eq!(host_of("API.Example.com:443"), "api.example.com");
@@ -2695,15 +3535,45 @@ mod tests {
             rule("sandbox:x", "allow", &["b", "a"]),
         ];
         let probes = probes(&strings(&["a"]), &[], true);
-        assert_eq!(proof_key(&a, &probes, true), proof_key(&b, &probes, true));
-        assert_ne!(proof_key(&a, &probes, true), proof_key(&a, &probes, false));
+        let key = |rules: &[sbx::PolicyRule], probes: &[Probe], network| {
+            proof_key(rules, probes, network, &[])
+        };
+        assert_eq!(
+            key(&a, &probes, Network::Hosts),
+            key(&b, &probes, Network::Hosts)
+        );
+        assert_ne!(
+            key(&a, &probes, Network::Hosts),
+            key(&a, &probes, Network::Off)
+        );
         let more = probes_with(&["a"], &["c"]);
-        assert_ne!(proof_key(&a, &probes, true), proof_key(&a, &more, true));
+        assert_ne!(
+            key(&a, &probes, Network::Hosts),
+            key(&a, &more, Network::Hosts)
+        );
         let mut fs = rule("sandbox:x", "allow", &["a"]);
         fs.resource_type = "filesystem:read".into();
         assert_eq!(
-            proof_key(&[fs], &probes, true),
-            proof_key(&[], &probes, true)
+            key(&[fs], &probes, Network::Hosts),
+            key(&[], &probes, Network::Hosts)
+        );
+        // Another sandbox with the same rules has the same key: steps share proofs.
+        let other = [
+            rule("sandbox:y", "allow", &["a", "b"]),
+            rule("global", "deny", &["**"]),
+        ];
+        assert_eq!(
+            key(&a, &probes, Network::Hosts),
+            key(&other, &probes, Network::Hosts)
+        );
+        // An open step never shares a closed step's proof, nor one with other denies.
+        assert_ne!(
+            key(&a, &probes, Network::Hosts),
+            key(&a, &probes, Network::Open)
+        );
+        assert_ne!(
+            proof_key(&a, &probes, Network::Open, &strings(&["github.com"])),
+            key(&a, &probes, Network::Open)
         );
     }
 
@@ -2786,6 +3656,45 @@ mod tests {
             allowed: allowed.iter().map(host).collect(),
             blocked: blocked.iter().map(host).collect(),
         }
+    }
+
+    #[test]
+    fn a_log_keeps_only_the_sandboxs_own_traffic() {
+        let mut log: sbx::PolicyLog = serde_json::from_str(
+            r#"{"allowed": [{"sandbox_id": "a", "host": "example.com:443", "count": 1},
+                            {"sandbox_id": "b", "host": "example.org:443", "count": 1},
+                            {"host": "old.example:443", "count": 1}],
+                "blocked": [{"sandbox_id": "b", "host": "github.com:443", "count": 2}]}"#,
+        )
+        .unwrap();
+        assert_eq!(keep_own_traffic(&mut log, "a", None), 2);
+        let hosts: Vec<&str> = log.allowed.iter().map(|h| h.host.as_str()).collect();
+        assert_eq!(hosts, ["example.com:443", "old.example:443"]);
+        assert!(log.blocked.is_empty());
+    }
+
+    #[test]
+    fn a_log_leaves_out_what_an_earlier_sandbox_of_the_name_saw() {
+        let mut log: sbx::PolicyLog = serde_json::from_str(
+            r#"{"allowed": [{"sandbox_id": "a", "host": "old.example:443", "count": 4,
+                             "last_seen": "2026-10-17T23:00:46.33636+02:00"},
+                            {"sandbox_id": "a", "host": "new.example:443", "count": 1,
+                             "last_seen": "2026-10-17T23:00:50+02:00"},
+                            {"sandbox_id": "a", "host": "odd.example:443", "count": 1,
+                             "last_seen": "yesterday"}],
+                "blocked": [{"sandbox_id": "a", "host": "github.com:443", "count": 2,
+                             "last_seen": "2026-10-17T21:00:49.9Z"}]}"#,
+        )
+        .unwrap();
+        let since = state::parse_rfc3339("2026-10-17T21:00:48.120Z");
+        assert_eq!(keep_own_traffic(&mut log, "a", since), 1);
+        let hosts: Vec<&str> = log.allowed.iter().map(|h| h.host.as_str()).collect();
+        assert_eq!(hosts, ["new.example:443", "odd.example:443"]);
+        assert_eq!(log.blocked.len(), 1);
+        assert_eq!(
+            log_epoch("2026-10-17T16:00:50-05:00"),
+            log_epoch("2026-10-17T21:00:50Z")
+        );
     }
 
     #[test]
@@ -2996,6 +3905,9 @@ mod tests {
             "before-failed.ndjson",
             "agent-local.ndjson",
             "agent-usage.ndjson",
+            "open.ndjson",
+            "agent-open.ndjson",
+            "busy.ndjson",
         ] {
             let mut phases = Vec::new();
             let mut inside = Vec::new();
@@ -3034,6 +3946,8 @@ mod tests {
                 "prewarmed.ndjson" => vec!["refuse", "log", "work", "log", "remove"],
                 // A failed work goes straight to remove.
                 "before-failed.ndjson" => vec!["refuse", "log", "work", "remove"],
+                // Refused for the concurrency limit: nothing was created.
+                "busy.ndjson" => vec!["refuse"],
                 _ => order[..order.len() - 1].to_vec(),
             };
             assert_eq!(done, expected, "{name}");
@@ -3059,6 +3973,7 @@ mod tests {
                 "agent-local.ndjson" => vec!["work start", "after start", "after ok", "work ok"],
                 // The usage stop ends the work with exit 75; after runs all the same.
                 "agent-usage.ndjson" => vec!["work start", "after start", "after ok", "work fail"],
+                "busy.ndjson" => vec![],
                 _ => vec!["work start", "work ok"],
             };
             assert_eq!(inside, fixed, "{name}");
@@ -3071,6 +3986,9 @@ mod tests {
             ("before-failed-report.json", "checks", 2),
             ("agent-local-report.json", "agent", 2),
             ("agent-usage-report.json", "agent", 2),
+            ("open-report.json", "checks", 2),
+            ("agent-open-report.json", "agent", 2),
+            ("busy-report.json", "checks", 2),
         ] {
             let d: serde_json::Value = serde_json::from_str(&fixture(name)).unwrap();
             assert_eq!(d["protocol"], protocol, "{name}");
@@ -3174,8 +4092,56 @@ mod tests {
             "before-failed-spec.json",
             "agent-local-spec.json",
             "agent-usage-spec.json",
+            "open-spec.json",
+            "agent-open-spec.json",
+            "busy-spec.json",
         ] {
             Spec::parse(&fixture(name)).unwrap_or_else(|e| panic!("{name}: {e}"));
         }
+        // An open step: the mode, where it went, and its proof.
+        for name in ["open-report.json", "agent-open-report.json"] {
+            let d: serde_json::Value = serde_json::from_str(&fixture(name)).unwrap();
+            assert_eq!(d["network"]["mode"], "open", "{name}");
+            assert!(
+                d["network"]["foreign"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&"example.com:443".into()),
+                "{name}"
+            );
+        }
+        let spec = Spec::parse(&fixture("agent-open-spec.json")).unwrap();
+        let policy: serde_json::Value =
+            serde_json::from_str(&fixture("agent-open-policy.json")).unwrap();
+        let probed: Vec<(String, bool)> = policy["probes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| {
+                (
+                    format!(
+                        "{} {}",
+                        p["protocol"].as_str().unwrap(),
+                        p["target"].as_str().unwrap()
+                    ),
+                    p["must_allow"].as_bool().unwrap(),
+                )
+            })
+            .collect();
+        let want: Vec<(String, bool)> = spec
+            .probes()
+            .iter()
+            .map(|p| (format!("{} {}", p.protocol, p.target), p.must_allow))
+            .collect();
+        assert_eq!(probed, want, "the recorded proof is the one the spec makes");
+        assert!(policy["probes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|p| p["allowed"] == p["must_allow"]));
+        let busy: serde_json::Value = serde_json::from_str(&fixture("busy-report.json")).unwrap();
+        assert_eq!(busy["exit"], EXIT_BUSY);
+        assert_eq!(busy["error_kind"], "concurrency");
+        assert_eq!(busy["phase"], "refuse");
     }
 }

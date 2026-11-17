@@ -1,0 +1,466 @@
+{
+  "binding_wildcards": [],
+  "cached": false,
+  "deny": [
+    "github.com",
+    "api.github.com",
+    "*.githubusercontent.com",
+    "git.example.org",
+    "**:80",
+    "localhost",
+    "host.docker.internal",
+    "127.0.0.0/8",
+    "10.0.0.0/8",
+    "172.16.0.0/12",
+    "192.168.0.0/16",
+    "169.254.0.0/16",
+    "0.0.0.0/8",
+    "::1/128",
+    "fc00::/7",
+    "fe80::/10"
+  ],
+  "key": "bbf328701af05ffd20a0ea30fd6577c92823cde6f72825d66257456f52793d59",
+  "network": "open",
+  "ok": true,
+  "probes": [
+    {
+      "allowed": true,
+      "detail": "Allowed: example.com:443",
+      "must_allow": true,
+      "protocol": "tcp",
+      "target": "example.com:443"
+    },
+    {
+      "allowed": false,
+      "detail": "Denied: example.com:80 — denied by local rule",
+      "must_allow": false,
+      "protocol": "tcp",
+      "target": "example.com:80"
+    },
+    {
+      "allowed": false,
+      "detail": "Denied: example.com:443 — no matching allow rule (default deny)",
+      "must_allow": false,
+      "protocol": "udp",
+      "target": "example.com:443"
+    },
+    {
+      "allowed": false,
+      "detail": "Denied: github.com:443 — denied by local rule",
+      "must_allow": false,
+      "protocol": "tcp",
+      "target": "github.com:443"
+    },
+    {
+      "allowed": false,
+      "detail": "Denied: api.github.com:443 — denied by local rule",
+      "must_allow": false,
+      "protocol": "tcp",
+      "target": "api.github.com:443"
+    },
+    {
+      "allowed": false,
+      "detail": "Denied: aisbx-probe.githubusercontent.com:443 — denied by local rule",
+      "must_allow": false,
+      "protocol": "tcp",
+      "target": "aisbx-probe.githubusercontent.com:443"
+    },
+    {
+      "allowed": false,
+      "detail": "Denied: git.example.org:443 — denied by local rule",
+      "must_allow": false,
+      "protocol": "tcp",
+      "target": "git.example.org:443"
+    },
+    {
+      "allowed": false,
+      "detail": "Denied: localhost:443 — denied by local rule",
+      "must_allow": false,
+      "protocol": "tcp",
+      "target": "host.docker.internal:443"
+    },
+    {
+      "allowed": false,
+      "detail": "Denied: localhost:443 — denied by local rule",
+      "must_allow": false,
+      "protocol": "tcp",
+      "target": "localhost:443"
+    },
+    {
+      "allowed": false,
+      "detail": "Denied: 127.0.0.1:443 — denied by local rule",
+      "must_allow": false,
+      "protocol": "tcp",
+      "target": "127.0.0.1:443"
+    },
+    {
+      "allowed": false,
+      "detail": "Denied: 10.0.0.1:443 — denied by local rule",
+      "must_allow": false,
+      "protocol": "tcp",
+      "target": "10.0.0.1:443"
+    },
+    {
+      "allowed": false,
+      "detail": "Denied: 172.16.0.1:443 — denied by local rule",
+      "must_allow": false,
+      "protocol": "tcp",
+      "target": "172.16.0.1:443"
+    },
+    {
+      "allowed": false,
+      "detail": "Denied: 192.168.0.1:443 — denied by local rule",
+      "must_allow": false,
+      "protocol": "tcp",
+      "target": "192.168.0.1:443"
+    },
+    {
+      "allowed": false,
+      "detail": "Denied: 169.254.169.254:80 — denied by local rule",
+      "must_allow": false,
+      "protocol": "tcp",
+      "target": "169.254.169.254:80"
+    },
+    {
+      "allowed": false,
+      "detail": "Denied: 169.254.169.254:443 — denied by local rule",
+      "must_allow": false,
+      "protocol": "tcp",
+      "target": "169.254.169.254:443"
+    },
+    {
+      "allowed": false,
+      "detail": "Denied: 1.1.1.1:53 — no matching allow rule (default deny)",
+      "must_allow": false,
+      "protocol": "udp",
+      "target": "1.1.1.1:53"
+    }
+  ],
+  "rules": [
+    {
+      "actions": [
+        "fs:mount:read"
+      ],
+      "decision": "allow",
+      "methods": [],
+      "resources": [
+        "**"
+      ],
+      "scope": "global",
+      "status": "active",
+      "targets": [],
+      "type": "filesystem:read"
+    },
+    {
+      "actions": [
+        "fs:mount:read",
+        "fs:mount:write"
+      ],
+      "decision": "allow",
+      "methods": [],
+      "resources": [
+        "**"
+      ],
+      "scope": "global",
+      "status": "active",
+      "targets": [],
+      "type": "filesystem:write"
+    },
+    {
+      "actions": [
+        "net:connect:tcp"
+      ],
+      "decision": "allow",
+      "methods": [],
+      "resources": [
+        "api.anthropic.com",
+        "archive.ubuntu.com",
+        "bridge.claudeusercontent.com",
+        "claude.ai",
+        "claude.com",
+        "code.claude.com",
+        "download.docker.com",
+        "downloads.claude.ai",
+        "mcp-proxy.anthropic.com",
+        "platform.claude.com",
+        "plugins-artifacts.gradle.org",
+        "plugins.gradle.org",
+        "ports.ubuntu.com",
+        "security.ubuntu.com"
+      ],
+      "scope": "sandbox",
+      "status": "active",
+      "targets": [],
+      "type": "network"
+    },
+    {
+      "actions": [
+        "net:connect:tcp",
+        "net:connect:udp"
+      ],
+      "decision": "deny",
+      "methods": [],
+      "resources": [
+        "github.com"
+      ],
+      "scope": "sandbox",
+      "status": "active",
+      "targets": [],
+      "type": "network"
+    },
+    {
+      "actions": [
+        "net:connect:tcp",
+        "net:connect:udp"
+      ],
+      "decision": "deny",
+      "methods": [],
+      "resources": [
+        "api.github.com"
+      ],
+      "scope": "sandbox",
+      "status": "active",
+      "targets": [],
+      "type": "network"
+    },
+    {
+      "actions": [
+        "net:connect:tcp",
+        "net:connect:udp"
+      ],
+      "decision": "deny",
+      "methods": [],
+      "resources": [
+        "*.githubusercontent.com"
+      ],
+      "scope": "sandbox",
+      "status": "active",
+      "targets": [],
+      "type": "network"
+    },
+    {
+      "actions": [
+        "net:connect:tcp",
+        "net:connect:udp"
+      ],
+      "decision": "deny",
+      "methods": [],
+      "resources": [
+        "git.example.org"
+      ],
+      "scope": "sandbox",
+      "status": "active",
+      "targets": [],
+      "type": "network"
+    },
+    {
+      "actions": [
+        "net:connect:tcp",
+        "net:connect:udp"
+      ],
+      "decision": "deny",
+      "methods": [],
+      "resources": [
+        "**:80"
+      ],
+      "scope": "sandbox",
+      "status": "active",
+      "targets": [],
+      "type": "network"
+    },
+    {
+      "actions": [
+        "net:connect:tcp",
+        "net:connect:udp"
+      ],
+      "decision": "deny",
+      "methods": [],
+      "resources": [
+        "localhost"
+      ],
+      "scope": "sandbox",
+      "status": "active",
+      "targets": [],
+      "type": "network"
+    },
+    {
+      "actions": [
+        "net:connect:tcp",
+        "net:connect:udp"
+      ],
+      "decision": "deny",
+      "methods": [],
+      "resources": [
+        "host.docker.internal"
+      ],
+      "scope": "sandbox",
+      "status": "active",
+      "targets": [],
+      "type": "network"
+    },
+    {
+      "actions": [
+        "net:connect:tcp",
+        "net:connect:udp"
+      ],
+      "decision": "deny",
+      "methods": [],
+      "resources": [
+        "127.0.0.0/8"
+      ],
+      "scope": "sandbox",
+      "status": "active",
+      "targets": [],
+      "type": "network"
+    },
+    {
+      "actions": [
+        "net:connect:tcp",
+        "net:connect:udp"
+      ],
+      "decision": "deny",
+      "methods": [],
+      "resources": [
+        "10.0.0.0/8"
+      ],
+      "scope": "sandbox",
+      "status": "active",
+      "targets": [],
+      "type": "network"
+    },
+    {
+      "actions": [
+        "net:connect:tcp",
+        "net:connect:udp"
+      ],
+      "decision": "deny",
+      "methods": [],
+      "resources": [
+        "172.16.0.0/12"
+      ],
+      "scope": "sandbox",
+      "status": "active",
+      "targets": [],
+      "type": "network"
+    },
+    {
+      "actions": [
+        "net:connect:tcp",
+        "net:connect:udp"
+      ],
+      "decision": "deny",
+      "methods": [],
+      "resources": [
+        "192.168.0.0/16"
+      ],
+      "scope": "sandbox",
+      "status": "active",
+      "targets": [],
+      "type": "network"
+    },
+    {
+      "actions": [
+        "net:connect:tcp",
+        "net:connect:udp"
+      ],
+      "decision": "deny",
+      "methods": [],
+      "resources": [
+        "169.254.0.0/16"
+      ],
+      "scope": "sandbox",
+      "status": "active",
+      "targets": [],
+      "type": "network"
+    },
+    {
+      "actions": [
+        "net:connect:tcp",
+        "net:connect:udp"
+      ],
+      "decision": "deny",
+      "methods": [],
+      "resources": [
+        "0.0.0.0/8"
+      ],
+      "scope": "sandbox",
+      "status": "active",
+      "targets": [],
+      "type": "network"
+    },
+    {
+      "actions": [
+        "net:connect:tcp",
+        "net:connect:udp"
+      ],
+      "decision": "deny",
+      "methods": [],
+      "resources": [
+        "::1/128"
+      ],
+      "scope": "sandbox",
+      "status": "active",
+      "targets": [],
+      "type": "network"
+    },
+    {
+      "actions": [
+        "net:connect:tcp",
+        "net:connect:udp"
+      ],
+      "decision": "deny",
+      "methods": [],
+      "resources": [
+        "fc00::/7"
+      ],
+      "scope": "sandbox",
+      "status": "active",
+      "targets": [],
+      "type": "network"
+    },
+    {
+      "actions": [
+        "net:connect:tcp",
+        "net:connect:udp"
+      ],
+      "decision": "deny",
+      "methods": [],
+      "resources": [
+        "fe80::/10"
+      ],
+      "scope": "sandbox",
+      "status": "active",
+      "targets": [],
+      "type": "network"
+    },
+    {
+      "actions": [
+        "net:connect:tcp"
+      ],
+      "decision": "allow",
+      "methods": [],
+      "resources": [
+        "**:443"
+      ],
+      "scope": "sandbox",
+      "status": "active",
+      "targets": [],
+      "type": "network"
+    },
+    {
+      "actions": [
+        "net:connect:tcp",
+        "net:connect:udp"
+      ],
+      "decision": "deny",
+      "methods": [],
+      "resources": [
+        "**"
+      ],
+      "scope": "global",
+      "status": "active",
+      "targets": [],
+      "type": "network"
+    }
+  ]
+}

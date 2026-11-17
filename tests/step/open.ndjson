@@ -1,0 +1,24 @@
+{"detail":"","kind":"phase","ms":0,"phase":"refuse","seq":1,"status":"start","t":"2026-11-17T08:20:41.783Z"}
+{"detail":"","kind":"phase","ms":206,"phase":"refuse","seq":2,"status":"ok","t":"2026-11-17T08:20:41.989Z"}
+{"detail":"","kind":"phase","ms":0,"phase":"create","seq":3,"status":"start","t":"2026-11-17T08:20:41.989Z"}
+{"argv":["aisbx","up","--backend","claude-anthropic","--skills","off","--no-mcp","--no-host-folders","--tmpfs-volumes","--name","sf-step-test-90490-8open","--deny-network","github.com","--deny-network","api.github.com","--deny-network","*.githubusercontent.com","--deny-network","**:80","--deny-network","localhost","--deny-network","host.docker.internal","--deny-network","127.0.0.0/8","--deny-network","10.0.0.0/8","--deny-network","172.16.0.0/12","--deny-network","192.168.0.0/16","--deny-network","169.254.0.0/16","--deny-network","0.0.0.0/8","--deny-network","::1/128","--deny-network","fc00::/7","--deny-network","fe80::/10","/private/var/folders/y_/m0dl5tss7738gq6vrppj2lxw0000gp/T/aisbx-step-test.ZpXPeC/8/ws"],"exit":0,"kind":"sbx","ms":33469,"phase":"create","seq":4,"t":"2026-11-17T08:21:15.459Z"}
+{"argv":["sbx","policy","allow","network","--sandbox","sf-step-test-90490-8open","**:443"],"exit":0,"kind":"sbx","ms":107,"phase":"create","seq":5,"t":"2026-11-17T08:21:15.566Z"}
+{"detail":"","kind":"phase","ms":33687,"phase":"create","seq":6,"status":"ok","t":"2026-11-17T08:21:15.676Z"}
+{"detail":"","kind":"phase","ms":0,"phase":"prove","seq":7,"status":"start","t":"2026-11-17T08:21:15.676Z"}
+{"argv":["sbx","policy","ls","sf-step-test-90490-8open","--json"],"exit":0,"kind":"sbx","ms":112,"phase":"prove","seq":8,"t":"2026-11-17T08:21:15.789Z"}
+{"cached":true,"detail":"","kind":"phase","ms":129,"phase":"prove","probes":17,"seq":9,"status":"ok","t":"2026-11-17T08:21:15.806Z"}
+{"detail":"network-before.json","kind":"phase","ms":0,"phase":"log","seq":10,"status":"start","t":"2026-11-17T08:21:15.806Z"}
+{"argv":["sbx","policy","log","sf-step-test-90490-8open","--json"],"exit":0,"kind":"sbx","ms":106,"phase":"log","seq":11,"t":"2026-11-17T08:21:15.913Z"}
+{"detail":"network-before.json","kind":"phase","ms":107,"phase":"log","seq":12,"status":"ok","t":"2026-11-17T08:21:15.913Z"}
+{"detail":"","kind":"phase","ms":0,"phase":"work","seq":13,"status":"start","t":"2026-11-17T08:21:15.913Z"}
+{"argv":["sbx","exec","-w","/private/var/folders/y_/m0dl5tss7738gq6vrppj2lxw0000gp/T/aisbx-step-test.ZpXPeC/8/ws","sf-step-test-90490-8open","sh","-c","for u in https://example.com http://example.com https://github.com https://api.github.com https://raw.githubusercontent.com https://host.docker.internal:8080 https://10.0.0.1 http://169.254.169.254; do c=$(curl -s -m 10 -o /dev/null -w '%{http_code}' $u); echo \"$u ${c:-none}\"; done"],"exit":0,"kind":"sbx","ms":679,"phase":"work","seq":14,"t":"2026-11-17T08:21:16.593Z"}
+{"argv":["sh","-c","for u in https://example.com http://example.com https://github.com https://api.github.com https://raw.githubusercontent.com https://host.docker.internal:8080 https://10.0.0.1 http://169.254.169.254; do c=$(curl -s -m 10 -o /dev/null -w '%{http_code}' $u); echo \"$u ${c:-none}\"; done"],"exit":0,"index":0,"kind":"check","ms":679,"phase":"work","seq":15,"t":"2026-11-17T08:21:16.593Z","timed_out":false,"workdir":""}
+{"detail":"","kind":"phase","ms":681,"phase":"work","seq":16,"status":"ok","t":"2026-11-17T08:21:16.595Z"}
+{"detail":"network-after.json","kind":"phase","ms":0,"phase":"log","seq":17,"status":"start","t":"2026-11-17T08:21:16.595Z"}
+{"argv":["sbx","policy","log","sf-step-test-90490-8open","--json"],"exit":0,"kind":"sbx","ms":108,"phase":"log","seq":18,"t":"2026-11-17T08:21:16.703Z"}
+{"detail":"network-after.json","kind":"phase","ms":109,"phase":"log","seq":19,"status":"ok","t":"2026-11-17T08:21:16.704Z"}
+{"detail":"","kind":"phase","ms":0,"phase":"remove","seq":20,"status":"start","t":"2026-11-17T08:21:16.704Z"}
+{"argv":["sbx","rm","--force","sf-step-test-90490-8open"],"exit":0,"kind":"sbx","ms":420,"phase":"remove","seq":21,"t":"2026-11-17T08:21:17.125Z"}
+{"argv":["sbx","ls","--json"],"exit":0,"kind":"sbx","ms":121,"phase":"remove","seq":22,"t":"2026-11-17T08:21:17.247Z"}
+{"detail":"","kind":"phase","ms":542,"phase":"remove","seq":23,"status":"ok","t":"2026-11-17T08:21:17.247Z"}
+{"detail":"","kind":"phase","ms":35464,"phase":"report","seq":24,"status":"ok","t":"2026-11-17T08:21:17.358Z"}

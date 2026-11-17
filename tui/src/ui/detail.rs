@@ -1986,6 +1986,7 @@ mod tests {
             reason: String::new(),
             last_seen: "2026-07-24T11:00:01Z".into(),
             count: 1,
+            ..Default::default()
         });
         assert_eq!(pin(&network(&sb, &app, 60)), PIN_NETWORK);
         assert_eq!(pin(&filesystem(&sb, &app, 60)), PIN_FILESYSTEM);
