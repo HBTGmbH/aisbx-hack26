@@ -1,0 +1,4 @@
+{"protocol": 2, "name": "sf-step-test-90490-8open", "backend": "claude-anthropic", "workspace": "/var/folders/y_/m0dl5tss7738gq6vrppj2lxw0000gp/T//aisbx-step-test.ZpXPeC/8/ws",
+ "network": "open", "deny_hosts": ["github.com", "api.github.com", "*.githubusercontent.com"], "host_ports": [8080],
+ "work": {"checks": [{"workdir": "", "argv": ["sh", "-c", "for u in https://example.com http://example.com https://github.com https://api.github.com https://raw.githubusercontent.com https://host.docker.internal:8080 https://10.0.0.1 http://169.254.169.254; do c=$(curl -s -m 10 -o /dev/null -w '%{http_code}' $u); echo \"$u ${c:-none}\"; done"]}]},
+ "timeout_seconds": 120}

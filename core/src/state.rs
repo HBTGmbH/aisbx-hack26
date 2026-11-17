@@ -361,9 +361,17 @@ impl Registry {
             .parent()
             .context("registry path has no parent directory")?;
         fs::create_dir_all(dir)?;
-        let tmp = self.path.with_extension("json.tmp");
-        fs::write(&tmp, serde_json::to_vec_pretty(&self.doc)?)?;
-        fs::rename(&tmp, &self.path)?;
+        // One temporary file per process: steps that create at the same time each rename a
+        // whole file of their own, never one another writes into.
+        let tmp = self
+            .path
+            .with_extension(format!("json.{}.tmp", std::process::id()));
+        let written = fs::write(&tmp, serde_json::to_vec_pretty(&self.doc)?)
+            .and_then(|()| fs::rename(&tmp, &self.path));
+        if written.is_err() {
+            let _ = fs::remove_file(&tmp);
+        }
+        written?;
         self.dirty = false;
         Ok(())
     }

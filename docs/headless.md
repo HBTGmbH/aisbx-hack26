@@ -218,7 +218,8 @@ The agent's output comes through untouched:
 process: create with every unwanted host denied, prove the network, run the agent or a list of check commands
 (with the spec's fixed commands before and after it), read the proxy log, remove, report. A script calls it once per pipeline step, reads NDJSON events from stdout while
 it runs, and finds the artefacts (`stream.ndjson` or `checks.json`, `policy.json`, the proxy logs, `report.json`) in
-`DIR` afterwards. `--prewarm` creates and proves only, for a later step with the same spec. `step --protocol`
+`DIR` afterwards. A spec may also open the whole web on 443 to a research step, with a proven deny list. `--prewarm`
+creates and proves only, for a later step with the same spec. `step --protocol`
 prints the protocol version a script pins. [The step protocol](step-protocol.md) is the contract, with the spec
 file, every event, the report and the exit codes.
 
@@ -233,8 +234,9 @@ describes the output and the image key.
 
 `doctor [--json]` says what a script needs before its first `up` or `step`: the aisbx version and its step
 protocol, the sbx version and whether it is new enough, whether sbx is signed in, whether the policy has its
-deny-all fallback, the user kit folders searched, and every kit found or skipped. It exits 0 whatever it finds; the
-`problems` list and `ok` say what is wrong.
+deny-all fallback, the user kit folders searched, every kit found or skipped, and how many steps may run at once
+and run now (`step_concurrency`, see [Several steps at once](step-protocol.md#several-steps-at-once-protocol-2)). It
+exits 0 whatever it finds; the `problems` list and `ok` say what is wrong.
 
 `doctor --kit K[,K…] [--kit …] [--backend B]` also says, for each kit set, whether its kit images are `ready` for a
 step with `kits_prebuilt`, `missing` or `stale` (built before a kit file changed). Each `--kit` is one set, its
