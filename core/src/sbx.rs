@@ -1427,12 +1427,13 @@ pub fn attach_argv(name: &str, workdir: Option<&Path>) -> Vec<String> {
 /// [`attach_argv`], this takes over the terminal - `-it` needs a real TTY.
 ///
 /// `workdir` is the sandbox's start folder, so a shell opens where its agent does. `None`
-/// leaves the default, which is the top of the workspace.
+/// leaves the default, which is the top of the workspace. It is a host path; `exec -w` gets it as
+/// the sandbox sees it ([`sandbox_path`]: `/c/work` for `C:\work` on Windows).
 pub fn shell_argv(name: &str, workdir: Option<&Path>) -> Vec<String> {
     let mut argv = vec!["sbx".to_string(), "exec".into(), "-it".into()];
     if let Some(dir) = workdir {
         argv.push("-w".into());
-        argv.push(dir.display().to_string());
+        argv.push(sandbox_path(dir));
     }
     argv.extend([
         name.to_string(),
@@ -1488,7 +1489,8 @@ pub fn prompt_upload_argv(name: &str, run_dir: &str) -> Vec<String> {
 }
 
 /// Launch `agent_argv` non-interactively through [`HEADLESS_WRAPPER`], optionally in `workdir`
-/// (`-w`; the default is the primary workspace — in clone mode, the sandbox's own clone).
+/// (`-w`, as the sandbox sees it: [`sandbox_path`]; the default is the primary workspace — in clone
+/// mode, the sandbox's own clone).
 pub fn headless_exec_argv(
     name: &str,
     workdir: Option<&Path>,
@@ -1498,7 +1500,7 @@ pub fn headless_exec_argv(
     let mut argv = vec!["sbx".to_string(), "exec".into()];
     if let Some(dir) = workdir {
         argv.push("-w".into());
-        argv.push(dir.display().to_string());
+        argv.push(sandbox_path(dir));
     }
     argv.extend([
         name.to_string(),
@@ -2653,6 +2655,16 @@ mod path_tests {
         );
         assert_eq!(without_drive(r"C:\data"), r"\data");
         assert_eq!(without_drive("/w:x"), "/w:x");
+    }
+
+    #[test]
+    fn exec_gets_the_workdir_as_the_sandbox_sees_it() {
+        let shell = shell_argv("box", Some(Path::new(r"C:\workspace\notes")));
+        assert_eq!(shell[3..5], ["-w", "/c/workspace/notes"]);
+        let headless =
+            headless_exec_argv("box", Some(Path::new(r"\\?\C:\workspace")), "/tmp/r", &[]);
+        assert_eq!(headless[2..4], ["-w", "/c/workspace"]);
+        assert_eq!(shell_argv("box", Some(Path::new("/w/app")))[4], "/w/app");
     }
 }
 
